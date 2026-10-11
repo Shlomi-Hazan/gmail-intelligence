@@ -1,7 +1,7 @@
 # Development Workflow
 
 ## Setup and daily commands
-Requires Python >= 3.10 and Git. Runtime dependencies: none (stdlib only).
+Requires Python >= 3.10 and Git. Use a project-local venv; runtime dependencies are three free libraries (see [SETUP-GMAIL.md](SETUP-GMAIL.md) §8). `version` and `doctor` work without them.
 
 ```bash
 git clone https://github.com/Shlomi-Hazan/gmail-intelligence.git && cd gmail-intelligence
@@ -9,13 +9,13 @@ git config core.hooksPath .githooks                     # enable the local secre
 PYTHONPATH=src python3 -m gmail_intelligence --help     # run without installing
 PYTHONPATH=src python3 -m gmail_intelligence version
 PYTHONPATH=src python3 -m gmail_intelligence doctor     # offline prerequisite check
-python3 -I -m unittest discover -s tests -v             # all tests
+python3 -m venv .venv && .venv/bin/pip install -e .       # dependencies + editable install (development)
+# If `gmail-intelligence` fails with ModuleNotFoundError: the editable .pth file got the macOS "hidden" flag
+# (iCloud-synced folder + Python 3.13+). Fix: chflags nohidden .venv/lib/python3.13/site-packages/*.pth
+# or use a normal install: .venv/bin/pip install .   (`gmail-intelligence doctor` warns about this)
+.venv/bin/python -I -m unittest discover -s tests -v    # all tests (offline; no Google account needed)
 ```
-Optional editable install (puts `gmail-intelligence` on PATH; needs `setuptools` available, which pip downloads from PyPI at no cost):
-```bash
-python3 -m venv .venv && . .venv/bin/activate && pip install -e .
-```
-The CLI is fully offline (no Gmail, Google Cloud or network access). Exit codes: 0 success, 1 `doctor` found a failed check, 2 usage error. Local runtime data must live outside the repository.
+`version` and `doctor` are offline. Only `auth login` and `gmail check` contact Google (M1; see [SETUP-GMAIL.md](SETUP-GMAIL.md)). Exit codes: 0 success, 1 operational failure, 2 usage error. Local runtime data must live outside the repository.
 
 ## Branches and PRs
 - `main` is stable and protected by ruleset `main-pr-only` (PR required; no force-push; no deletion). No direct pushes.
@@ -30,7 +30,7 @@ Small, genuine, reviewable; imperative English subject, Conventional-Commit styl
 Work milestone by milestone. Do not start the next milestone without explicit owner approval. Out-of-scope discoveries become new Issues, not silent changes.
 
 ## Validation before reporting completion
-1. All tests pass: `python3 -I -m unittest discover -s tests -v`; `python3 -m compileall -q src tests scripts`; `python3 -I scripts/scan_secrets.py --all` reports nothing; `git diff --check` is clean. The `gmail-project-check` Skill runs this gate.
+1. All tests pass: ``.venv/bin/python -I -m unittest discover -s tests -v`; `.venv/bin/python -m compileall -q src tests scripts`; `python3 -I scripts/scan_secrets.py --all` reports nothing; `git diff --check` is clean. The `gmail-project-check` Skill runs this gate.
 2. Markdown relative links resolve.
 3. `git ls-files` contains no env/token/db/mail files.
 4. Working tree clean; branch pushed; PR base/head correct.

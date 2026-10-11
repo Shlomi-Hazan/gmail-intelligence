@@ -8,7 +8,7 @@ Refs #
 
 ## Tests / Validation evidence
 <!-- Commands run and results (paste output, not claims) -->
-- [ ] `python3 -I -m unittest discover -s tests -v`
+- [ ] `.venv/bin/python -I -m unittest discover -s tests -v`
 - [ ] `python3 -I scripts/scan_secrets.py --all`
 - [ ] Markdown links verified
 - [ ] Other:

@@ -8,7 +8,12 @@ dynamic = ["version"]
 description = "Local-first, AI-assisted Gmail management (early development; no Gmail integration yet)"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []  # Zero Additional Cost: stdlib only until a dependency is reviewed and approved
+# All free and open source. Official Google libraries for OAuth/Gmail; keyring for the macOS Keychain.
+dependencies = [
+    "google-api-python-client>=2.100",
+    "google-auth-oauthlib>=1.2",
+    "keyring>=25",
+]
 
 [project.scripts]
 gmail-intelligence = "gmail_intelligence.cli:main"

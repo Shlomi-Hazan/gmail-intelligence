@@ -1,6 +1,6 @@
 # Gmail Intelligence
 
-> **Status: M0C — Python development foundation (in review). Gmail integration is NOT implemented.**
+> **Status: M1 — read-only Gmail connection (in review). Owner-reported live verification succeeded (see docs/SETUP-GMAIL.md). No mailbox features exist yet.**
 > No application code exists yet. This repository currently contains documentation and project scaffolding only.
 
 ## Vision
@@ -24,10 +24,11 @@ Mailbox data is processed and stored on the user's machine. Nothing is uploaded 
 ## Quick start (offline; no Gmail access)
 ```bash
 git config core.hooksPath .githooks
-PYTHONPATH=src python3 -m gmail_intelligence doctor
-python3 -I -m unittest discover -s tests
+python3 -m venv .venv && .venv/bin/pip install .
+.venv/bin/gmail-intelligence doctor
+.venv/bin/python -I -m unittest discover -s tests
 ```
-Setup details, Skills and the PR workflow: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Setup details, Skills and the PR workflow: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Connecting Gmail (read-only, free): [docs/SETUP-GMAIL.md](docs/SETUP-GMAIL.md).
 
 ## Milestones
 

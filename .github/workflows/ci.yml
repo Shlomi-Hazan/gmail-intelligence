@@ -24,9 +24,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Install dependencies
+        run: python3 -m venv .venv && .venv/bin/pip install -e .
       - name: Syntax check
-        run: python3 -m compileall -q src tests scripts
+        run: .venv/bin/python -m compileall -q src tests scripts
       - name: Unit tests
-        run: python3 -I -m unittest discover -s tests -v
+        run: .venv/bin/python -I -m unittest discover -s tests -v
       - name: Full-repository secret scan
         run: python3 -I scripts/scan_secrets.py --all

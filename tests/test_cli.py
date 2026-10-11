@@ -67,11 +67,36 @@ class CliTests(unittest.TestCase):
         self.assertEqual(run_cli().returncode, 2)
 
 
-class OfflineGuarantees(unittest.TestCase):
-    def test_runtime_has_no_dependencies(self):
-        self.assertRegex((ROOT / "pyproject.toml").read_text(), r"(?m)^dependencies = \[\]")
+class HiddenPthTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, "chflags") and hasattr(__import__("stat"), "UF_HIDDEN"), "macOS/BSD file flags only")
+    def test_detects_hidden_pth_files(self):
+        import stat
+        from gmail_intelligence import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            visible, hidden = Path(tmp, "a.pth"), Path(tmp, "b.pth")
+            visible.write_text("x\n")
+            hidden.write_text("x\n")
+            os.chflags(hidden, stat.UF_HIDDEN)
+            self.assertEqual(cli.hidden_pth_files([tmp]), [hidden])
+            os.chflags(hidden, 0)
+            self.assertEqual(cli.hidden_pth_files([tmp]), [])
 
-    def test_source_imports_only_stdlib_and_no_network_modules(self):
+    def test_no_hidden_pth_for_missing_dir(self):
+        from gmail_intelligence import cli
+        self.assertEqual(cli.hidden_pth_files(["/nonexistent-dir-for-test"]), [])
+
+
+class OfflineGuarantees(unittest.TestCase):
+    # Only these modules may import third-party / Google libraries (all lazily imported by the CLI).
+    GOOGLE_MODULES = {"oauth.py", "gmail.py", "keystore.py"}
+
+    def test_runtime_dependencies_are_the_reviewed_set(self):
+        text = (ROOT / "pyproject.toml").read_text()
+        block = re.search(r"(?s)^dependencies = \[(.*?)\]", text, re.M).group(1)
+        names = sorted(re.findall(r'"([A-Za-z0-9_.\-]+)', block))
+        self.assertEqual(names, ["google-api-python-client", "google-auth-oauthlib", "keyring"])
+
+    def test_only_google_modules_import_third_party_or_network_code(self):
         stdlib = set(sys.stdlib_module_names) | {"gmail_intelligence"}
         for path in SRC.rglob("*.py"):
             for node in ast.walk(ast.parse(path.read_text())):
@@ -82,8 +107,20 @@ class OfflineGuarantees(unittest.TestCase):
                     names = [node.module]
                 for name in names:
                     top = name.split(".")[0]
+                    if path.name in self.GOOGLE_MODULES:
+                        self.assertNotIn(top, {"socket", "ssl", "http", "urllib", "smtplib", "imaplib", "poplib"}, path.name)
+                        continue
                     self.assertIn(top, stdlib, f"{path.name}: non-stdlib import {name}")
                     self.assertNotIn(top, FORBIDDEN_IMPORTS, f"{path.name}: forbidden import {name}")
+
+    def test_local_commands_do_not_load_google_libraries(self):
+        code = ("import sys; from gmail_intelligence.cli import main; "
+                "main(['version']); main(['doctor']); "
+                "bad=[m for m in sys.modules if m.split('.')[0] in ('google','googleapiclient','keyring','requests','httplib2')]; "
+                "print(bad)")
+        env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(SRC)}
+        proc = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True)
+        self.assertTrue(proc.stdout.strip().endswith("[]"), proc.stdout + proc.stderr)
 
     def test_secret_scanner_compatible_with_repository(self):
         proc = subprocess.run([sys.executable, "-I", str(ROOT / "scripts" / "scan_secrets.py"), "--all"],
