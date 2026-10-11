@@ -26,7 +26,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | ID | Decision |
 |----|----------|
 | D12 | M1 uses a **single read-only Desktop OAuth client** with exactly the `gmail.readonly` scope (PKCE, loopback, no `include_granted_scopes`). The separate write client from the M0B recommendation (P6) is deferred to M4. Granted scopes are verified and anything broader is rejected. |
-| D13 | Tokens live in the macOS Keychain via `keyring` (verified at runtime to be the macOS backend; no plaintext fallback). The OAuth client file is stored with mode 600 under `~/Library/Application Support/gmail-intelligence/`. Live Keychain behavior is not yet verified (checked only with fakes). |
+| D13 | Tokens live in the macOS Keychain via `keyring` (verified at runtime to be the macOS backend; no plaintext fallback). The OAuth client file is stored with mode 600 under `~/Library/Application Support/gmail-intelligence/`. Live behavior: the owner reported a successful login with tokens stored in the Keychain (their terminal output; not independently reproduced). |
 | D14 | Reviewed free dependencies: `google-api-python-client`, `google-auth-oauthlib`, `keyring`. The Gmail adapter exposes only `get_profile` and `list_labels` (label ids/types, no names). |
 | Q12 update | See docs/SETUP-GMAIL.md §1: still no official statement that a personal Gmail OAuth app is free; no official page requires billing. The live setup is a manual checkpoint: stop if any billing prompt appears. |
 

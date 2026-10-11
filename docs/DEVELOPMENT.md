@@ -9,7 +9,10 @@ git config core.hooksPath .githooks                     # enable the local secre
 PYTHONPATH=src python3 -m gmail_intelligence --help     # run without installing
 PYTHONPATH=src python3 -m gmail_intelligence version
 PYTHONPATH=src python3 -m gmail_intelligence doctor     # offline prerequisite check
-python3 -m venv .venv && .venv/bin/pip install -e .       # dependencies for auth/gmail commands and the full test suite
+python3 -m venv .venv && .venv/bin/pip install -e .       # dependencies + editable install (development)
+# If `gmail-intelligence` fails with ModuleNotFoundError: the editable .pth file got the macOS "hidden" flag
+# (iCloud-synced folder + Python 3.13+). Fix: chflags nohidden .venv/lib/python3.13/site-packages/*.pth
+# or use a normal install: .venv/bin/pip install .   (`gmail-intelligence doctor` warns about this)
 .venv/bin/python -I -m unittest discover -s tests -v    # all tests (offline; no Google account needed)
 ```
 `version` and `doctor` are offline. Only `auth login` and `gmail check` contact Google (M1; see [SETUP-GMAIL.md](SETUP-GMAIL.md)). Exit codes: 0 success, 1 operational failure, 2 usage error. Local runtime data must live outside the repository.

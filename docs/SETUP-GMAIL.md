@@ -1,6 +1,6 @@
 # Gmail read-only connection: setup and usage (M1)
 
-**Verification status:** everything below the code level is covered by **offline tests only** (synthetic credentials, fake Keychain, mocked Google responses). **A live OAuth login and a live Gmail call have NOT been performed.** Do not treat the connection as verified until `gmail check` succeeds on your account (see §6).
+**Verification status:** the code is covered by offline tests (synthetic credentials, fake Keychain, mocked Google responses). **Live verification:** the project owner reported, from their own terminal output, that OAuth login succeeded, tokens were stored in the macOS Keychain, `gmail check` returned profile counts and the label count, nothing in the mailbox was modified, and Google Cloud billing stayed disabled during setup. This is the owner's report; it was not independently performed or reproduced by the assistant that wrote the code.
 
 Scope requested, exactly one: `https://www.googleapis.com/auth/gmail.readonly`. The app cannot modify, send or delete mail with it, and the code contains no such calls.
 
@@ -26,7 +26,8 @@ What the official pages say / do not say:
 .venv/bin/gmail-intelligence auth setup --import ~/Downloads/<downloaded-file>.json
 ```
 
-## 3. Commands (project venv: `python3 -m venv .venv && .venv/bin/pip install -e .`)
+## 3. Commands (project venv: `python3 -m venv .venv && .venv/bin/pip install .`)
+Use `pip install .` (a normal install) if you only want to run the CLI; use `pip install -e .` only when developing (see the first row of §7 if the editable install stops working). Re-run `pip install .` after pulling code changes.
 | Command | What it does | Contacts Google? |
 |---|---|---|
 | `gmail-intelligence auth setup [--import FILE]` | Shows these steps / validates and stores the client file | no |
@@ -45,12 +46,13 @@ Exit codes: 0 success; 1 operational failure (not configured, not logged in, aut
 ## 5. Disconnect
 `auth logout` deletes the local item only. To revoke Google's side, remove the app at https://myaccount.google.com/permissions. Delete the client file manually if you want it gone.
 
-## 6. First live verification (not yet performed; requires your explicit go-ahead)
+## 6. What the live check reads (verified by the owner, see top)
 `auth login` will request only the read-only scope, show the authorized email and ask for confirmation. `gmail check` then makes exactly two read calls: `users.getProfile` (email, message/thread totals) and `users.labels.list` (only the label **count** is shown; names are not displayed). No message, subject, body or attachment is read.
 
 ## 7. Common problems
 | Symptom | Cause / fix |
 |---|---|
+| `ModuleNotFoundError: No module named 'gmail_intelligence'` from the installed command, but `PYTHONPATH=src python3 -m gmail_intelligence` works | **Cause:** an editable install relies on a `.pth` file in the venv; on macOS folders synced by iCloud (e.g. `~/Documents`) the file can acquire the *hidden* flag, and Python 3.13+ deliberately ignores hidden `.pth` files. Confirm: `ls -lO .venv/lib/python3.13/site-packages/*.pth` shows `hidden`, and `gmail-intelligence doctor` warns. **Fix:** `chflags nohidden .venv/lib/python3.13/site-packages/*.pth`, or avoid the problem with a normal install: `.venv/bin/pip install .` |
 | "stored authorization is expired or revoked" after about a week | Testing-status refresh tokens expire after 7 days: run `auth login` again |
 | "Google did not return a refresh token" | Revoke the app at myaccount.google.com/permissions, then `auth login` |
 | "unexpected OAuth scopes granted" | Credentials with broader scopes are rejected on purpose; remove extra scopes in the consent configuration |

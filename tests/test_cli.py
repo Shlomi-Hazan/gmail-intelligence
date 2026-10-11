@@ -67,6 +67,25 @@ class CliTests(unittest.TestCase):
         self.assertEqual(run_cli().returncode, 2)
 
 
+class HiddenPthTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, "chflags") and hasattr(__import__("stat"), "UF_HIDDEN"), "macOS/BSD file flags only")
+    def test_detects_hidden_pth_files(self):
+        import stat
+        from gmail_intelligence import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            visible, hidden = Path(tmp, "a.pth"), Path(tmp, "b.pth")
+            visible.write_text("x\n")
+            hidden.write_text("x\n")
+            os.chflags(hidden, stat.UF_HIDDEN)
+            self.assertEqual(cli.hidden_pth_files([tmp]), [hidden])
+            os.chflags(hidden, 0)
+            self.assertEqual(cli.hidden_pth_files([tmp]), [])
+
+    def test_no_hidden_pth_for_missing_dir(self):
+        from gmail_intelligence import cli
+        self.assertEqual(cli.hidden_pth_files(["/nonexistent-dir-for-test"]), [])
+
+
 class OfflineGuarantees(unittest.TestCase):
     # Only these modules may import third-party / Google libraries (all lazily imported by the CLI).
     GOOGLE_MODULES = {"oauth.py", "gmail.py", "keystore.py"}

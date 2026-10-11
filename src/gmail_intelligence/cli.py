@@ -7,6 +7,8 @@ Exit codes: 0 success, 1 operational failure (not ready, auth/API/storage error,
 import argparse
 import os
 import shutil
+import site
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -25,12 +27,31 @@ def _git(*args, cwd=None):
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
+def hidden_pth_files(dirs=None):
+    """`.pth` files carrying the macOS hidden flag. Python 3.13+ silently ignores them, which breaks
+    editable installs (seen on iCloud-synced folders such as ~/Documents)."""
+    hidden_flag = getattr(stat, "UF_HIDDEN", 0)
+    if dirs is None:
+        dirs = site.getsitepackages()
+    found = []
+    for d in dirs:
+        for p in sorted(Path(d).glob("*.pth")):
+            if getattr(p.stat(), "st_flags", 0) & hidden_flag:
+                found.append(p)
+    return found
+
+
 def doctor_checks(cwd=None):
     """Return a list of (status, name, detail) for local development prerequisites only."""
     checks = []
     have = sys.version_info[:3]
     ok = have >= MIN_PYTHON
     checks.append((OK if ok else FAIL, "python", "%d.%d.%d (need >= %d.%d)" % (*have, *MIN_PYTHON)))
+
+    hidden = hidden_pth_files()
+    if hidden:
+        checks.append((WARN, "editable install", f"{len(hidden)} hidden .pth file(s) are ignored by Python; "
+                       f"fix: chflags nohidden {Path(hidden[0]).parent}/*.pth  (or use: pip install .)"))
 
     if _git("--version") is None:
         checks.append((FAIL, "git", "git not found"))
