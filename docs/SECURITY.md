@@ -78,7 +78,7 @@ Controls: **P**reventive · **D**etective · **R**ecovery.
 | Secret scanning, push protection | Native GitHub features | **Unavailable** for this private repo on the current plan (API: "not available for this repository"). **Accepted gap** (decision); the plan is not upgraded (zero-cost). |
 | Local pre-commit scanner | **Convention** (opt-in per clone: `git config core.hooksPath .githooks`) | Covered by a 27-test regression suite (§5.3) |
 | No auto-merge, Draft PRs, review checklist | **Convention** | See DEVELOPMENT.md |
-| GitHub CI | None exists | The scanner is **not** run in CI, so no equivalent server-side protection is claimed |
+| GitHub CI | Workflow file exists but is **manual-trigger only** (billing could not be verified; see DEVELOPMENT.md) | The scanner does not run automatically on PRs, so no server-side protection is claimed |
 
 ### 5.3 Local scanner: behavior and limits
 - Scans the **exact staged blobs** from the Git index (not the working tree), enumerating with NUL-delimited Git output and rename/copy detection disabled, so every added/modified/type-changed entry is scanned under its destination path regardless of Git's rename/copy classification. Deleted entries are skipped.

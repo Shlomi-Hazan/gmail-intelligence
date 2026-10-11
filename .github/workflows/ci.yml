@@ -1,0 +1,32 @@
+# Minimal CI: stdlib only, read-only, no secrets, no network services.
+#
+# DISABLED FOR PRs ON PURPOSE (Zero Additional Cost): GitHub's billing page says private-repo
+# Actions minutes beyond the free quota are billed when a payment method is on file, and this
+# account's payment/budget settings could not be verified via the API. To enable PR checks, first
+# confirm at https://github.com/settings/billing that no payment method is attached (usage then
+# blocks instead of billing) or that the Actions budget is $0, then replace the trigger below with:
+#   on:
+#     pull_request:
+#       branches: [main]
+# See docs/DEVELOPMENT.md ("Continuous integration").
+name: ci
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Syntax check
+        run: python3 -m compileall -q src tests scripts
+      - name: Unit tests
+        run: python3 -I -m unittest discover -s tests -v
+      - name: Full-repository secret scan
+        run: python3 -I scripts/scan_secrets.py --all
