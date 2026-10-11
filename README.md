@@ -1,6 +1,6 @@
 # Gmail Intelligence
 
-> **Status: M1 — read-only Gmail connection (in review). Owner-reported live verification succeeded (see docs/SETUP-GMAIL.md). No mailbox features exist yet.**
+> **Status: M2 — read-only mailbox index and reports (in review; offline-tested, no live scan yet). Gmail access is read-only; the app cannot change your mailbox.**
 > No application code exists yet. This repository currently contains documentation and project scaffolding only.
 
 ## Vision
@@ -28,7 +28,7 @@ python3 -m venv .venv && .venv/bin/pip install .
 .venv/bin/gmail-intelligence doctor
 .venv/bin/python -I -m unittest discover -s tests
 ```
-Setup details, Skills and the PR workflow: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Connecting Gmail (read-only, free): [docs/SETUP-GMAIL.md](docs/SETUP-GMAIL.md).
+Setup details, Skills and the PR workflow: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Connecting Gmail (read-only, free): [docs/SETUP-GMAIL.md](docs/SETUP-GMAIL.md). Mailbox index and reports: [docs/MAILBOX.md](docs/MAILBOX.md).
 
 ## Milestones
 
