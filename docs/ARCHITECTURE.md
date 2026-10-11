@@ -99,7 +99,7 @@ What is **not** documented in the pages read **[Unverified]**: exactly which sco
 
 ### 3.5 Flow and storage
 - **Flow [Proposal]:** Desktop-app client, loopback redirect (`127.0.0.1`), PKCE with `S256` set explicitly **[Verified]**; the user creates the client in their own Google Cloud project without enabling billing (§14).
-- **Token storage [Approved design direction — implementation not yet verified]:** macOS Keychain preferred. Before implementation verify: Python integration compatibility, item accessibility, refresh workflow, access-control behavior, safe error handling. Keychain is **not** a defense against every malicious process running with the user's privileges. Refresh tokens never go to SQLite, logs or `.env`. Fallback (encrypted file) remains an open question (Q3b).
+- **Token storage [Approved design direction — implementation not yet verified]:** macOS Keychain preferred. Before implementation verify: Python integration compatibility, item accessibility, refresh workflow, access-control behavior, safe error handling. Keychain is **not** a defense against every malicious process running with the user's privileges. Refresh tokens never go to SQLite, logs or `.env`. Fallback (encrypted file) remains an open question (Q3).
 - Testing-status expiry (7 days) means weekly re-consent in practice **[Verified]**; publishing status decision remains Q8.
 
 ## 4. SQLite metadata store **[Proposal]**
