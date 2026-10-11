@@ -36,6 +36,9 @@ Mailbox data is processed and stored on the user's machine. Nothing is uploaded 
 
 See `docs/ROADMAP.md` for details.
 
+## Zero Additional Cost (mandatory)
+The project must incur zero additional financial cost: no billing accounts, paid APIs or LLMs, paid dependencies, paid hosting or paid GitHub features. It is designed to run on the user's own Mac. A feature that would require payment is disabled, replaced with a genuinely free alternative, or deferred. Free tiers can change; nothing promises any provider stays free. See `docs/DECISIONS.md` (D8).
+
 ## Security and privacy commitments
 
 - The repository is private and must never contain credentials, tokens, or mailbox data.

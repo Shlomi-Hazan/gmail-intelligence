@@ -15,6 +15,7 @@ Applies to every AI agent working in this repository. Claude-specific items (lan
 - Never print, log, or commit secrets, tokens, or personal data.
 - Do not commit mailbox exports, databases, or OAuth files.
 - Do not add dependencies, integrations, or MCP servers without approval.
+- **Zero Additional Cost:** never enable billing, paid APIs/LLMs, paid dependencies, paid GitHub features or subscriptions. Unknown billing status blocks activation.
 
 ## Scope
 - Implement only what the current approved milestone and Issue require.
