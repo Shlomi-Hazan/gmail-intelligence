@@ -14,5 +14,8 @@ Claude-specific operating instructions. Shared rules for all AI agents live in `
 - Run relevant validation before reporting completion.
 
 ## Claude Skills
-- Project Skills live in `.claude/skills/`. A Skill does not grant Gmail API permissions; see `docs/SECURITY.md`.
+- Project Skills live in `.claude/skills/`; plan in `docs/SKILLS.md`. A Skill does not grant Gmail API permissions; see `docs/SECURITY.md`.
 - Do not install third-party Skills or MCP servers without approval.
+
+## Workflow
+Branch, PR and validation rules: `docs/DEVELOPMENT.md`. Enable the local secret-scan hook per clone: `git config core.hooksPath .githooks`.

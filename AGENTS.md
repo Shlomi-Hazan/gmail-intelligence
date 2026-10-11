@@ -15,6 +15,13 @@ Applies to every AI agent working in this repository. Claude-specific items (lan
 - Never print, log, or commit secrets, tokens, or personal data.
 - Do not commit mailbox exports, databases, or OAuth files.
 - Do not add dependencies, integrations, or MCP servers without approval.
+- **Zero Additional Cost:** never enable billing, paid APIs/LLMs, paid dependencies, paid GitHub features or subscriptions. Unknown billing status blocks activation.
 
 ## Scope
 - Implement only what the current approved milestone and Issue require.
+
+## References
+- Workflow and validation: `docs/DEVELOPMENT.md`
+- Threat model and controls: `docs/SECURITY.md`
+- Architecture and open questions: `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`
+- Local secret scanner: `scripts/scan_secrets.py` (enable hook: `git config core.hooksPath .githooks`)

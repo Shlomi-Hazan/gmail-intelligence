@@ -1,6 +1,6 @@
 # Gmail Intelligence
 
-> **Status: M0A — repository bootstrap. Gmail integration is NOT implemented.**
+> **Status: M0B — architecture, security and workflow documentation (in review). Gmail integration is NOT implemented.**
 > No application code exists yet. This repository currently contains documentation and project scaffolding only.
 
 ## Vision
@@ -36,6 +36,9 @@ Mailbox data is processed and stored on the user's machine. Nothing is uploaded 
 
 See `docs/ROADMAP.md` for details.
 
+## Zero Additional Cost (mandatory)
+The project must incur zero additional financial cost: no billing accounts, paid APIs or LLMs, paid dependencies, paid hosting or paid GitHub features. It is designed to run on the user's own Mac. A feature that would require payment is disabled, replaced with a genuinely free alternative, or deferred. Free tiers can change; nothing promises any provider stays free. See `docs/DECISIONS.md` (D8).
+
 ## Security and privacy commitments
 
 - The repository is private and must never contain credentials, tokens, or mailbox data.
@@ -43,4 +46,4 @@ See `docs/ROADMAP.md` for details.
 - No modification of real Gmail data without a separately approved execution workflow.
 - Least-privilege Gmail scopes; read-only first.
 
-See `docs/SECURITY.md`.
+See `docs/SECURITY.md`. Docs index: [Architecture](docs/ARCHITECTURE.md) · [Security](docs/SECURITY.md) · [Development](docs/DEVELOPMENT.md) · [Skills plan](docs/SKILLS.md) · [Decisions](docs/DECISIONS.md) · [Roadmap](docs/ROADMAP.md).
