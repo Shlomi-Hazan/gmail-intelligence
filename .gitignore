@@ -1,0 +1,91 @@
+# Secrets / env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# OAuth credentials and tokens
+credentials.json
+client_secret*.json
+client_secrets*.json
+token.json
+token*.json
+*.token
+.oauth/
+secrets/
+
+# Local Gmail exports / backups
+*.mbox
+*.eml
+*.msg
+*.emlx
+*.pst
+mail-export/
+gmail-export/
+gmail-backup/
+backups/
+exports/
+
+# Databases
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*-wal
+*-shm
+
+# Future private application data
+data/
+.data/
+var/
+local-data/
+private/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+
+# Node
+node_modules/
+dist/
+build/
+.next/
+.cache/
+.parcel-cache/
+
+# Coverage
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+.nyc_output/
+
+# Logs
+*.log
+logs/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.claude/settings.local.json
