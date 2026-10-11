@@ -76,6 +76,7 @@ Controls: **P**reventive · **D**etective · **R**ecovery.
 |---|---|---|
 | Repo visibility private | Enforced by GitHub | Observed |
 | Secret scanning, push protection | Native GitHub features | **Unavailable** for this private repo on the current plan (API: "not available for this repository"). **Accepted gap** (decision); the plan is not upgraded (zero-cost). |
+| macOS Keychain token storage, read-only scope check (M1) | Application control | Implemented, **offline-tested only**; live behavior not yet verified (docs/SETUP-GMAIL.md) |
 | Local pre-commit scanner | **Convention** (opt-in per clone: `git config core.hooksPath .githooks`) | Covered by a 27-test regression suite (§5.3) |
 | No auto-merge, Draft PRs, review checklist | **Convention** | See DEVELOPMENT.md |
 | GitHub CI | Workflow file exists but is **manual-trigger only** (billing could not be verified; see DEVELOPMENT.md) | The scanner does not run automatically on PRs, so no server-side protection is claimed |

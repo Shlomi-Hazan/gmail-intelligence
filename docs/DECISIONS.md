@@ -22,6 +22,14 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | A3 | **LLM privacy:** external LLM classification disabled by default; deterministic local rules preferred; no private content to an external model without explicit consent; show what data and which provider before transmission; consent separate from cleanup approval; permitted transfers recorded locally without retaining sensitive content; email text is untrusted; LLM output never directly triggers Gmail modifications. Zero-cost: only free local models are eligible. | Provider/model policy (Q2); local-model performance and privacy review |
 | A4 | **GitHub security:** accept the absence of native secret scanning for the private repo; keep repo PRIVATE; keep the local scanner as defense in depth; hooks can be bypassed (documented); Gitleaks is a possible future enhancement requiring dependency review; do not upgrade the GitHub plan. | Dependency review if Gitleaks is considered (Q10) |
 
+## M1 decisions
+| ID | Decision |
+|----|----------|
+| D12 | M1 uses a **single read-only Desktop OAuth client** with exactly the `gmail.readonly` scope (PKCE, loopback, no `include_granted_scopes`). The separate write client from the M0B recommendation (P6) is deferred to M4. Granted scopes are verified and anything broader is rejected. |
+| D13 | Tokens live in the macOS Keychain via `keyring` (verified at runtime to be the macOS backend; no plaintext fallback). The OAuth client file is stored with mode 600 under `~/Library/Application Support/gmail-intelligence/`. Live Keychain behavior is not yet verified (checked only with fakes). |
+| D14 | Reviewed free dependencies: `google-api-python-client`, `google-auth-oauthlib`, `keyring`. The Gmail adapter exposes only `get_profile` and `list_labels` (label ids/types, no names). |
+| Q12 update | See docs/SETUP-GMAIL.md §1: still no official statement that a personal Gmail OAuth app is free; no official page requires billing. The live setup is a manual checkpoint: stop if any billing prompt appears. |
+
 ## M0C decisions
 | ID | Decision |
 |----|----------|
