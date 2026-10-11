@@ -3,8 +3,8 @@
 Refs #
 
 **Milestone:** M?
-**In scope:** 
-**Explicitly out of scope:** 
+**In scope:**
+**Explicitly out of scope:**
 
 ## Tests / Validation evidence
 <!-- Commands run and results (paste output, not claims) -->
