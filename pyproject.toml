@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gmail-intelligence"
+dynamic = ["version"]
+description = "Local-first, AI-assisted Gmail management (early development; no Gmail integration yet)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []  # Zero Additional Cost: stdlib only until a dependency is reviewed and approved
+
+[project.scripts]
+gmail-intelligence = "gmail_intelligence.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "gmail_intelligence.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
