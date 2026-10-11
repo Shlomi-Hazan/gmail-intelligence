@@ -19,6 +19,10 @@ def client_secret_path():
     return app_dir() / CLIENT_FILE
 
 
+def index_path():
+    return app_dir() / "index.sqlite3"
+
+
 def ensure_app_dir():
     path = app_dir()
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
