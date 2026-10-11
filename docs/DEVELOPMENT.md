@@ -1,5 +1,22 @@
 # Development Workflow
 
+## Setup and daily commands
+Requires Python >= 3.10 and Git. Runtime dependencies: none (stdlib only).
+
+```bash
+git clone https://github.com/Shlomi-Hazan/gmail-intelligence.git && cd gmail-intelligence
+git config core.hooksPath .githooks                     # enable the local secret-scan hook (once per clone)
+PYTHONPATH=src python3 -m gmail_intelligence --help     # run without installing
+PYTHONPATH=src python3 -m gmail_intelligence version
+PYTHONPATH=src python3 -m gmail_intelligence doctor     # offline prerequisite check
+python3 -I -m unittest discover -s tests -v             # all tests
+```
+Optional editable install (puts `gmail-intelligence` on PATH; needs `setuptools` available, which pip downloads from PyPI at no cost):
+```bash
+python3 -m venv .venv && . .venv/bin/activate && pip install -e .
+```
+The CLI is fully offline (no Gmail, Google Cloud or network access). Exit codes: 0 success, 1 `doctor` found a failed check, 2 usage error. Local runtime data must live outside the repository.
+
 ## Branches and PRs
 - `main` is stable and protected by ruleset `main-pr-only` (PR required; no force-push; no deletion). No direct pushes.
 - One branch per Issue/theme: `docs/…`, `feat/…`, `fix/…`, `chore/…`.
@@ -13,7 +30,7 @@ Small, genuine, reviewable; imperative English subject, Conventional-Commit styl
 Work milestone by milestone. Do not start the next milestone without explicit owner approval. Out-of-scope discoveries become new Issues, not silent changes.
 
 ## Validation before reporting completion
-1. Scanner regression suite passes: `python3 -I -m unittest discover -s tests -v`; and `python3 -I scripts/scan_secrets.py --all` reports nothing.
+1. All tests pass: `python3 -I -m unittest discover -s tests -v`; `python3 -m compileall -q src tests scripts`; `python3 -I scripts/scan_secrets.py --all` reports nothing; `git diff --check` is clean. The `gmail-project-check` Skill runs this gate.
 2. Markdown relative links resolve.
 3. `git ls-files` contains no env/token/db/mail files.
 4. Working tree clean; branch pushed; PR base/head correct.
@@ -32,6 +49,15 @@ Every PR answers the checklist in `.github/PULL_REQUEST_TEMPLATE.md`. Changes to
 
 ## Evidence-based reporting
 Completion reports cite commands and outputs (SHAs, check results, URLs). State what was *not* done or not verifiable. No success claims without evidence.
+
+## Merging
+The owner merges PRs manually after review. Agents open **Draft** PRs only, never merge, never enable auto-merge, and never mark a PR Ready. Issues are closed after the merge is verified.
+
+## Continuous integration
+`.github/workflows/ci.yml` runs compile check, tests and the full secret scan with read-only permissions, no secrets and a pinned checkout action. It is **manual-trigger only for now** (Zero Additional Cost): GitHub bills private-repo Actions minutes beyond the free quota when a payment method is on file, and this account's billing setup could not be verified from the API. To enable PR checks, confirm at https://github.com/settings/billing that no payment method is attached or the Actions budget is $0, then switch the trigger to `pull_request` for `main` as described in the workflow comment. CI is a second line of defense; the local hook remains the primary scanner entry point.
+
+## Project Skills
+Four read-only/advisory Skills live in `.claude/skills/` and are invoked in Claude Code by name (e.g. `/gmail-project-status`) or automatically when relevant: `gmail-project-status` (where are we, what is next), `gmail-project-check` (local test + scan gate), `gmail-security-review` (P0-P3 advisory review), `gmail-milestone-workflow` (branch -> tests -> Draft PR -> report). They contain no Gmail capability. See [SKILLS.md](SKILLS.md).
 
 ## Tracking
 GitHub Milestones M0–M7 and Issues. Each PR links its Issues.

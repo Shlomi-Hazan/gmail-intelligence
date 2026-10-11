@@ -1,6 +1,6 @@
 # Planned Claude Code Skills
 
-**Status: plan only. No Skills are implemented or installed.** Project Skills will live in `.claude/skills/`. No third-party Skills or MCP servers are to be installed without review and approval.
+**Status:** four utility Skills exist (M0C): `gmail-project-status`, `gmail-project-check`, `gmail-security-review`, `gmail-milestone-workflow`. They are read-only or advisory, restrict their tools via `allowed-tools`, and have **no Gmail capability**. The operational Gmail Skills below are **plan only and not implemented**; they will be created in the milestone that delivers the underlying functionality. Project Skills live in `.claude/skills/<name>/SKILL.md`. No third-party Skills or MCP servers are to be installed without review and approval.
 
 ## Ground rules
 1. A Skill is instructions/tooling; it **grants no Gmail permissions**. Capabilities come from the application's OAuth scopes and its safety architecture ([ARCHITECTURE.md](ARCHITECTURE.md) §9).

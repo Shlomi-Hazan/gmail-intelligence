@@ -1,6 +1,6 @@
 # Gmail Intelligence
 
-> **Status: M0B — architecture, security and workflow documentation (in review). Gmail integration is NOT implemented.**
+> **Status: M0C — Python development foundation (in review). Gmail integration is NOT implemented.**
 > No application code exists yet. This repository currently contains documentation and project scaffolding only.
 
 ## Vision
@@ -20,6 +20,14 @@ A local-first, AI-assisted Gmail management system for mailbox auditing, intelli
 ## Local-first philosophy
 
 Mailbox data is processed and stored on the user's machine. Nothing is uploaded to third-party services by default. Any future use of an external AI service must be an explicit, documented, opt-in decision (see `docs/DECISIONS.md`).
+
+## Quick start (offline; no Gmail access)
+```bash
+git config core.hooksPath .githooks
+PYTHONPATH=src python3 -m gmail_intelligence doctor
+python3 -I -m unittest discover -s tests
+```
+Setup details, Skills and the PR workflow: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Milestones
 
