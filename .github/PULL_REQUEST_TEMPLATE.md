@@ -8,7 +8,7 @@ Refs #
 
 ## Tests / Validation evidence
 <!-- Commands run and results (paste output, not claims) -->
-- [ ] `python3 -I scripts/scan_secrets.py --self-test`
+- [ ] `python3 -I -m unittest discover -s tests -v`
 - [ ] `python3 -I scripts/scan_secrets.py --all`
 - [ ] Markdown links verified
 - [ ] Other:
@@ -22,6 +22,7 @@ Refs #
 - [ ] No permanent-delete, send or forward capability introduced
 - [ ] Email content still treated as untrusted
 - [ ] No new dependency (or reviewed and justified)
+- [ ] **Zero Additional Cost verified:** no billing, paid service/API/dependency, or subscription introduced
 
 ## Workflow checklist
 - [ ] Feature branch, Draft until validated
