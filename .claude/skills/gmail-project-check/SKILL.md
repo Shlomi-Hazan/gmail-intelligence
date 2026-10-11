@@ -1,21 +1,21 @@
 ---
 name: gmail-project-check
 description: Run the local, offline quality gate for Gmail Intelligence - syntax check, unit tests, full secret scan, diff whitespace check - and report actionable failures. Use before committing or opening a PR.
-allowed-tools: Bash(python3:*), Bash(git diff:*), Bash(git status:*), Read, Grep
+allowed-tools: Bash(python3:*), Bash(python:*), Bash(.venv/bin/python:*), Bash(gmail-intelligence:*), Bash(git diff:*), Bash(git status:*), Read, Grep
 ---
 
 # gmail-project-check
 
 Local and offline: no network, no Gmail, no paid services. Report problems; do not edit code to fix them unless the user asks.
 
-Run from the repository root:
+Run from the repository root with the project venv active (`. .venv/bin/activate`; first time: `pip install -e .`):
 
 ```bash
-python3 -m compileall -q src tests scripts
-python3 -I -m unittest discover -s tests
-python3 -I scripts/scan_secrets.py --all
+python -m compileall -q src tests scripts
+python -I -m unittest discover -s tests
+python -I scripts/scan_secrets.py --all
 git diff --check
-PYTHONPATH=src python3 -m gmail_intelligence doctor
+gmail-intelligence doctor
 ```
 
 Report per step: pass/fail, the exact count from the unittest summary line, and for each failure the file, the line and the likely cause. A secret-scanner finding prints only path, line and rule; never try to print or reveal the matched value. Scanner exit 2 means a scanner error, which blocks commits just like a finding.
