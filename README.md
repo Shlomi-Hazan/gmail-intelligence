@@ -1,6 +1,6 @@
 # Gmail Intelligence
 
-> **Status: M0A — repository bootstrap. Gmail integration is NOT implemented.**
+> **Status: M0B — architecture, security and workflow documentation (in review). Gmail integration is NOT implemented.**
 > No application code exists yet. This repository currently contains documentation and project scaffolding only.
 
 ## Vision
@@ -43,4 +43,4 @@ See `docs/ROADMAP.md` for details.
 - No modification of real Gmail data without a separately approved execution workflow.
 - Least-privilege Gmail scopes; read-only first.
 
-See `docs/SECURITY.md`.
+See `docs/SECURITY.md`. Docs index: [Architecture](docs/ARCHITECTURE.md) · [Security](docs/SECURITY.md) · [Development](docs/DEVELOPMENT.md) · [Skills plan](docs/SKILLS.md) · [Decisions](docs/DECISIONS.md) · [Roadmap](docs/ROADMAP.md).

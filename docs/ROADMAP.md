@@ -2,7 +2,7 @@
 
 No dates are assigned. Everything below M0A is **future** and requires approval to start.
 
-- **M0 — Foundation & Security** (M0A bootstrap: current)
+- **M0 — Foundation & Security** (M0A bootstrap: done; M0B architecture/security/workflow: in review)
 - **M1 — Gmail OAuth & Read-Only Connection**
 - **M2 — Mailbox Audit & Local Indexing**
 - **M3 — Rules & AI Classification**
