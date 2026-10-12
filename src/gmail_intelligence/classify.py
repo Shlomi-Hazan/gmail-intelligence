@@ -194,6 +194,19 @@ def validate_new_rule(kind, value, confidence, priority, sender=None, domain=Non
         raise RuleError(f"confidence must be one of: {', '.join(CONFIDENCE)}")
     if isinstance(priority, bool) or not isinstance(priority, int) or not -1000 <= priority <= 1000:
         raise RuleError("priority must be an integer between -1000 and 1000")
+    cond = validate_conditions(sender, domain, label)
+    if unread is not None:
+        cond["unread"] = bool(unread)
+    if not [k for k in cond if k != "unread"]:
+        raise RuleError("a rule needs at least one of sender, domain or label (unread alone is not evidence)")
+    note = (note or "").strip()[:200]
+    if any(ord(c) < 32 for c in note):
+        raise RuleError("note must not contain control characters")
+    return dict(kind=kind, value=value, confidence=confidence, priority=priority, note=note, **cond)
+
+
+def validate_conditions(sender=None, domain=None, label=None):
+    """Normalize exact sender/domain/label match conditions (shared with M4A protection rules). No wildcards or regex."""
     cond = {}
     if sender is not None:
         s = sender.strip().lower()
@@ -211,14 +224,7 @@ def validate_new_rule(kind, value, confidence, priority, sender=None, domain=Non
         if not lab or len(lab) > 100 or any(ord(c) < 32 for c in lab):
             raise RuleError("label must be a Gmail label id or name (1-100 printable characters)")
         cond["label"] = lab
-    if unread is not None:
-        cond["unread"] = bool(unread)
-    if not [k for k in cond if k != "unread"]:
-        raise RuleError("a rule needs at least one of sender, domain or label (unread alone is not evidence)")
-    note = (note or "").strip()[:200]
-    if any(ord(c) < 32 for c in note):
-        raise RuleError("note must not contain control characters")
-    return dict(kind=kind, value=value, confidence=confidence, priority=priority, note=note, **cond)
+    return cond
 
 
 def _valid_domain(d):

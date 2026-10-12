@@ -185,7 +185,7 @@ class MigrationTests(TempHome):
         self.make_v1(path)
         with idx.Index(str(path)) as index:
             self.assertEqual(index.migrated_from, 1)
-            self.assertEqual(index.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(index.conn.execute("PRAGMA user_version").fetchone()[0], idx.SCHEMA_VERSION)
             self.assertEqual(index.overview(ACCT)["n"], 1)
             self.assertEqual(index._q("SELECT label_id FROM message_labels")[0][0], "INBOX")
             self.assertEqual(len(index.recent_scans(ACCT)), 1)
@@ -209,7 +209,7 @@ class MigrationTests(TempHome):
         conn = sqlite3.connect(path)
         self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 1)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('class_rules','message_class')").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('class_rules','message_class','protect_rules')").fetchone()[0], 0)
         conn.close()
 
     def test_corrupt_or_non_database_file_is_a_clean_error(self):
