@@ -25,10 +25,15 @@ def active(index, account):
     return [_rule(r) for r in rows(index, account) if r["enabled"]]
 
 
-def fingerprint(account, rules):
-    """Fingerprint of the ENABLED protection rules; any change alters candidate output and this value."""
+def digest(account, rules):
+    """Full SHA-256 of the ENABLED protection rules (what plans bind to); any rule change alters it."""
     payload = [account.lower(), sorted((r.id, r.sender, r.domain, r.label) for r in rules)]
-    return hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:16]
+    return hashlib.sha256(json.dumps(payload).encode()).hexdigest()
+
+
+def fingerprint(account, rules):
+    """Short display form of `digest` (first 16 hex characters); never an authority on its own."""
+    return digest(account, rules)[:16]
 
 
 def add(index, account, sender=None, domain=None, label=None, note=None):

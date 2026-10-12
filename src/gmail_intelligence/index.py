@@ -2,7 +2,7 @@
 
 All data is keyed by account, so one account's rows are never mixed with another's. Schema version is
 kept in `PRAGMA user_version`. There is no migration framework: older versions are upgraded by additive scripts (v2 = M3
-classification tables, v3 = M4A protection rules) in ONE transaction, after an automatic backup copy of the database file.
+classification tables, v3 = M4A protection rules, v4 = M4B plans/approvals/audit) in ONE transaction, after an automatic backup copy of the database file.
 """
 import os
 import sqlite3
@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from gmail_intelligence import config
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCHEMA = """
 CREATE TABLE messages (
   account TEXT NOT NULL, id TEXT NOT NULL, thread_id TEXT, internal_ms INTEGER, size INTEGER,
@@ -53,6 +53,123 @@ CREATE TABLE protect_rules (
   PRIMARY KEY (account, id)) WITHOUT ROWID;
 """
 
+# Version 4 (M4B): immutable cleanup plans, approvals and a hash-chained audit log. Purely local; nothing here talks to Gmail.
+# Triggers make plan content, plan items, approvals and audit rows immutable and allow only forward state transitions.
+# They protect against bugs and accidents, NOT against someone who controls this database file (they can drop triggers).
+SCHEMA_V4 = """
+CREATE TABLE cleanup_plan (
+  account TEXT NOT NULL, plan_id TEXT NOT NULL, version INTEGER NOT NULL CHECK (version >= 1), parent_id TEXT,
+  action TEXT NOT NULL CHECK (action IN ('ARCHIVE')),
+  state TEXT NOT NULL CHECK (state IN ('DRAFT','REVIEWED','APPROVED','CANCELLED','EXPIRED','SUPERSEDED')),
+  plan_hash TEXT NOT NULL CHECK (length(plan_hash) = 64), snapshot TEXT NOT NULL,
+  item_count INTEGER NOT NULL CHECK (item_count >= 1), created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+  reviewed_at TEXT, state_changed_at TEXT NOT NULL,
+  PRIMARY KEY (account, plan_id),
+  FOREIGN KEY (account, parent_id) REFERENCES cleanup_plan (account, plan_id)) WITHOUT ROWID;
+CREATE TABLE cleanup_item (
+  account TEXT NOT NULL, plan_id TEXT NOT NULL, message_id TEXT NOT NULL, thread_id TEXT NOT NULL, item_digest TEXT NOT NULL,
+  PRIMARY KEY (account, plan_id, message_id),
+  FOREIGN KEY (account, plan_id) REFERENCES cleanup_plan (account, plan_id)) WITHOUT ROWID;
+CREATE TABLE cleanup_approval (
+  account TEXT NOT NULL, plan_id TEXT NOT NULL, nonce TEXT NOT NULL UNIQUE, plan_hash TEXT NOT NULL, action TEXT NOT NULL,
+  item_count INTEGER NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('VALID','CONSUMED','REVOKED','EXPIRED')), status_changed_at TEXT NOT NULL,
+  PRIMARY KEY (account, plan_id, nonce),
+  FOREIGN KEY (account, plan_id) REFERENCES cleanup_plan (account, plan_id)) WITHOUT ROWID;
+CREATE UNIQUE INDEX cleanup_one_valid_approval ON cleanup_approval (account, plan_id) WHERE status = 'VALID';
+CREATE TABLE cleanup_audit (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, plan_id TEXT, event_type TEXT NOT NULL, at TEXT NOT NULL,
+  meta TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL);
+CREATE INDEX cleanup_audit_account ON cleanup_audit (account, seq);
+CREATE TRIGGER cleanup_plan_content_immutable BEFORE UPDATE ON cleanup_plan
+WHEN NEW.account IS NOT OLD.account OR NEW.plan_id IS NOT OLD.plan_id OR NEW.version IS NOT OLD.version
+  OR NEW.parent_id IS NOT OLD.parent_id OR NEW.action IS NOT OLD.action OR NEW.plan_hash IS NOT OLD.plan_hash
+  OR NEW.snapshot IS NOT OLD.snapshot OR NEW.item_count IS NOT OLD.item_count OR NEW.created_at IS NOT OLD.created_at
+  OR NEW.expires_at IS NOT OLD.expires_at
+BEGIN SELECT RAISE(ABORT, 'cleanup plan content is immutable'); END;
+CREATE TRIGGER cleanup_plan_state_forward_only BEFORE UPDATE OF state ON cleanup_plan
+WHEN NEW.state <> OLD.state AND NOT (
+     (OLD.state = 'DRAFT' AND NEW.state IN ('REVIEWED','CANCELLED','SUPERSEDED','EXPIRED'))
+  OR (OLD.state = 'REVIEWED' AND NEW.state IN ('APPROVED','CANCELLED','SUPERSEDED','EXPIRED'))
+  OR (OLD.state = 'APPROVED' AND NEW.state IN ('CANCELLED','SUPERSEDED','EXPIRED')))
+BEGIN SELECT RAISE(ABORT, 'illegal cleanup plan state transition'); END;
+CREATE TRIGGER cleanup_plan_starts_as_draft BEFORE INSERT ON cleanup_plan WHEN NEW.state <> 'DRAFT'
+BEGIN SELECT RAISE(ABORT, 'a cleanup plan must start as DRAFT'); END;
+CREATE TRIGGER cleanup_approval_only_for_reviewed BEFORE INSERT ON cleanup_approval
+WHEN NEW.status <> 'VALID' OR (SELECT state FROM cleanup_plan WHERE account = NEW.account AND plan_id = NEW.plan_id)
+  IS NOT 'REVIEWED'
+BEGIN SELECT RAISE(ABORT, 'an approval can only be recorded for a REVIEWED plan'); END;
+CREATE TRIGGER cleanup_plan_approved_needs_approval BEFORE UPDATE OF state ON cleanup_plan
+WHEN NEW.state = 'APPROVED' AND NOT EXISTS (SELECT 1 FROM cleanup_approval
+  WHERE account = NEW.account AND plan_id = NEW.plan_id AND status = 'VALID')
+BEGIN SELECT RAISE(ABORT, 'a plan can only become APPROVED while it has a VALID approval record'); END;
+CREATE TRIGGER cleanup_plan_reviewed_needs_timestamp BEFORE UPDATE OF state ON cleanup_plan
+WHEN NEW.state IN ('REVIEWED','APPROVED') AND NEW.reviewed_at IS NULL
+BEGIN SELECT RAISE(ABORT, 'a reviewed plan must record when it was reviewed'); END;
+CREATE TRIGGER cleanup_plan_no_delete BEFORE DELETE ON cleanup_plan
+BEGIN SELECT RAISE(ABORT, 'cleanup plans are never deleted'); END;
+CREATE TRIGGER cleanup_item_no_update BEFORE UPDATE ON cleanup_item
+BEGIN SELECT RAISE(ABORT, 'cleanup plan items are immutable'); END;
+CREATE TRIGGER cleanup_item_no_delete BEFORE DELETE ON cleanup_item
+BEGIN SELECT RAISE(ABORT, 'cleanup plan items are immutable'); END;
+CREATE TRIGGER cleanup_item_only_in_draft BEFORE INSERT ON cleanup_item
+WHEN (SELECT state FROM cleanup_plan WHERE account = NEW.account AND plan_id = NEW.plan_id) IS NOT 'DRAFT'
+BEGIN SELECT RAISE(ABORT, 'items can only be added while a plan is being created'); END;
+CREATE TRIGGER cleanup_approval_content_immutable BEFORE UPDATE ON cleanup_approval
+WHEN NEW.account IS NOT OLD.account OR NEW.plan_id IS NOT OLD.plan_id OR NEW.nonce IS NOT OLD.nonce
+  OR NEW.plan_hash IS NOT OLD.plan_hash OR NEW.action IS NOT OLD.action OR NEW.item_count IS NOT OLD.item_count
+  OR NEW.created_at IS NOT OLD.created_at OR NEW.expires_at IS NOT OLD.expires_at
+BEGIN SELECT RAISE(ABORT, 'cleanup approval content is immutable'); END;
+CREATE TRIGGER cleanup_approval_forward_only BEFORE UPDATE OF status ON cleanup_approval
+WHEN NEW.status <> OLD.status AND OLD.status <> 'VALID'
+BEGIN SELECT RAISE(ABORT, 'a used, revoked or expired approval can never become valid again'); END;
+CREATE TRIGGER cleanup_approval_no_delete BEFORE DELETE ON cleanup_approval
+BEGIN SELECT RAISE(ABORT, 'cleanup approvals are never deleted'); END;
+CREATE TRIGGER cleanup_audit_no_update BEFORE UPDATE ON cleanup_audit
+BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
+CREATE TRIGGER cleanup_audit_no_delete BEFORE DELETE ON cleanup_audit
+BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
+"""
+
+
+def _reserve_backup(base):
+    """Create a NEW empty file at `base` (or `base-N`) with mode 0600. O_EXCL guarantees an existing file is never touched."""
+    for n in range(100):
+        path = base if n == 0 else f"{base}-{n}"
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            os.fchmod(fd, 0o600)  # also correct under an unusual umask
+        finally:
+            os.close(fd)
+        return path
+    raise OSError("no free backup file name")
+
+
+def _write_backup(src_conn, path, version):
+    """Copy the database into the reserved file and check that the copy is complete and consistent."""
+    dest = sqlite3.connect(path)
+    try:
+        src_conn.backup(dest)
+    finally:
+        dest.close()
+    os.chmod(path, 0o600)
+    check = sqlite3.connect(path)
+    try:
+        if check.execute("PRAGMA user_version").fetchone()[0] != version or check.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise sqlite3.DatabaseError("backup verification failed")
+    finally:
+        check.close()
+
+
+def _discard_partial(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
 
 class IndexProblem(Exception):
     """Index problem with a user-facing message."""
@@ -73,6 +190,7 @@ class Index:
         self.conn = sqlite3.connect(self.path)
         os.chmod(self.path, 0o600)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON")
         self.migrated_from = self.backup_path = None
         try:
             version = self.conn.execute("PRAGMA user_version").fetchone()[0]
@@ -82,31 +200,46 @@ class Index:
                                "(e.g. index.sqlite3.pre-m3-backup-*) or remove the file and rescan") from None
         if version == 0:
             with self.conn:
-                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + SCHEMA_V3 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2):
+                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + SCHEMA_V3 + SCHEMA_V4 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        elif version in (1, 2, 3):
             self._migrate(version)
         elif version != SCHEMA_VERSION:
             self.conn.close()
             raise IndexProblem(f"unsupported index schema version {version} (expected {SCHEMA_VERSION})")
 
     def _migrate(self, version):
-        """Back up the database file, then add the missing tables in one transaction (all-or-nothing)."""
-        tag = "pre-m3" if version == 1 else "pre-m4a"
-        script = (SCHEMA_V2 if version == 1 else "") + SCHEMA_V3
-        backup = f"{self.path}.{tag}-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        """Back up the database file, then add the missing tables in one transaction (all-or-nothing).
+
+        The backup file is created exclusively (never overwriting an existing file) with mode 0600 from the first byte; a partial
+        backup that WE created is removed if writing it fails; a complete, verified backup is always kept.
+        """
+        tag = {1: "pre-m3", 2: "pre-m4a", 3: "pre-m4b"}[version]
+        script = (SCHEMA_V2 if version == 1 else "") + (SCHEMA_V3 if version <= 2 else "") + SCHEMA_V4
+        base = f"{self.path}.{tag}-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        backup = None
         try:
-            dest = sqlite3.connect(backup)
-            try:
-                self.conn.backup(dest)
-            finally:
-                dest.close()
-            os.chmod(backup, 0o600)
+            backup = _reserve_backup(base)
+            _write_backup(self.conn, backup, version)
+        except (sqlite3.Error, OSError) as exc:
+            if backup:
+                _discard_partial(backup)
+            self.conn.close()
+            raise IndexProblem(f"could not create the safety backup ({type(exc).__name__}); the index was left unchanged "
+                               "and no partial backup was kept") from None
+        try:
             with self.conn:
                 self.conn.executescript("BEGIN;" + script + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        except (sqlite3.Error, OSError) as exc:
+        except sqlite3.Error as exc:
+            try:
+                done = self.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            except sqlite3.Error:
+                done = False
+            if done:  # another process finished the same upgrade first: our redundant backup (which we created) can go
+                _discard_partial(backup)
+                return
             self.conn.close()
             raise IndexProblem(f"could not upgrade the index to schema version {SCHEMA_VERSION}; it was left unchanged "
-                               f"({type(exc).__name__}); backup, if any: {backup}") from None
+                               f"({type(exc).__name__}); the verified backup was kept: {backup}") from None
         self.migrated_from = version
         self.backup_path = backup
 
