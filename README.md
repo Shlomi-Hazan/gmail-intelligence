@@ -1,6 +1,6 @@
 # Gmail Intelligence
 
-> **Status: M2 — read-only mailbox index and reports (in review; offline-tested, no live scan yet). Gmail access is read-only; the app cannot change your mailbox.**
+> **Status: M2 — read-only mailbox index and reports (in review; offline-tested, owner-reported live scan succeeded). Gmail access is read-only; the app cannot change your mailbox.**
 > No application code exists yet. This repository currently contains documentation and project scaffolding only.
 
 ## Vision

@@ -4,7 +4,7 @@ No dates are assigned. Everything below M0A is **future** and requires approval 
 
 - **M0 — Foundation & Security** (M0A bootstrap: done; M0B architecture/security/workflow: merged in PR #11; M0C Python foundation, tests, Skills: merged in PR #13)
 - **M1 — Gmail OAuth & Read-Only Connection** (merged in PR #14; owner-reported live check succeeded)
-- **M2 — Mailbox Audit & Local Indexing** (in review, issue #5: implemented and offline-tested; first live scan awaits the owner's approval)
+- **M2 — Mailbox Audit & Local Indexing** (in review, issue #5: implemented and offline-tested; owner-reported limited and full scans succeeded)
 - **M3 — Rules & AI Classification**
 - **M4 — Safe Bulk Cleanup** (dry-run, approvals, rollback)
 - **M5 — Labels & Filters Management**

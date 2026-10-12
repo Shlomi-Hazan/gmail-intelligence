@@ -1,6 +1,6 @@
 # Mailbox index and reports (M2)
 
-**Status:** implemented and covered by offline tests with synthetic data. **No live mailbox scan has been performed yet.** Everything here is read-only: the only OAuth scope is `gmail.readonly`, and the Gmail adapter has no method that can send, modify, label, trash or delete (enforced by tests).
+**Status:** implemented; covered by offline tests with synthetic data; live behavior confirmed by the owner (see "Live verification" below). Everything here is read-only: the only OAuth scope is `gmail.readonly`, and the Gmail adapter has no method that can send, modify, label, trash or delete (enforced by tests).
 
 ## Commands (project venv; see [SETUP-GMAIL.md](SETUP-GMAIL.md))
 ```bash
@@ -38,6 +38,11 @@ Gmail "quota units" are rate limits, not charges; no billing account is involved
 
 ## Reports
 Message counts are not thread counts. Label totals overlap (a message can have several labels), so they can exceed the number of messages. Size is the sum of Gmail's `sizeEstimate`, **not** your account storage usage. Reports carry no recommendation to delete anything; cleanup belongs to M4 and requires explicit approvals.
+
+## Live verification (maintainer-reported)
+The maintainer ran a limited scan and then a full scan on their own mailbox using the read-only connection; this is their report, not something the automated tests executed. Both completed with no failures and no removed rows, the limited scan was correctly labelled PARTIAL and the full scan COMPLETE, reports were produced from the local index without contacting Gmail, and no Gmail write operation was performed. A full scan of a typical personal mailbox took on the order of an hour at the default request budget. Mailbox statistics are intentionally not published.
+
+Known environment issue (not an M2 defect): on macOS folders synced by iCloud, an editable install can lose its `.pth` file to the hidden flag; use `pip install .` or `PYTHONPATH=src python -m gmail_intelligence ...` ([SETUP-GMAIL.md](SETUP-GMAIL.md) §7).
 
 ## Not in M2
 AI classification (M3), cleanup/labels/filters (M4/M5), dashboard (M6), history-based incremental sync (M7).
