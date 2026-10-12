@@ -1,8 +1,8 @@
 # Safe Cleanup (M4)
 
-M4 will let the owner archive (and eventually Trash) individual messages through staged, approval-gated steps. **Only M4A is
-implemented**: a local, read-only candidate preview plus protection rules. Nothing in M4A can change Gmail, create a plan
-or run an action. Decisions: [D27-D35](DECISIONS.md). Phases: M4A candidate engine (this document), M4B immutable plans,
+M4 will let the owner archive (and eventually Trash) individual messages through staged, approval-gated steps. **M4A and M4B are
+implemented**: a local candidate preview with protection rules (M4A) and immutable plans, local approvals and an audit log (M4B). Nothing
+in M4A or M4B can change Gmail or execute an action. Decisions: [D27-D35](DECISIONS.md). Phases: M4A candidate engine (this document), M4B immutable plans,
 approvals and audit, M4C separate write authorization and executor, M4D recovery/undo and final audit.
 
 ## M4A in one paragraph
@@ -55,9 +55,67 @@ One new table, `protect_rules`. Opening a v2 (or v1) index backs the database up
 is untouched. To go back, quit the tool and copy the backup over `index.sqlite3` (an older build cannot open a newer schema).
 There is no table for candidates, plans or approvals in M4A.
 
-## Audit retention (placeholder until M4B)
-Audit and recovery data will stay local. The tool will never delete recovery-relevant history automatically; the concrete
-retention policy is defined in M4B and must exist before any live execution.
+## M4B: immutable plans, local approvals and audit (offline)
+**What an approval is.** An approval is a LOCAL LEDGER RECORD that a person typed a confirmation for an exact plan. It grants no
+OAuth permission, makes no Gmail call and cannot execute anything: **execution does not exist in M4B.** Executing (M4C) needs a
+write credential, live-state revalidation and a separate owner approval.
+
+**Plan.** A finite set of explicit message ids for one account and the single action `ARCHIVE`, frozen as canonical JSON (sorted
+keys, no whitespace) and bound by its full SHA-256 (`plan_hash`). The hash covers: plan id, version and parent, account, action,
+creation and expiry time, the M4A policy (version, age threshold, approved types), the M3 ruleset hash, the full protection-rule
+digest, the index anchor (completeness and last full scan) and, per target, thread id, date, scan id, unread flag and SHA-256
+digests of the sender, the label set and the classification rows. Sender and label text is never stored in clear. Eight hex
+characters of the hash are shown only for the typed confirmation. A plan holds at most 500 targets, is selected explicitly
+(nothing is selected by default, no wildcards, no thread expansion) and must consist of messages that are *currently*
+`ELIGIBLE_FOR_ARCHIVE_RECOMMENDATION`; a single ineligible, unknown or protected id rejects the whole plan (nothing is trimmed
+silently). Plans expire after 48 hours.
+
+**Lifecycle (schema-enforced, forward only).** `DRAFT -> REVIEWED -> APPROVED`, and any live state `-> CANCELLED | EXPIRED |
+SUPERSEDED`. Content columns, plan items, approvals and audit rows are immutable (triggers); plans are never deleted. Excluding
+targets creates a NEW version with a new hash and supersedes the old plan, revoking its approval. States for execution do not exist
+yet; M4C will add them with its own migration.
+
+**Commands** (all local; `--account EMAIL` avoids the Keychain lookup):
+```bash
+gmail-intelligence cleanup candidates --account EMAIL --limit N --export-ids FILE   # optional: private, new file, never inside Git
+gmail-intelligence cleanup plan create  --account EMAIL --message-id ID ... | --ids-file FILE [--min-age-days N]
+gmail-intelligence cleanup plan list|show PLAN_ID [--page N --page-size N --show-ids]
+gmail-intelligence cleanup plan review PLAN_ID      # interactive: every target, page by page, then a typed phrase -> REVIEWED
+gmail-intelligence cleanup plan exclude PLAN_ID --message-id ID ...     # new version; old one superseded
+gmail-intelligence cleanup approve PLAN_ID          # interactive typed phrase "ARCHIVE <count> <hash8>" -> local approval
+gmail-intelligence cleanup approval status PLAN_ID
+gmail-intelligence cleanup plan cancel PLAN_ID
+gmail-intelligence cleanup audit verify|log [--plan PLAN_ID]
+```
+Review and approval read the confirmation only from a real terminal: there is no `--yes`/`--phrase` option, piped input and EOF
+fail closed. A typed phrase is friction and an intent check, **not strong authentication**.
+
+**Approval rules.** At approval time the whole plan is re-validated against the LOCAL index: stored hash and snapshot integrity,
+account, expiry, policy, M3 ruleset, protection digest, index completeness/anchor, every target's digests and its current M4A
+eligibility. Any difference fails closed (the plan is never partly approved or trimmed) and the failure is audited. An approval
+is single-use, bound to the exact plan hash, action, count and account, has a random nonce, lasts at most 24 hours and never
+outlives the plan; the database allows one VALID approval per plan. Expired approvals expire the plan (create a new one).
+
+**Freshness limits.** Local freshness cannot see mailbox changes made after the most recent Gmail scan. Any future executor must
+re-validate live Gmail state per message immediately before acting.
+
+**M4B-to-M4C contract (not implemented).** The executor must: run `verify_approved` and refuse on any problem; consume the approval
+(VALID -> CONSUMED) atomically with the start of execution, one time only; re-validate each message against live Gmail state and
+skip drifted messages; never retry or continue automatically after an ambiguous outcome; never widen the target set; never act
+from plan state alone.
+
+**Audit log and retention.** Every plan, review, approval, rejection, revision, cancellation and expiry appends an event holding
+counts, hashes and state names only (no ids, senders, labels or content), chained to the previous event of the account
+(`audit verify`). This is tamper-*evident* only: someone controlling this macOS user account can drop triggers and rewrite the
+database, the chain or the approvals. Retention: plans, approvals and audit events stay local and are never deleted automatically;
+`mailbox purge` keeps them; nothing is purged while a plan is active or unresolved. Deleting or exporting them would be a separate,
+explicitly reviewed feature.
+
+**Storage (schema v4).** `cleanup_plan`, `cleanup_item`, `cleanup_approval`, `cleanup_audit`. Opening a v3 index first writes a
+private backup (`...pre-m4b-backup-<UTC>`, mode 600), then adds the tables in one transaction; failure leaves v3 intact.
+
+## Audit retention (see M4B above)
+Defined in the M4B section above: local, never deleted automatically, kept by `mailbox purge`.
 
 ## Status
 Implemented and covered by offline tests with synthetic data. Not measured: recommendation quality on a real mailbox. No live

@@ -349,7 +349,7 @@ class NoSideEffectTests(Base):
         self.assertEqual([tuple(r) for r in self.index._q("SELECT * FROM message_class ORDER BY 1,2,3,4")],
                          [tuple(r) for r in before_rows])
         tables = {r[0] for r in self.index._q("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertFalse({t for t in tables if "candidate" in t or "plan" in t or "approval" in t})
+        self.assertFalse({t for t in tables if "candidate" in t})  # candidate results are never stored (plans are M4B)
 
     def test_empty_account(self):
         _, res = self.decide()
@@ -375,10 +375,10 @@ class MigrationTests(Base):
         conn.close()
         return path
 
-    def test_v2_to_v3_preserves_m2_and_m3_data_with_backup(self):
+    def test_v2_upgrade_preserves_m2_and_m3_data_with_backup(self):
         path = self.make_db(2)
         with idx.Index(str(path)) as index:
-            self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (2, 3))
+            self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (2, idx.SCHEMA_VERSION))
             self.assertEqual(index.overview(ACCT)["n"], 1)
             self.assertEqual(index._q("SELECT id FROM class_rules")[0][0], "u1")
             self.assertEqual(index._q("SELECT COUNT(*) FROM message_class")[0][0], 1)
@@ -394,10 +394,10 @@ class MigrationTests(Base):
             self.assertIsNone(again.migrated_from)
         self.assertEqual(len(list(path.parent.glob("*backup*"))), 1)
 
-    def test_v1_jumps_to_v3_in_one_step(self):
+    def test_v1_jumps_to_latest_in_one_step(self):
         path = self.make_db(1)
         with idx.Index(str(path)) as index:
-            self.assertEqual(index.conn.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(index.conn.execute("PRAGMA user_version").fetchone()[0], idx.SCHEMA_VERSION)
             self.assertEqual(index._q("SELECT COUNT(*) FROM class_rules")[0][0], 0)
             self.assertIn("pre-m3-backup", Path(index.backup_path).name)
 

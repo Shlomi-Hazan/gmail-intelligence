@@ -506,8 +506,28 @@ def cmd_cleanup_candidates(args):
             return _fail(exc)
         print(cleanup_report.candidates_text(res, account, review=args.review, limit=args.limit, show_ids=args.show_ids,
                                              show_senders=args.show_senders, by_domain=args.by_domain))
+        if args.export_ids:
+            return _export_ids(args, res)
         return 0
     return _with_index(args, go)
+
+
+def _export_ids(args, res):
+    """Write up to --limit ELIGIBLE message ids (oldest first) to a new private file, as an aid for choosing plan targets."""
+    from gmail_intelligence import cleanup_candidates
+
+    path = Path(args.export_ids).expanduser()
+    if args.review or args.limit < 1:
+        return _fail("--export-ids needs --limit of at least 1 and cannot be combined with --review")
+    if path.exists() or config.inside_git_repo(path.parent):
+        return _fail("refusing to write ids: the file already exists or is inside a Git repository")
+    ids = [d.message_id for d in res.decisions if d.outcome == cleanup_candidates.ELIGIBLE][:args.limit]
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write("# eligible archive candidates (message ids; keep private). Select explicitly, then: cleanup plan create --ids-file\n")
+        fh.writelines(i + "\n" for i in ids)
+    print(f"Wrote {len(ids)} eligible message id(s) to a new private file (mode 600). Nothing was selected or changed.")
+    return 0
 
 
 def cmd_cleanup_protect_list(args):
@@ -565,6 +585,169 @@ def cmd_cleanup_protect_remove(args):
         print(f"Protection rule {args.rule_id} removed.")
         return 0
     return _with_index(args, go)
+
+
+# ---- cleanup plans and approvals (M4B): local only, no Gmail, no execution ----
+def _tty_input(prompt):
+    """Terminal-only confirmation: never accepts piped or scripted input, and EOF means 'no'."""
+    if not sys.stdin.isatty():
+        raise EOFError("interactive terminal required")
+    return input(prompt)
+
+
+def _plan_cmd(args, fn):
+    from gmail_intelligence import cleanup_plans as cp
+
+    def go(index, account):
+        try:
+            cp.expire_due(index, account)
+            return fn(index, account, cp)
+        except cp.PlanError as exc:
+            return _fail(exc)
+        except EOFError:
+            return _fail("cancelled: this step needs a real interactive terminal; nothing was changed")
+    return _with_index(args, go)
+
+
+def _read_ids_file(path):
+    p = Path(path).expanduser()
+    if not p.is_file() or p.stat().st_size > 1_000_000:
+        raise ValueError("ids file must be an existing text file under 1 MB")
+    return [ln.strip() for ln in p.read_text().splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def cmd_cleanup_plan_create(args):
+    def go(index, account, cp):
+        try:
+            ids = list(args.message_id or []) + (_read_ids_file(args.ids_file) if args.ids_file else [])
+        except (OSError, ValueError) as exc:
+            return _fail(exc)
+        dup = len(ids) - len(set(ids))
+        plan = cp.create_plan(index, account, ids, min_age_days=args.min_age_days)
+        print(f"Plan {plan['plan_id']} created as DRAFT: {plan['item_count']} explicit target(s), action {plan['action']}, "
+              f"hash {cp.short(plan['plan_hash'])}" + (f" ({dup} duplicate id(s) ignored)" if dup else "") + ".")
+        print("Next: cleanup plan show / review it. Nothing was approved or executed; Gmail was not contacted.")
+        return 0
+    return _plan_cmd(args, go)
+
+
+def cmd_cleanup_plan_list(args):
+    from gmail_intelligence import cleanup_plan_report
+    return _plan_cmd(args, lambda i, a, cp: print(cleanup_plan_report.plan_list_text(cp.list_plans(i, a))) or 0)
+
+
+def cmd_cleanup_plan_show(args):
+    from gmail_intelligence import cleanup_plan_report as rep
+
+    def go(index, account, cp):
+        if args.page_size < 1 or args.page_size > 200:
+            return _fail("--page-size must be between 1 and 200")
+        plan = cp.get_plan(index, account, args.plan_id)
+        out = {}
+        problems = {} if plan["state"] in cp.TERMINAL else cp.revalidate(index, account, plan, _out=out)
+        print(rep.plan_show_text(plan, problems, out.get("decisions"), cp.approval_status(index, account, args.plan_id),
+                                 page=args.page, page_size=args.page_size, show_ids=args.show_ids))
+        return 0
+    return _plan_cmd(args, go)
+
+
+def cmd_cleanup_plan_review(args):
+    def go(index, account, cp):
+        plan = cp.get_plan(index, account, args.plan_id)
+        if plan["state"] != "DRAFT":
+            return _fail(f"plan is {plan['state']}; only a DRAFT plan can be reviewed")
+        problems = cp.revalidate(index, account, plan)
+        if problems:
+            return _fail("plan is stale or inconsistent: " + cp._describe(problems) + "; create a new plan")
+        size = cp.PAGE_SIZE
+        pages = max(1, -(-plan["item_count"] // size))
+        print(f"Reviewing plan {plan['plan_id']}: {plan['item_count']} target(s) in {pages} page(s). You will see EVERY exact "
+              "message id of this plan (ids are shown because you asked to review the exact targets).")
+        for n in range(1, pages + 1):
+            print(f"-- page {n}/{pages}")
+            for k, item in enumerate(plan["items"][(n - 1) * size:n * size], (n - 1) * size + 1):
+                print(f"  {k:>4}. {item['message_id']}")
+            if n < pages:
+                _tty_input("Press Enter for the next page (Ctrl-D aborts) ")
+        phrase = _tty_input(f"Type exactly  {cp.review_phrase(plan)}  to mark this plan REVIEWED (anything else aborts): ")
+        done = cp.mark_reviewed(index, account, args.plan_id, phrase)
+        print(f"Plan {done['plan_id']} is now {done['state']}. Next: cleanup approve {done['plan_id']}  (local record only).")
+        return 0
+    return _plan_cmd(args, go)
+
+
+def cmd_cleanup_plan_exclude(args):
+    def go(index, account, cp):
+        new = cp.revise_exclude(index, account, args.plan_id, args.message_id or [])
+        print(f"Created {new['plan_id']} (version {new['version']}, DRAFT, {new['item_count']} targets, hash {cp.short(new['plan_hash'])}). "
+              f"{args.plan_id} is SUPERSEDED and any approval of it is revoked. The new plan needs its own review and approval.")
+        return 0
+    return _plan_cmd(args, go)
+
+
+def cmd_cleanup_plan_cancel(args):
+    def go(index, account, cp):
+        try:
+            answer = _tty_input(f"Cancel plan {args.plan_id}? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer != "y":
+            return _fail("cancelled; the plan was not changed")
+        cp.cancel(index, account, args.plan_id)
+        print(f"Plan {args.plan_id} CANCELLED; any approval was revoked.")
+        return 0
+    return _plan_cmd(args, go)
+
+
+def cmd_cleanup_approve(args):
+    from gmail_intelligence import cleanup_plan_report as rep
+
+    def go(index, account, cp):
+        plan = cp.get_plan(index, account, args.plan_id)
+        print(f"Plan {plan['plan_id']}: action {plan['action']}, {plan['item_count']} target(s), hash {cp.short(plan['plan_hash'])}, "
+              f"state {plan['state']}.")
+        print(rep.NOT_AN_AUTH)
+        phrase = _tty_input(f"Type exactly  {cp.approval_phrase(plan)}  to record a local approval (anything else aborts): ")
+        st = cp.approve(index, account, args.plan_id, phrase)
+        a = st["approvals"][-1]
+        print(f"Plan {args.plan_id} APPROVED locally (one-time; valid until {a['expires_at']}). Nothing was executed and Gmail was not contacted.")
+        return 0
+    return _plan_cmd(args, go)
+
+
+def cmd_cleanup_approval_status(args):
+    def go(index, account, cp):
+        st = cp.approval_status(index, account, args.plan_id)
+        print(f"Plan {st['plan_id']} is {st['plan_state']}.")
+        for a in st["approvals"]:
+            print(f"  approval {a['nonce']}: {a['status']}, created {a['created_at']}, expires {a['expires_at']}, "
+                  f"{a['item_count']} items, hash {cp.short(a['plan_hash'])}")
+        if not st["approvals"]:
+            print("  no approval recorded")
+        print("A local approval does not authorize Gmail access or execution.")
+        return 0
+    return _plan_cmd(args, go)
+
+
+def cmd_cleanup_audit_verify(args):
+    from gmail_intelligence import cleanup_audit
+
+    def go(index, account, cp):
+        ok, n, bad = cleanup_audit.verify_chain(index, account)
+        print(f"Audit chain: {n} event(s), " + ("consistent." if ok else f"BROKEN at event {bad}."))
+        print("This detects accidental or casual edits only; it is not protection against someone who controls this user account.")
+        return 0 if ok else 1
+    return _plan_cmd(args, go)
+
+
+def cmd_cleanup_audit_log(args):
+    from gmail_intelligence import cleanup_audit
+
+    def go(index, account, cp):
+        for e in cleanup_audit.events(index, account, args.plan, args.limit):
+            print(f"  {e['seq']:>5} {e['at']} {e['event_type']:<18} {e['plan_id'] or '-':<15} {e['meta']}")
+        return 0
+    return _plan_cmd(args, go)
 
 
 def build_parser():
@@ -680,7 +863,7 @@ def build_parser():
     aisub = ai_p.add_subparsers(dest="ai_command", required=True, metavar="{status}")
     aisub.add_parser("status", help="show local-AI configuration; contacts nothing").set_defaults(func=cmd_classify_ai_status)
     cu = sub.add_parser("cleanup", help="safe-cleanup candidate preview and protection rules (M4A; local, read-only)")
-    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,protect}")
+    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,protect,plan,approve,approval,audit}")
     q = account_opt(cusub.add_parser("candidates", help="preview archive recommendations; changes NOTHING, contacts nothing"))
     q.add_argument("--review", action="store_true", help="show the informational REVIEW_REQUIRED view instead")
     q.add_argument("--limit", type=int, default=20, metavar="N", help="example rows to list (default 20; 0 = none)")
@@ -688,6 +871,7 @@ def build_parser():
     q.add_argument("--show-ids", action="store_true", help="include message ids in the example rows")
     q.add_argument("--show-senders", action="store_true", help="include sender addresses in the example rows")
     q.add_argument("--by-domain", action="store_true", help="also group by sender domain")
+    q.add_argument("--export-ids", metavar="FILE", help="write up to --limit ELIGIBLE message ids to a NEW private file (never inside Git)")
     q.set_defaults(func=cmd_cleanup_candidates)
     pr = cusub.add_parser("protect", help="list, add, enable, disable or remove protection rules")
     prsub = pr.add_subparsers(dest="protect_command", required=True, metavar="{list,add,enable,disable,remove}")
@@ -708,6 +892,45 @@ def build_parser():
         if name == "remove":
             q.add_argument("--yes", action="store_true", help="do not ask for confirmation")
         q.set_defaults(func=fn)
+    plan = cusub.add_parser("plan", help="immutable cleanup plans (M4B; local only, nothing executes)")
+    plsub = plan.add_subparsers(dest="plan_command", required=True, metavar="{create,list,show,review,exclude,cancel}")
+    q = account_opt(plsub.add_parser("create", help="freeze an explicit set of ELIGIBLE message ids as a DRAFT plan"))
+    q.add_argument("--message-id", action="append", metavar="ID", help="a target message id (repeatable)")
+    q.add_argument("--ids-file", metavar="FILE", help="file with one message id per line (see cleanup candidates --export-ids)")
+    q.add_argument("--min-age-days", type=int, default=90, metavar="N", help="minimum age in days (90 or more)")
+    q.set_defaults(func=cmd_cleanup_plan_create)
+    account_opt(plsub.add_parser("list", help="list plans")).set_defaults(func=cmd_cleanup_plan_list)
+    q = account_opt(plsub.add_parser("show", help="plan summary, freshness and (optionally) one page of targets"))
+    q.add_argument("plan_id")
+    q.add_argument("--page", type=int, metavar="N", help="show target page N")
+    q.add_argument("--page-size", type=int, default=25, metavar="N")
+    q.add_argument("--show-ids", action="store_true", help="print message ids on the page")
+    q.set_defaults(func=cmd_cleanup_plan_show)
+    q = account_opt(plsub.add_parser("review", help="walk through EVERY target (interactive terminal) and mark the plan REVIEWED"))
+    q.add_argument("plan_id")
+    q.set_defaults(func=cmd_cleanup_plan_review)
+    q = account_opt(plsub.add_parser("exclude", help="exclude messages: creates a NEW plan version and supersedes this one"))
+    q.add_argument("plan_id")
+    q.add_argument("--message-id", action="append", metavar="ID", required=True, help="message id to exclude (repeatable)")
+    q.set_defaults(func=cmd_cleanup_plan_exclude)
+    q = account_opt(plsub.add_parser("cancel", help="cancel a plan and revoke its approval"))
+    q.add_argument("plan_id")
+    q.set_defaults(func=cmd_cleanup_plan_cancel)
+    q = account_opt(cusub.add_parser("approve", help="record a LOCAL one-time approval (typed confirmation; no Gmail effect)"))
+    q.add_argument("plan_id")
+    q.set_defaults(func=cmd_cleanup_approve)
+    ap = cusub.add_parser("approval", help="inspect approvals")
+    apsub = ap.add_subparsers(dest="approval_command", required=True, metavar="{status}")
+    q = account_opt(apsub.add_parser("status", help="show a plan's approval records"))
+    q.add_argument("plan_id")
+    q.set_defaults(func=cmd_cleanup_approval_status)
+    au = cusub.add_parser("audit", help="local audit log of plans and approvals")
+    ausub = au.add_subparsers(dest="audit_command", required=True, metavar="{verify,log}")
+    account_opt(ausub.add_parser("verify", help="check the audit hash chain")).set_defaults(func=cmd_cleanup_audit_verify)
+    q = account_opt(ausub.add_parser("log", help="show recent audit events"))
+    q.add_argument("--plan", metavar="PLAN_ID")
+    q.add_argument("--limit", type=int, default=50, metavar="N")
+    q.set_defaults(func=cmd_cleanup_audit_log)
     return parser
 
 

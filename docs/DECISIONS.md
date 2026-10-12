@@ -28,7 +28,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D19 | Project license: **MIT** (owner decision). Dependencies are Apache-2.0, MIT and BSD-3-Clause (no publication constraint found). |
 | D20 | Before public release, commit author/committer email addresses were replaced with the maintainer's GitHub noreply address (messages, timestamps and file contents unchanged) and the cleaned history was published as a fresh repository; the original private development repository is kept as an archive. |
 
-## M4 decisions (owner-approved; M4A implemented, M4B-M4D pending)
+## M4 decisions (owner-approved; M4A merged)
 | ID | Decision |
 |----|----------|
 | D27 | **Scope of operations.** Message-level only; no thread-wide execution. Archive and Trash are the eventual operations; the first live verification is archive only. No permanent deletion, send, forward, reply or draft operation. This narrows the broader M0B allowlist (labels, thread-level when verified, ARCHITECTURE §3/§9, P4) for M4. |
@@ -40,6 +40,15 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D33 | **Credentials.** Separate read and write OAuth clients and Keychain entries (P6, Alternative B). The write client is not created and `gmail.modify` is not requested during M4A. |
 | D34 | **Revalidation.** Gmail state is re-checked immediately before execution and drifted messages are skipped. The documentation never claims absolute protection against concurrent Gmail changes. (M4C) |
 | D35 | **Constraints.** Zero Additional Cost is mandatory. No Gmail write access or live verification without a new explicit owner approval. M4A is local-only; its only schema change is v3 (`protect_rules`); candidate results are computed on demand, never stored. |
+
+## M4B decisions (implemented in the M4B branch)
+| ID | Decision |
+|----|----------|
+| D36 | **Plan model.** A plan is explicit message ids for one account and `ARCHIVE` only, frozen as canonical JSON and bound by its full SHA-256 covering every security-relevant field (ids, versions, times, policy, M3 ruleset, protection digest, index anchor, per-target digests). Targets must be currently ELIGIBLE (M4A); any ineligible id rejects the whole plan; max 500 targets; 48 h lifetime. Changes create a new version (new hash) and supersede the old plan. |
+| D37 | **Approval = local ledger record only.** Typed `ACTION COUNT HASH8` bound to the reviewed version, from a real terminal only (no `--yes`, EOF/piped input fail closed), after full local re-validation; random nonce, <= 24 h, never beyond the plan, single-use, one VALID approval per plan (unique index). It authorizes no Gmail access; M4C needs a separate owner approval. A typed phrase is not strong authentication. |
+| D38 | **Audit and retention.** Append-only per-account hash chain (counts/hashes only), tamper-evident under the stated assumptions, not tamper-proof against the same OS user. Plans, approvals and audit stay local, are never deleted automatically and survive `mailbox purge`. |
+| D39 | **Schema v4** adds `cleanup_plan`, `cleanup_item`, `cleanup_approval`, `cleanup_audit` with immutability/forward-only triggers and foreign keys, after an automatic private backup. No execution states exist until M4C adds them in its own migration. |
+| D40 | **M4B-to-M4C contract.** The executor must call `verify_approved`, consume the approval atomically at execution start, re-validate live Gmail state per message, skip drifted messages, never auto-retry or continue after ambiguity, never widen targets, and never act from plan state alone. |
 
 ## M3 decisions
 | ID | Decision |
@@ -54,7 +63,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 ## M2 decisions
 | ID | Decision |
 |----|----------|
-| D15 | Local SQLite index (`index.sqlite3` in the app-data dir, 700/600, schema version 1 via `PRAGMA user_version`, no migration framework; v2 added in M3 (D23), v3 in M4A (D35)). Tables: `messages`, `message_labels` (needed for label/category counts), `labels`, `scans`. All keyed by account. |
+| D15 | Local SQLite index (`index.sqlite3` in the app-data dir, 700/600, schema version 1 via `PRAGMA user_version`, no migration framework; v2 added in M3 (D23), v3 in M4A (D35), v4 in M4B (D39)). Tables: `messages`, `message_labels` (needed for label/category counts), `labels`, `scans`. All keyed by account. |
 | D16 | Collection policy: ids, dates, size estimate, label ids, unread flag and the lower-cased `From` address only. No bodies, snippets, subjects, attachments or other headers. Reports show sender domains; addresses only via `top-senders`. Subjects deferred until explicitly approved. |
 | D17 | Scans: newest first, 500 ids/page, one metadata fetch per message under a 4,500 units/minute budget (75% of the documented 6,000), checkpoints every 50 messages, resume via saved page token with a safe restart fallback. Rows are pruned only after a COMPLETE full scan. |
 | D18 | `*.sqlite3`/`*.db` stay git-ignored; iCloud conflict copies (`* 2.*`) are ignored too. |
