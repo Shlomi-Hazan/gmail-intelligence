@@ -212,6 +212,28 @@ class MigrationTests(TempHome):
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('class_rules','message_class')").fetchone()[0], 0)
         conn.close()
 
+    def test_corrupt_or_non_database_file_is_a_clean_error(self):
+        for body in (b"not a database at all", b"SQLite format 3\x00" + b"\xff" * 3000):
+            path = self.tmp / "bad.sqlite3"
+            path.write_bytes(body)
+            with self.assertRaises(idx.IndexProblem):
+                idx.Index(str(path))
+            self.assertEqual(path.read_bytes(), body)  # untouched
+        with mock.patch.dict(os.environ, {config.HOME_ENV: str(self.tmp / "badhome")}):
+            (self.tmp / "badhome").mkdir(mode=0o700)
+            (self.tmp / "badhome" / "index.sqlite3").write_bytes(b"garbage garbage garbage")
+            code, err = 0, io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code = cli.main(["classify", "status", "--account", ACCT])
+            self.assertEqual(code, 1)
+            self.assertIn("corrupt", err.getvalue())
+
+    def test_empty_v2_index_is_handled(self):
+        for argv in (["classify", "status"], ["classify", "preview"], ["classify", "run", "--all"], ["classify", "report"]):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main([*argv, "--account", ACCT]), 0, argv)
+
     def test_unknown_future_version_is_refused(self):
         path = self.tmp / "future.sqlite3"
         conn = sqlite3.connect(path)

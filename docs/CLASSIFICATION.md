@@ -92,6 +92,26 @@ the tool and copy the backup over `index.sqlite3`; an M2-only build cannot open 
 - Status: boundary, validation and local HTTP adapter are implemented and unit-tested with a **fake backend**. No local
   runtime is installed in the development environment, so **real inference has not been run**.
 
+## Verification status
+| Area | Status |
+|------|--------|
+| Rules engine, store, migration, CLI, reports | **Implemented and verified** by the offline test suite (synthetic data) and by an owner-run check on a real local index (migration with backup, a read-only preview, then persisted classification). Real mailbox figures are private and deliberately not published here. |
+| Local AI (`--ai`) | Boundary, schema validation and loopback adapter implemented and tested with a **fake backend only**. **Real local inference is NOT VERIFIED.** |
+| Classification accuracy | **Not measured.** |
+
+Full processing coverage is not semantic accuracy: every indexed message can have a current result while many results rest on
+weak evidence. In particular the Gmail **Primary** tab only means "not sorted into another tab" and the **Updates** tab mixes
+receipts, bills and alerts, so `PERSONAL` (from Primary) and `AUTOMATED_NOTIFICATION` (from Updates) are LOW evidence and must
+not be read as facts. Treat results as triage hints, never as grounds to delete anything.
+
+## Day-to-day use
+- Inspect: `classify status`, `classify report`, `classify explain MESSAGE_ID`, `classify rules list`.
+- Change behavior: add/disable/remove a rule, then `classify preview --limit 100` and `classify run --all` to refresh
+  (rule changes and rescans make results stale; nothing is recomputed automatically).
+- Start over without touching mail data: `classify clear --yes` removes stored classifications only; the indexed messages,
+  labels, scan history and your rules are kept.
+- An unreadable or corrupt index is reported as an error and never modified; restore the pre-M3 backup or rescan.
+
 ## Zero Additional Cost
 No paid API, model, dependency, billing setting or GitHub feature; no new dependencies at all (stdlib only); no automatic
 download. If a local runtime is not installed, the AI path simply stays off.

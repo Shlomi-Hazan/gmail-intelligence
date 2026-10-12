@@ -67,7 +67,12 @@ class Index:
         os.chmod(self.path, 0o600)
         self.conn.row_factory = sqlite3.Row
         self.migrated_from = self.backup_path = None
-        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        try:
+            version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        except sqlite3.DatabaseError:
+            self.conn.close()
+            raise IndexProblem("the local index file is unreadable or corrupt; nothing was changed. Restore a backup "
+                               "(e.g. index.sqlite3.pre-m3-backup-*) or remove the file and rescan") from None
         if version == 0:
             with self.conn:
                 self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")

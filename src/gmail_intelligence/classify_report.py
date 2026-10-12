@@ -69,7 +69,7 @@ def report_text(index, account, show_senders=False):
                     "GROUP BY rule_id, kind, value, source, confidence ORDER BY n DESC, rule_id, value", account)
     out += [f"  {r['rule_id']:<26}{r['kind']}:{r['value']:<24}{r['confidence']:<7}{r['source']:<6}{r['n']:>8,}"
             for r in rows] or ["  (none)"]
-    out += ["", "Unknown / weak-evidence groups (sender domains; use --show-senders for addresses)"]
+    out += ["", "UNKNOWN groups (sender domains; use --show-senders for addresses). LOW-evidence types are not listed here."]
     key = "m.sender" if show_senders else "COALESCE(substr(m.sender, instr(m.sender,'@')+1), '(unknown)')"
     groups = index._q(f"SELECT {key} who, COUNT(*) n FROM message_class c JOIN messages m ON m.account=c.account "
                       "AND m.id=c.message_id WHERE c.account=? AND c.kind='type' AND c.value='UNKNOWN' "

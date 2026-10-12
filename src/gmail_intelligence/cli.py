@@ -8,6 +8,7 @@ import argparse
 import os
 import shutil
 import site
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -318,6 +319,8 @@ def _with_index(args, fn):
             return fn(index, account)
     except (ValueError, idx.IndexProblem) as exc:
         return _fail(exc)
+    except sqlite3.DatabaseError:
+        return _fail("the local index database reported an error (corrupt or locked); no further changes were made")
 
 
 def cmd_mailbox_status(args):
