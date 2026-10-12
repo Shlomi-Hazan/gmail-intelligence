@@ -1,11 +1,20 @@
-"""Narrow, read-only Gmail adapter. Exposes only what M1 needs; no message content."""
+"""Narrow, read-only Gmail adapter. No message bodies, snippets, attachments or write operations."""
 import json
+from email.utils import parseaddr
 
 PROFILE_FIELDS = ("emailAddress", "messagesTotal", "threadsTotal", "historyId")
 
 
 class GmailApiError(Exception):
     """Gmail API problem. Messages never contain credentials or mailbox content."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status  # HTTP status, or None for network-level errors
+
+
+class GmailNotFoundError(GmailApiError):
+    """404: the message no longer exists."""
 
 
 class GmailAuthError(GmailApiError):
@@ -28,14 +37,16 @@ def _reasons(exc):
 def _translate(exc):
     status = getattr(getattr(exc, "resp", None), "status", None)
     if status == 429 or (status == 403 and _reasons(exc) & {"rateLimitExceeded", "userRateLimitExceeded"}):
-        return GmailRateLimitError("Gmail API rate limit exceeded; try again later")
+        return GmailRateLimitError("Gmail API rate limit exceeded; try again later", status)
     if status in (401, 403):
-        return GmailAuthError(f"Gmail API rejected the credentials (HTTP {status}); run `auth login` again")
-    return GmailApiError(f"Gmail API error (HTTP {status})")
+        return GmailAuthError(f"Gmail API rejected the credentials (HTTP {status}); run `auth login` again", status)
+    if status == 404:
+        return GmailNotFoundError("Gmail resource not found (HTTP 404)", 404)
+    return GmailApiError(f"Gmail API error (HTTP {status})", status)
 
 
 class GmailReader:
-    """Read-only operations: profile and label listing. Nothing else is exposed."""
+    """Read-only operations. Nothing that writes, sends, trashes or deletes is exposed."""
 
     RETRIES = 3  # googleapiclient retries 429/5xx with exponential backoff
 
@@ -59,6 +70,43 @@ class GmailReader:
     def list_labels(self):
         data = self._execute(self._service.users().labels().list(userId="me"))
         return [{"id": x.get("id"), "type": x.get("type")} for x in data.get("labels", [])]
+
+
+    def list_label_details(self):
+        data = self._execute(self._service.users().labels().list(
+            userId="me", fields="labels/id,labels/name,labels/type"))
+        return [{"id": x.get("id"), "name": x.get("name"), "type": x.get("type")} for x in data.get("labels", [])]
+
+    def list_message_ids(self, page_token=None, max_results=500):
+        """One page of message ids (spam/trash included), newest first. Returns (ids, next_page_token)."""
+        data = self._execute(self._service.users().messages().list(
+            userId="me", maxResults=max_results, pageToken=page_token, includeSpamTrash=True,
+            fields="messages/id,nextPageToken"))
+        return [m["id"] for m in data.get("messages", []) if m.get("id")], data.get("nextPageToken")
+
+    def get_message_metadata(self, message_id):
+        """Metadata only: ids, date, size, label ids and the From address. No snippet, body or attachments."""
+        data = self._execute(self._service.users().messages().get(
+            userId="me", id=message_id, format="metadata", metadataHeaders=["From"],
+            fields="id,threadId,internalDate,labelIds,sizeEstimate,payload/headers"))
+        if not data.get("id"):
+            raise GmailApiError("malformed Gmail response (no message id)")
+        sender = None
+        for h in (data.get("payload") or {}).get("headers") or []:
+            if str(h.get("name", "")).lower() == "from":
+                addr = parseaddr(str(h.get("value", "")))[1].strip().lower()
+                sender = addr or None
+                break
+        return {"id": data["id"], "thread_id": data.get("threadId"),
+                "internal_ms": _to_int(data.get("internalDate")), "size": _to_int(data.get("sizeEstimate")),
+                "sender": sender, "label_ids": [x for x in data.get("labelIds") or [] if isinstance(x, str)]}
+
+
+def _to_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def build_reader(creds):

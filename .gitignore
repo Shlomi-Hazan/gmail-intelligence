@@ -89,3 +89,7 @@ logs/
 *.swp
 *.swo
 .claude/settings.local.json
+
+# iCloud/Finder conflict copies (e.g. "config 2.py")
+* 2.*
+* 3.*

@@ -336,14 +336,18 @@ class GmailAdapterTests(Base):
 
     def test_only_read_methods_are_exposed(self):
         public = {n for n in dir(gmail.GmailReader) if not n.startswith("_") and callable(getattr(gmail.GmailReader, n))}
-        self.assertEqual(public, {"get_profile", "list_labels"})
+        self.assertEqual(public, {"get_profile", "list_labels", "list_label_details", "list_message_ids",
+                                  "get_message_metadata"})
         for banned in ("send", "modify", "batchModify", "trash", "delete", "insert", "import_", "drafts"):
             self.assertFalse(hasattr(gmail.GmailReader, banned), banned)
 
     def test_source_has_no_write_or_content_api_calls_and_no_broader_scopes(self):
         text = (SRC / "gmail_intelligence" / "gmail.py").read_text()
         self.assertIsNone(re.search(r"\.(send|modify|batchModify|trash|untrash|delete|batchDelete|insert|import_|"
-                                    r"drafts|settings|attachments|messages|threads|history)\(", text))
+                                    r"drafts|settings|attachments|threads|history)\(", text))
+        # the only message calls allowed are read-only list/get
+        self.assertEqual(set(re.findall(r"\.messages\(\)\.(\w+)\(", text)), {"list", "get"})
+        self.assertEqual(set(re.findall(r"\.labels\(\)\.(\w+)\(", text)), {"list"})
         for path in (SRC / "gmail_intelligence").glob("*.py"):
             src = path.read_text()
             for scope in ("gmail.modify", "gmail.send", "gmail.settings", "mail.google.com", "gmail.compose"):

@@ -222,20 +222,27 @@ def cmd_auth_logout(args):
     return 0
 
 
+def _open_reader():
+    """Load stored credentials (refreshing if needed) and build the read-only reader. Returns (reader, blob)."""
+    from gmail_intelligence import gmail, oauth
+
+    store = _store()
+    blob = store.load()
+    if blob is None:
+        raise oauth.AuthError("not logged in; run `auth login`")
+    creds = oauth.blob_to_credentials(blob, oauth.load_client_config(config.client_secret_path()))
+    if oauth.refresh_credentials(creds):
+        blob = oauth.credentials_to_blob(creds, blob.get("account"), blob["scopes"])
+        store.save(blob)
+    return gmail.build_reader(creds), blob
+
+
 def cmd_gmail_check(_args):
     from gmail_intelligence import gmail, oauth
     from gmail_intelligence.keystore import KeystoreError
 
     try:
-        store = _store()
-        blob = store.load()
-        if blob is None:
-            return _fail("not logged in; run `auth login`")
-        creds = oauth.blob_to_credentials(blob, oauth.load_client_config(config.client_secret_path()))
-        if oauth.refresh_credentials(creds):
-            blob = oauth.credentials_to_blob(creds, blob.get("account"), blob["scopes"])
-            store.save(blob)
-        reader = gmail.build_reader(creds)
+        reader, blob = _open_reader()
         profile = reader.get_profile()
         labels = reader.list_labels()
     except (oauth.AuthError, gmail.GmailApiError, KeystoreError) as exc:
@@ -248,12 +255,102 @@ def cmd_gmail_check(_args):
     return 0
 
 
+def _local_account(args):
+    """Account for local-only commands: --account, else the one stored with the Keychain login."""
+    from gmail_intelligence.keystore import KeystoreError
+
+    if getattr(args, "account", None):
+        return args.account.lower()
+    try:
+        blob = _store().load()
+    except KeystoreError as exc:
+        raise ValueError(str(exc)) from None
+    if not blob or not blob.get("account"):
+        raise ValueError("no account known; run `auth login` or pass --account EMAIL")
+    return blob["account"].lower()
+
+
+def cmd_mailbox_scan(args):
+    from gmail_intelligence import gmail, index as idx, oauth, scanner
+    from gmail_intelligence.keystore import KeystoreError
+
+    mode = "full" if args.all else "limited"
+    if args.limit is not None and args.limit < 1:
+        return _fail("--limit must be at least 1")
+    try:
+        reader, blob = _open_reader()
+        profile = reader.get_profile()
+        account = profile["emailAddress"].lower()
+        if account != str(blob.get("account", "")).lower():
+            return _fail("authenticated account differs from the stored account; run `auth logout` and `auth login`")
+        if args.all or args.resume:
+            est = profile.get("messagesTotal")
+            print(f"Account {account}: scanning " + (f"about {est:,} messages (Gmail estimate) " if est else "")
+                  + "read-only. Press Ctrl+C to stop; resume later with --resume.")
+        with idx.Index() as index:
+            row = scanner.run_scan(reader, index, account, mode=mode, limit=args.limit, resume=args.resume,
+                                   limiter=scanner.RateLimiter(args.max_units_per_minute), progress=print)
+    except scanner.ScanInterrupted as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        return 130
+    except scanner.ScanError as exc:
+        return _fail(exc)
+    except (oauth.AuthError, gmail.GmailApiError, KeystoreError, idx.IndexProblem) as exc:
+        return _fail(exc)
+    print(f"Scan {row['id']} {row['status']}: listed {row['listed']:,}, indexed {row['indexed']:,}, "
+          f"vanished {row['vanished']}, failed {row['failed']}, pruned {row['pruned']}")
+    if row["status"] == "incomplete":
+        print("Some messages could not be indexed; the index is PARTIAL. See `mailbox status`.")
+    elif mode == "limited":
+        print("Limited scan: the index is PARTIAL by design. Next: mailbox report")
+    return 0 if row["status"] == "completed" else 1
+
+
+def _with_index(args, fn):
+    from gmail_intelligence import index as idx
+
+    try:
+        account = _local_account(args)
+        with idx.Index(create=False) as index:
+            return fn(index, account)
+    except (ValueError, idx.IndexProblem) as exc:
+        return _fail(exc)
+
+
+def cmd_mailbox_status(args):
+    from gmail_intelligence import report
+    return _with_index(args, lambda i, a: print(report.status_text(i, a)) or 0)
+
+
+def cmd_mailbox_report(args):
+    from gmail_intelligence import report
+    return _with_index(args, lambda i, a: print(report.report_text(i, a)) or 0)
+
+
+def cmd_mailbox_top_senders(args):
+    from gmail_intelligence import report
+    if args.limit < 1:
+        return _fail("--limit must be at least 1")
+    return _with_index(args, lambda i, a: print(report.senders_text(i, a, args.limit, args.unread, args.domains)) or 0)
+
+
+def cmd_mailbox_purge(args):
+    def purge(index, account):
+        if not args.yes and input(f"Delete ALL locally indexed data for {account}? [y/N] ").strip().lower() != "y":
+            return _fail("cancelled")
+        index.purge(account)
+        print(f"Local index data for {account} removed. (Gmail was not touched. Delete the database file "
+              f"{index.path} to remove everything, including other accounts.)")
+        return 0
+    return _with_index(args, purge)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="gmail-intelligence",
         description="Gmail Intelligence (early development). Offline: no Gmail integration yet.",
     )
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{version,doctor,auth,gmail}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{version,doctor,auth,gmail,mailbox}")
     sub.add_parser("version", help="print the version").set_defaults(func=cmd_version)
     sub.add_parser("doctor", help="check local development prerequisites (offline)").set_defaults(func=cmd_doctor)
 
@@ -274,6 +371,30 @@ def build_parser():
     gm = sub.add_parser("gmail", help="read-only Gmail operations")
     gsub = gm.add_subparsers(dest="gmail_command", required=True, metavar="{check}")
     gsub.add_parser("check", help="verify connectivity and identity (reads profile counts only)").set_defaults(func=cmd_gmail_check)
+
+    mb = sub.add_parser("mailbox", help="read-only mailbox index and reports (M2)")
+    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,status,report,top-senders,purge}")
+    p = msub.add_parser("scan", help="index message metadata into the local database (contacts Gmail, read-only)")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--limit", type=int, metavar="N", help="index the newest N messages (recommended first run: 100)")
+    g.add_argument("--all", action="store_true", help="index the whole mailbox (long-running; explicit intent)")
+    g.add_argument("--resume", action="store_true", help="continue the last interrupted scan")
+    p.add_argument("--max-units-per-minute", type=int, default=4500, metavar="U",
+                   help="Gmail API quota-unit budget per minute (default 4500 of the documented 6000)")
+    p.set_defaults(func=cmd_mailbox_scan)
+    for name, fn, helptext in (("status", cmd_mailbox_status, "scan history and index completeness (local only)"),
+                               ("report", cmd_mailbox_report, "mailbox overview from the local index (local only)"),
+                               ("top-senders", cmd_mailbox_top_senders, "top senders from the local index (local only)"),
+                               ("purge", cmd_mailbox_purge, "delete this account's locally indexed data")):
+        q = msub.add_parser(name, help=helptext)
+        q.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the logged-in account)")
+        q.set_defaults(func=fn)
+        if name == "top-senders":
+            q.add_argument("--limit", type=int, default=20, metavar="N")
+            q.add_argument("--unread", action="store_true", help="count only unread messages")
+            q.add_argument("--domains", action="store_true", help="group by domain instead of showing addresses")
+        if name == "purge":
+            q.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     return parser
 
 

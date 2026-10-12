@@ -76,6 +76,7 @@ Controls: **P**reventive · **D**etective · **R**ecovery.
 |---|---|---|
 | Repo visibility private | Enforced by GitHub | Observed |
 | Secret scanning, push protection | Native GitHub features | **Unavailable** for this private repo on the current plan (API: "not available for this repository"). **Accepted gap** (decision); the plan is not upgraded (zero-cost). |
+| Local metadata index (M2): outside Git, 700/600 permissions, metadata only, account-keyed, `purge` command | Application control | Implemented, offline-tested; **backups (Time Machine) will contain sender addresses and label names**; no encryption beyond FileVault |
 | macOS Keychain token storage, read-only scope check (M1) | Application control | Implemented and offline-tested; the owner reported a successful live login and read-only check (not independently reproduced by the assistant) |
 | Local pre-commit scanner | **Convention** (opt-in per clone: `git config core.hooksPath .githooks`) | Covered by a 27-test regression suite (§5.3) |
 | No auto-merge, Draft PRs, review checklist | **Convention** | See DEVELOPMENT.md |

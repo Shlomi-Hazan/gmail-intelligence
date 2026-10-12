@@ -88,7 +88,7 @@ class HiddenPthTests(unittest.TestCase):
 
 class OfflineGuarantees(unittest.TestCase):
     # Only these modules may import third-party / Google libraries (all lazily imported by the CLI).
-    GOOGLE_MODULES = {"oauth.py", "gmail.py", "keystore.py"}
+    GOOGLE_MODULES = {"oauth.py", "gmail.py", "keystore.py"}  # scanner/index/report stay stdlib-only
 
     def test_runtime_dependencies_are_the_reviewed_set(self):
         text = (ROOT / "pyproject.toml").read_text()
