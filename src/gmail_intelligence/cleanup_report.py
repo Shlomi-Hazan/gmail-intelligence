@@ -19,7 +19,7 @@ def _counts(d):
 def candidates_text(result, account, review=False, limit=20, show_ids=False, show_senders=False, by_domain=False):
     s = result.summary
     o = s["outcomes"]
-    out = [f"Cleanup candidates for {cleanup_protect.mask_account(account)} (local index only; Gmail was not contacted)",
+    out = [f"Cleanup candidates for {cleanup_protect.HIDDEN_ACCOUNT} (local index only; Gmail was not contacted)",
            f"Index state: {s['index_state'].upper()} - {s['index_why']}"]
     if s["index_state"] != "complete":
         out.append("WARNING: PARTIAL index; thread completeness cannot be established, so nothing is recommended.")
@@ -31,13 +31,17 @@ def candidates_text(result, account, review=False, limit=20, show_ids=False, sho
             f"  ELIGIBLE (archive recommendation)     {o[cc.ELIGIBLE]:>9,}"]
     if review:
         out += ["", "REVIEW_REQUIRED reasons (a message can have several). These are NOT actionable."]
-        out += _counts(s["reasons"].get(cc.REVIEW, {}))
+        out += _counts(s["decisive"].get(cc.REVIEW, {}))
     else:
         out += ["", "Eligible by approving evidence (type, strength, rule)"]
         out += [f"    {t:<14}{c:<8}{rid:<28}{n:>8,}" for (t, c, rid), n in sorted(s["evidence"].items(), key=lambda x: -x[1])] \
             or ["    (none)"]
-        out += ["", "Why messages were excluded"] + _counts(s["reasons"].get(cc.EXCLUDED, {}))
-        out += ["", "Why messages need review (not recommended)"] + _counts(s["reasons"].get(cc.REVIEW, {}))
+        out += ["", "Why messages were EXCLUDED (decisive reasons; a message can have several)"]
+        out += _counts(s["decisive"].get(cc.EXCLUDED, {}))
+        out += ["", "Also present on excluded messages (accompanying review signals; NOT the reason for exclusion)"]
+        out += _counts(s["accompanying"])
+        out += ["", "Why messages need REVIEW (not recommended; each is a decisive reason)"]
+        out += _counts(s["decisive"].get(cc.REVIEW, {}))
     want = cc.REVIEW if review else cc.ELIGIBLE
     chosen = [d for d in result.decisions if d.outcome == want]
     if by_domain and chosen:
@@ -62,7 +66,7 @@ def candidates_text(result, account, review=False, limit=20, show_ids=False, sho
 
 def protect_text(index, account, show_values=False):
     rows = cleanup_protect.rows(index, account)
-    out = [f"Protection rules for {cleanup_protect.mask_account(account)} (a matching message is never a cleanup candidate;"
+    out = [f"Protection rules for {cleanup_protect.HIDDEN_ACCOUNT} (a matching message is never a cleanup candidate;"
            f" all conditions of one rule must match, several rules combine as OR)"]
     for r in rows:
         conds = [f"{k}={v if show_values else cleanup_protect.mask_value(k, v)}" for k, v in
@@ -72,5 +76,5 @@ def protect_text(index, account, show_values=False):
     if not rows:
         out.append("  (none yet; add one with `cleanup protect add`)")
     elif not show_values:
-        out.append("  (values are partly masked; use --show-values to display them)")
+        out.append("  (values are hidden; use --show-values to display them)")
     return "\n".join(out)

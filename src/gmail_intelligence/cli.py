@@ -553,8 +553,12 @@ def cmd_cleanup_protect_remove(args):
     from gmail_intelligence import cleanup_protect
 
     def go(index, account):
-        if not args.yes and input(f"Remove protection rule {args.rule_id}? Messages it covered may become candidates. [y/N] "
-                                  ).strip().lower() != "y":
+        try:
+            answer = "y" if args.yes else input(f"Remove protection rule {args.rule_id}? Messages it covered may become "
+                                                "candidates. [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""  # no terminal input available: treat as "no"
+        if answer != "y":
             return _fail("cancelled")
         if not cleanup_protect.remove(index, account, args.rule_id):
             return _fail(f"no such protection rule: {args.rule_id}")

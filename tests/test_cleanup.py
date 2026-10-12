@@ -198,6 +198,22 @@ class PolicyTests(Base):
         self.assertIn("CLASSIFICATION_STALE", self.decide()[0]["m1"].codes)
 
 
+class SummaryTests(Base):
+    def test_decisive_and_accompanying_reasons_keep_all_underlying_codes(self):
+        self.seed([msg(1, labels=("INBOX", "CATEGORY_PROMOTIONS", "STARRED", "UNREAD")),  # excluded + review signal
+                   msg(2, labels=("INBOX", "CATEGORY_PROMOTIONS", "UNREAD")),  # review only
+                   msg(3)])
+        d, res = self.decide()
+        self.assertEqual((d["m1"].outcome, d["m2"].outcome, d["m3"].outcome), (cc.EXCLUDED, cc.REVIEW, cc.ELIGIBLE))
+        self.assertIn("UNREAD", d["m1"].codes)  # underlying codes untouched
+        self.assertIn("STARRED", d["m1"].codes)
+        sm = res.summary
+        self.assertEqual(sm["decisive"][cc.EXCLUDED], {"STARRED": 1})
+        self.assertEqual(sm["accompanying"], {"UNREAD": 1, "ATTENTION_SIGNAL": 1})  # starring also raises an attention signal
+        self.assertEqual(sm["decisive"][cc.REVIEW], {"UNREAD": 1})
+        self.assertEqual(sm["reasons"][cc.EXCLUDED], {"STARRED": 1, "UNREAD": 1, "ATTENTION_SIGNAL": 1})  # legacy view intact
+
+
 class ThreadTests(Base):
     def test_homogeneous_thread_is_eligible(self):
         self.seed([msg(1, thread="T"), msg(2, thread="T")])
@@ -435,11 +451,42 @@ class CliTests(Base):
         self.assertIn("Evaluated 4 messages", o)
         for secret in (SENDER_SENTINEL, ACCT, "sentinel.example.invalid", "m1", LABEL_SENTINEL):
             self.assertNotIn(secret, o)
-        self.assertIn("o***@example.invalid", o)
+        self.assertIn("<account hidden>", o)
+        self.assertNotIn("example.invalid", o)  # not even the domain of the account
         c, o, _ = self.cli("cleanup", "candidates", *self.a, "--show-ids", "--show-senders", "--by-domain")
         self.assertIn("id=m1", o)
         self.assertIn(SENDER_SENTINEL, o)
         self.assertIn("sentinel.example.invalid", o)
+
+    def test_protect_list_hides_every_value_by_default(self):
+        self.cli("cleanup", "protect", "add", *self.a, "--sender", SENDER_SENTINEL, "--note", "n1")
+        self.cli("cleanup", "protect", "add", *self.a, "--domain", "sentinel.example.invalid")
+        self.cli("cleanup", "protect", "add", *self.a, "--label", LABEL_SENTINEL)
+        listing = self.cli("cleanup", "protect", "list", *self.a)[1]
+        for secret in (SENDER_SENTINEL, "sentinel.example.invalid", LABEL_SENTINEL, "SentinelPriv", "Se...", "se...", "n1", ACCT):
+            self.assertNotIn(secret, listing)
+        shown = self.cli("cleanup", "protect", "list", *self.a, "--show-values")[1]
+        for value in (SENDER_SENTINEL, "sentinel.example.invalid", LABEL_SENTINEL):
+            self.assertIn(value, shown)
+
+    def test_reason_summaries_separate_decisive_from_accompanying(self):
+        o = self.cli("cleanup", "candidates", *self.a)[1]
+        self.assertIn("decisive reasons", o)
+        self.assertIn("accompanying review signals; NOT the reason for exclusion", o)
+        excl = o.split("Why messages were EXCLUDED")[1].split("Also present on excluded")[0]
+        acc = o.split("Also present on excluded")[1].split("Why messages need REVIEW")[0]
+        self.assertIn("STARRED", excl)
+        self.assertIn("TOO_RECENT", excl)
+        self.assertNotIn("UNREAD", excl)  # review-type signals never listed as decisive exclusion reasons
+        self.assertNotIn("STARRED", acc)
+
+    def test_protect_remove_without_terminal_input_is_cancelled_not_a_traceback(self):
+        self.cli("cleanup", "protect", "add", *self.a, "--domain", "shop.example.test")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch("builtins.input", side_effect=EOFError):
+            self.assertEqual(cli.main(["cleanup", "protect", "remove", "p1", *self.a]), 1)
+        self.assertIn("cancelled", err.getvalue())
+        self.assertEqual(len(cleanup_protect.rows(self.index, ACCT)), 1)
 
     def test_review_view_is_informational(self):
         c, o, _ = self.cli("cleanup", "candidates", *self.a, "--review")
@@ -459,8 +506,10 @@ class CliTests(Base):
         self.assertIn("1 active protection rule", after)
         listing = self.cli("cleanup", "protect", "list", *self.a)[1]
         self.assertIn("p1", listing)
-        self.assertIn("masked", listing)
+        self.assertIn("values are hidden", listing)
         self.assertNotIn("shop.example.test", listing)
+        self.assertNotIn("example.invalid", listing)
+        self.assertIn("<hidden>", listing)
         self.assertIn("shop.example.test", self.cli("cleanup", "protect", "list", *self.a, "--show-values")[1])
         self.assertEqual(self.cli("cleanup", "protect", "disable", "p1", *self.a)[0], 0)
         self.assertIn("OFF", self.cli("cleanup", "protect", "list", *self.a)[1])

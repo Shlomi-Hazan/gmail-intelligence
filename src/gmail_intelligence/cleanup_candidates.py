@@ -177,16 +177,25 @@ def evaluate_all(index, account, now_ms=None, min_age_days=MIN_AGE_DAYS):
 
 def _summary(decisions, account, protect, state, why, min_age_days, n_threads, n_mixed):
     outcomes = {EXCLUDED: 0, REVIEW: 0, ELIGIBLE: 0}
-    reasons, by_cat, ev = {}, {}, {}
+    reasons, decisive, accompanying, ev = {}, {}, {}, {}
     for d in decisions:
         outcomes[d.outcome] += 1
         for code in d.codes:
             reasons.setdefault(d.outcome, {})
             reasons[d.outcome][code] = reasons[d.outcome].get(code, 0) + 1
+        # An EXCLUDED message is excluded by hard-protection / unsafe-data / not-applicable reasons only; any review-type
+        # signals it also carries are accompanying information, not why it was excluded.
+        for code in {x.code for x in d.reasons if x.category != RISK or d.outcome == REVIEW}:
+            decisive.setdefault(d.outcome, {})
+            decisive[d.outcome][code] = decisive[d.outcome].get(code, 0) + 1
+        if d.outcome == EXCLUDED:
+            for code in {x.code for x in d.reasons if x.category == RISK}:
+                accompanying[code] = accompanying.get(code, 0) + 1
         for t, c, rid in d.evidence:
             key = (t, c, rid)
             ev[key] = ev.get(key, 0) + 1
-    return {"total": len(decisions), "outcomes": outcomes, "reasons": reasons, "evidence": ev,
+    return {"total": len(decisions), "outcomes": outcomes, "reasons": reasons, "decisive": decisive,
+            "accompanying": accompanying, "evidence": ev,
             "policy": f"v{POLICY_VERSION}/archive>={min_age_days}d", "min_age_days": min_age_days,
             "protection_fingerprint": cleanup_protect.fingerprint(account, protect),
             "protection_rules_active": len(protect), "index_state": state, "index_why": why,

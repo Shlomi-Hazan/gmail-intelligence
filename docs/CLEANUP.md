@@ -42,7 +42,7 @@ gmail-intelligence cleanup protect add     --account EMAIL [--sender ADDRESS] [-
 gmail-intelligence cleanup protect disable|enable|remove RULE_ID --account EMAIL
 ```
 Default output is aggregate: counts, reasons, approving evidence by rule, and anonymized example rows (age bucket and reason
-codes). Message ids, sender addresses, domains and rule values appear only with the explicit flags; the account is masked.
+codes). Message ids, sender addresses, domains and rule values appear only with the explicit flags (`--show-ids`, `--show-senders`, `--by-domain`, `--show-values`); the account is always shown as `<account hidden>`, and `protect list` shows `<hidden>` for every stored value. The exclusion summary separates the *decisive* reasons from *accompanying* review signals that an excluded message also carries (they are not why it was excluded). Reason codes and evaluation are unchanged by this presentation.
 `--min-age-days` may only be stricter than 90. Run `classify run --all` first so classifications are current.
 
 **Protection rules** use the M3 vocabulary (exact sender, exact domain, label id or name; no wildcards or regex). All conditions

@@ -60,15 +60,10 @@ def remove(index, account, rule_id):
     return cur.rowcount == 1
 
 
-def mask_account(account):
-    local, _, dom = account.partition("@")
-    return (local[:1] + "***@" + dom) if dom else account[:1] + "***"
+HIDDEN_ACCOUNT = "<account hidden>"
+HIDDEN_VALUE = "<hidden>"
 
 
 def mask_value(kind, value):
-    """Redacted display of a stored condition (default in listings)."""
-    if value is None:
-        return None
-    if kind == "sender":
-        return mask_account(value)
-    return value[:2] + "..."  # domain and label: first two characters only
+    """Default display of a stored condition: fully hidden (use --show-values to reveal)."""
+    return None if value is None else HIDDEN_VALUE
