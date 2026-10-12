@@ -26,6 +26,12 @@ MAX_PLAN_ITEMS = 500
 PLAN_TTL = timedelta(hours=48)
 APPROVAL_TTL = timedelta(hours=24)
 PAGE_SIZE = 25
+CLOCK_TOLERANCE = timedelta(minutes=5)  # how far "now" may lag the last recorded event / an approval's creation time
+MAX_FAILED_ATTEMPTS = 10  # failed review/approval confirmations per plan within LOCKOUT_WINDOW before further attempts are refused
+LOCKOUT_WINDOW = timedelta(minutes=15)
+ITEM_KEYS = frozenset({"id", "thread_id", "internal_ms", "scan_id", "unread", "sender_sha256", "labels_sha256", "class_sha256"})
+SNAPSHOT_KEYS = ("format", "plan_id", "version", "parent", "account", "action", "created_at", "expires_at", "policy",
+                 "classification_ruleset", "protection_digest", "index", "items")
 TERMINAL = ("CANCELLED", "EXPIRED", "SUPERSEDED")
 LIVE_STATES = ("DRAFT", "REVIEWED", "APPROVED")
 _CHUNK = 400
@@ -49,6 +55,22 @@ def _iso(dt):
 
 def _ms(dt):
     return int(dt.timestamp() * 1000)
+
+
+def _parse(ts):
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def _check_clock(index, account, now):
+    """Refuse to record anything if the clock is earlier than the last recorded cleanup event (rollback or wrong clock).
+
+    A local wall clock can never prove real elapsed time against someone who controls it; this only catches accidents and
+    naive rollbacks.
+    """
+    last = audit.last_time(index, account)
+    if last and now < _parse(last) - CLOCK_TOLERANCE:
+        raise PlanError("CLOCK_ROLLBACK", "the system clock is earlier than the last recorded cleanup event; fix the clock "
+                        "before continuing (nothing was changed)")
 
 
 @contextlib.contextmanager
@@ -148,8 +170,10 @@ def integrity_problems(plan):
         return ["HASH_MISMATCH"]
     try:
         snap = json.loads(plan["snapshot"])
-    except ValueError:
+    except (ValueError, TypeError):
         return ["SNAPSHOT_UNREADABLE"]
+    if not _shape_ok(snap):
+        return ["SNAPSHOT_MALFORMED"]
     if canonical(snap) != plan["snapshot"]:
         problems.append("SNAPSHOT_NOT_CANONICAL")
     for key in ("account", "plan_id", "version", "action", "created_at", "expires_at"):
@@ -166,8 +190,26 @@ def integrity_problems(plan):
     return sorted(set(problems))
 
 
+def _shape_ok(snap):
+    try:
+        return (isinstance(snap, dict) and all(k in snap for k in SNAPSHOT_KEYS) and snap["format"] == FORMAT_VERSION
+                and isinstance(snap["items"], list) and all(isinstance(i, dict) and set(i) == ITEM_KEYS for i in snap["items"])
+                and isinstance(snap["policy"], dict) and isinstance(snap["policy"].get("min_age_days"), int)
+                and isinstance(snap["index"], dict) and isinstance(snap["account"], str))
+    except (KeyError, TypeError):
+        return False
+
+
 def snapshot_of(plan):
-    return json.loads(plan["snapshot"])
+    """Parsed snapshot, or a clean PlanError (never a raw JSON error, traceback or snapshot text)."""
+    try:
+        snap = json.loads(plan["snapshot"])
+    except (ValueError, TypeError):
+        snap = None
+    if not _shape_ok(snap):
+        raise PlanError("SNAPSHOT_UNREADABLE", "the stored plan snapshot is unreadable or malformed; nothing was changed. "
+                        "Cancel this plan and create a new one.")
+    return snap
 
 
 # ---------------------------------------------------------------- freshness
@@ -190,6 +232,8 @@ def revalidate(index, account, plan, now=None, _out=None):
     snap = snapshot_of(plan)
     if _iso(now) >= plan["expires_at"]:
         bad("PLAN_EXPIRED")
+    if now < _parse(plan["created_at"]) - CLOCK_TOLERANCE:
+        bad("PLAN_FROM_THE_FUTURE")
     min_age = snap["policy"]["min_age_days"]
     if snap["policy"] != _policy(min_age):
         bad("POLICY_CHANGED")
@@ -321,6 +365,7 @@ def create_plan(index, account, message_ids, min_age_days=cc.MIN_AGE_DAYS, now=N
     now = _utc(now)
     expire_due(index, account, now)
     with _txn(index):
+        _check_clock(index, account, now)
         pid = _insert_plan(index, account, ids, min_age_days, now)
     return get_plan(index, account, pid)
 
@@ -333,6 +378,7 @@ def revise_exclude(index, account, plan_id, exclude_ids, now=None):
     if not exclude or any(not valid_id(i) for i in exclude):
         raise PlanError("BAD_INPUT", "give at least one valid --message-id to exclude")
     with _txn(index):
+        _check_clock(index, account, now)
         parent = get_plan(index, account, plan_id)
         if parent["state"] not in LIVE_STATES:
             raise PlanError("NOT_ACTIVE", f"plan is {parent['state']}; only an active plan can be revised")
@@ -355,34 +401,74 @@ def revise_exclude(index, account, plan_id, exclude_ids, now=None):
 
 
 def _reject(index, account, plan_id, event, at, code, detail=None):
-    """Record a failed validation in its own transaction (the failed operation was rolled back)."""
+    """Record a failed validation in its own transaction (the failed operation was rolled back). Returns False on failure."""
     try:
         with _txn(index):
             audit.append(index, account, plan_id, event, at, {"code": code, "detail": (detail or "")[:190]})
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _lockout(index, account, plan_id, now):
+    """Inside the caller's transaction: refuse when too many confirmations failed recently (bounds log growth and guessing)."""
+    since = _iso(now - LOCKOUT_WINDOW)
+    if audit.recent(index, account, plan_id, ("APPROVAL_REJECTED", "REVIEW_REJECTED"), since) >= MAX_FAILED_ATTEMPTS:
+        raise PlanError("LOCKED_OUT", f"{MAX_FAILED_ATTEMPTS} failed confirmations for this plan in the last "
+                        f"{int(LOCKOUT_WINDOW.total_seconds() // 60)} minutes; further attempts are refused until the window passes")
+
+
+def _note_lockout(index, account, plan_id, now):
+    """Record ONE lockout event per window (refused attempts after that write nothing, so the log cannot be flooded)."""
+    since = _iso(now - LOCKOUT_WINDOW)
+    try:
+        with _txn(index):
+            if not audit.recent(index, account, plan_id, ("ATTEMPTS_LOCKED_OUT",), since):
+                audit.append(index, account, plan_id, "ATTEMPTS_LOCKED_OUT", _iso(now), {"window_minutes": int(LOCKOUT_WINDOW.total_seconds() // 60)})
     except sqlite3.Error:
         pass
+
+
+def _guard(index, account, plan_id, event, now, body, duplicate_check=False):
+    """Run `body(plan)` in one IMMEDIATE transaction with clock, lockout and error handling shared by review and approval."""
+    at = _iso(now)
+    err = None
+    try:
+        with _txn(index):
+            _check_clock(index, account, now)
+            plan = get_plan(index, account, plan_id)
+            _lockout(index, account, plan_id, now)
+            return body(plan)
+    except sqlite3.IntegrityError:
+        dup = duplicate_check and bool(index._q("SELECT 1 FROM cleanup_approval WHERE account=? AND plan_id=? AND status='VALID'",
+                                                account, plan_id))
+        err = PlanError("ALREADY_APPROVED", "a valid approval already exists for this plan") if dup else PlanError(
+            "DB_CONSTRAINT", "an unexpected database constraint stopped this step; nothing was changed")
+    except PlanError as exc:
+        err = exc
+    if err.code == "LOCKED_OUT":
+        _note_lockout(index, account, plan_id, now)
+    elif err.code not in ("NO_SUCH_PLAN", "CLOCK_ROLLBACK") and not _reject(index, account, plan_id, event, at, err.code):
+        err = PlanError(err.code, str(err) + " [warning: the audit entry for this failure could not be written]")
+    raise err
 
 
 def mark_reviewed(index, account, plan_id, phrase, now=None):
     now = _utc(now)
     at = _iso(now)
     expire_due(index, account, now)
-    try:
-        with _txn(index):
-            plan = get_plan(index, account, plan_id)
-            if plan["state"] != "DRAFT":
-                raise PlanError("BAD_STATE", f"plan is {plan['state']}; only a DRAFT plan can be reviewed")
-            problems = revalidate(index, account, plan, now)
-            if problems:
-                raise PlanError("STALE", "plan is stale or inconsistent: " + _describe(problems) + ". Create a new plan.")
-            if (phrase or "").strip() != review_phrase(plan):
-                raise PlanError("BAD_CONFIRMATION", "confirmation text did not match; plan stays DRAFT")
-            _set_state(index, account, plan_id, "REVIEWED", at, reviewed=True)
-            audit.append(index, account, plan_id, "PLAN_REVIEWED", at, {"items": plan["item_count"], "plan_hash": plan["plan_hash"]})
-    except PlanError as exc:
-        if exc.code != "NO_SUCH_PLAN":
-            _reject(index, account, plan_id, "REVIEW_REJECTED", at, exc.code)
-        raise
+
+    def body(plan):
+        if plan["state"] != "DRAFT":
+            raise PlanError("BAD_STATE", f"plan is {plan['state']}; only a DRAFT plan can be reviewed")
+        problems = revalidate(index, account, plan, now)
+        if problems:
+            raise PlanError("STALE", "plan is stale or inconsistent: " + _describe(problems) + ". Create a new plan.")
+        if (phrase or "").strip() != review_phrase(plan):
+            raise PlanError("BAD_CONFIRMATION", "confirmation text did not match; plan stays DRAFT")
+        _set_state(index, account, plan_id, "REVIEWED", at, reviewed=True)
+        audit.append(index, account, plan_id, "PLAN_REVIEWED", at, {"items": plan["item_count"], "plan_hash": plan["plan_hash"]})
+    _guard(index, account, plan_id, "REVIEW_REJECTED", now, body)
     return get_plan(index, account, plan_id)
 
 
@@ -391,34 +477,27 @@ def approve(index, account, plan_id, phrase, now=None):
     now = _utc(now)
     at = _iso(now)
     expire_due(index, account, now)
-    try:
-        with _txn(index):
-            plan = get_plan(index, account, plan_id)
-            if plan["state"] == "APPROVED":
-                raise PlanError("ALREADY_APPROVED", "this plan already has an approval; approvals are one-time and cannot be repeated")
-            if plan["state"] != "REVIEWED":
-                raise PlanError("BAD_STATE", f"plan is {plan['state']}; only a REVIEWED plan can be approved")
-            problems = revalidate(index, account, plan, now)
-            if problems:
-                raise PlanError("STALE", "plan is stale or inconsistent: " + _describe(problems) + ". Create a new plan.")
-            if (phrase or "").strip() != approval_phrase(plan):
-                raise PlanError("BAD_CONFIRMATION", "confirmation text did not match; nothing was approved")
-            nonce = secrets.token_hex(16)
-            expires = min(now + APPROVAL_TTL, datetime.strptime(plan["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc))
-            index.conn.execute("INSERT INTO cleanup_approval (account, plan_id, nonce, plan_hash, action, item_count, created_at, "
-                               "expires_at, status, status_changed_at) VALUES (?,?,?,?,?,?,?,?,'VALID',?)",
-                               (account, plan_id, nonce, plan["plan_hash"], plan["action"], plan["item_count"], at, _iso(expires), at))
-            _set_state(index, account, plan_id, "APPROVED", at)
-            audit.append(index, account, plan_id, "PLAN_APPROVED", at,
-                         {"items": plan["item_count"], "plan_hash": plan["plan_hash"], "nonce_sha256": sha256(nonce),
-                          "expires_at": _iso(expires)})
-    except sqlite3.IntegrityError:
-        _reject(index, account, plan_id, "APPROVAL_REJECTED", at, "CONFLICT")
-        raise PlanError("ALREADY_APPROVED", "a valid approval already exists for this plan")
-    except PlanError as exc:
-        if exc.code != "NO_SUCH_PLAN":
-            _reject(index, account, plan_id, "APPROVAL_REJECTED", at, exc.code)
-        raise
+
+    def body(plan):
+        if plan["state"] == "APPROVED":
+            raise PlanError("ALREADY_APPROVED", "this plan already has an approval; approvals are one-time and cannot be repeated")
+        if plan["state"] != "REVIEWED":
+            raise PlanError("BAD_STATE", f"plan is {plan['state']}; only a REVIEWED plan can be approved")
+        problems = revalidate(index, account, plan, now)
+        if problems:
+            raise PlanError("STALE", "plan is stale or inconsistent: " + _describe(problems) + ". Create a new plan.")
+        if (phrase or "").strip() != approval_phrase(plan):
+            raise PlanError("BAD_CONFIRMATION", "confirmation text did not match; nothing was approved")
+        nonce = secrets.token_hex(16)
+        expires = min(now + APPROVAL_TTL, _parse(plan["expires_at"]))
+        index.conn.execute("INSERT INTO cleanup_approval (account, plan_id, nonce, plan_hash, action, item_count, created_at, "
+                           "expires_at, status, status_changed_at) VALUES (?,?,?,?,?,?,?,?,'VALID',?)",
+                           (account, plan_id, nonce, plan["plan_hash"], plan["action"], plan["item_count"], at, _iso(expires), at))
+        _set_state(index, account, plan_id, "APPROVED", at)
+        audit.append(index, account, plan_id, "PLAN_APPROVED", at,
+                     {"items": plan["item_count"], "plan_hash": plan["plan_hash"], "nonce_sha256": sha256(nonce),
+                      "expires_at": _iso(expires)})
+    _guard(index, account, plan_id, "APPROVAL_REJECTED", now, body, duplicate_check=True)
     return approval_status(index, account, plan_id, now)
 
 
@@ -454,20 +533,45 @@ def approval_status(index, account, plan_id, now=None):
 def verify_approved(index, account, plan_id, now=None):
     """Read-only check an executor must pass FIRST: returns {problem: count}; empty means locally approved and fresh.
 
-    It consumes nothing and is not an authorization to touch Gmail.
+    It consumes nothing and is NOT an authorization to touch Gmail. It cross-checks the approval row against the plan, the clock
+    and the audit chain, which catches accidental inconsistencies and naive forgeries; it cannot authenticate a database that
+    someone with write access has consistently rewritten (the executor must also re-validate live Gmail state and ask the owner
+    again at execution time).
     """
     now = _utc(now)
     plan = get_plan(index, account, plan_id)
     problems = revalidate(index, account, plan, now)
+
+    def bad(code):
+        problems[code] = problems.get(code, 0) + 1
     if plan["state"] != "APPROVED":
-        problems["NOT_APPROVED"] = 1
+        bad("NOT_APPROVED")
     valid = [r for r in index._q("SELECT * FROM cleanup_approval WHERE account=? AND plan_id=? AND status='VALID'", account, plan_id)]
     if len(valid) != 1:
-        problems["NO_SINGLE_VALID_APPROVAL"] = 1
-    else:
-        a = valid[0]
-        if a["plan_hash"] != plan["plan_hash"] or a["action"] != plan["action"] or a["item_count"] != plan["item_count"]:
-            problems["APPROVAL_MISMATCH"] = 1
-        if _iso(now) >= a["expires_at"]:
-            problems["APPROVAL_EXPIRED"] = 1
+        bad("NO_SINGLE_VALID_APPROVAL")
+        return problems
+    a = valid[0]
+    if a["plan_hash"] != plan["plan_hash"] or a["action"] != plan["action"] or a["item_count"] != plan["item_count"]:
+        bad("APPROVAL_MISMATCH")
+    if _iso(now) >= a["expires_at"]:
+        bad("APPROVAL_EXPIRED")
+    try:
+        created, expires, plan_created, plan_expires = (_parse(a["created_at"]), _parse(a["expires_at"]),
+                                                        _parse(plan["created_at"]), _parse(plan["expires_at"]))
+    except ValueError:
+        bad("APPROVAL_TIMESTAMP_INVALID")
+        return problems
+    if now < created - CLOCK_TOLERANCE:
+        bad("CLOCK_BEFORE_APPROVAL")
+    if created < plan_created or expires - created > APPROVAL_TTL or expires > plan_expires:
+        bad("APPROVAL_TIMES_INCONSISTENT")
+    if not audit.verify_chain(index, account)[0]:
+        bad("AUDIT_CHAIN_BROKEN")
+    logged = False
+    for e in audit.events(index, account, plan_id, 1000):
+        if e["event_type"] == "PLAN_APPROVED":
+            meta = json.loads(e["meta"])
+            logged = logged or (meta.get("plan_hash") == plan["plan_hash"] and meta.get("nonce_sha256") == sha256(a["nonce"]))
+    if not logged:
+        bad("APPROVAL_NOT_IN_AUDIT")
     return problems

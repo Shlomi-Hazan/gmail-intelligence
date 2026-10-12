@@ -710,7 +710,9 @@ def cmd_cleanup_approve(args):
         phrase = _tty_input(f"Type exactly  {cp.approval_phrase(plan)}  to record a local approval (anything else aborts): ")
         st = cp.approve(index, account, args.plan_id, phrase)
         a = st["approvals"][-1]
+        from gmail_intelligence import cleanup_audit
         print(f"Plan {args.plan_id} APPROVED locally (one-time; valid until {a['expires_at']}). Nothing was executed and Gmail was not contacted.")
+        print(f"Audit head after this approval: {cleanup_audit.head(index, account)[1][:16]} (optional checkpoint; see `cleanup audit verify --checkpoint`).")
         return 0
     return _plan_cmd(args, go)
 
@@ -734,8 +736,19 @@ def cmd_cleanup_audit_verify(args):
 
     def go(index, account, cp):
         ok, n, bad = cleanup_audit.verify_chain(index, account)
-        print(f"Audit chain: {n} event(s), " + ("consistent." if ok else f"BROKEN at event {bad}."))
-        print("This detects accidental or casual edits only; it is not protection against someone who controls this user account.")
+        count, head = cleanup_audit.head(index, account)
+        print(f"Audit chain: {n} event(s), " + ("internally consistent." if ok else f"BROKEN at event {bad}."))
+        if head:
+            print(f"Head: {head[:16]}  (write this down somewhere outside this computer as a checkpoint)")
+        if args.checkpoint:
+            try:
+                found = cleanup_audit.contains(index, account, args.checkpoint)
+            except ValueError as exc:
+                return _fail(exc)
+            print("Checkpoint " + ("FOUND in the chain." if found else "NOT FOUND: events were removed or rewritten since you recorded it."))
+            ok = ok and found
+        print("Limits: deleting the newest events or the whole log is undetectable without such a checkpoint, and anyone who controls "
+              "this user account can rewrite everything. The chain is tamper-evident at best, never tamper-proof.")
         return 0 if ok else 1
     return _plan_cmd(args, go)
 
@@ -744,6 +757,8 @@ def cmd_cleanup_audit_log(args):
     from gmail_intelligence import cleanup_audit
 
     def go(index, account, cp):
+        if not 1 <= args.limit <= 1000:
+            return _fail("--limit must be between 1 and 1000")
         for e in cleanup_audit.events(index, account, args.plan, args.limit):
             print(f"  {e['seq']:>5} {e['at']} {e['event_type']:<18} {e['plan_id'] or '-':<15} {e['meta']}")
         return 0
@@ -926,7 +941,9 @@ def build_parser():
     q.set_defaults(func=cmd_cleanup_approval_status)
     au = cusub.add_parser("audit", help="local audit log of plans and approvals")
     ausub = au.add_subparsers(dest="audit_command", required=True, metavar="{verify,log}")
-    account_opt(ausub.add_parser("verify", help="check the audit hash chain")).set_defaults(func=cmd_cleanup_audit_verify)
+    q = account_opt(ausub.add_parser("verify", help="check the audit hash chain (and optionally a checkpoint you recorded earlier)"))
+    q.add_argument("--checkpoint", metavar="HASH_PREFIX", help="a head hash you wrote down earlier (>= 8 hex characters)")
+    q.set_defaults(func=cmd_cleanup_audit_verify)
     q = account_opt(ausub.add_parser("log", help="show recent audit events"))
     q.add_argument("--plan", metavar="PLAN_ID")
     q.add_argument("--limit", type=int, default=50, metavar="N")

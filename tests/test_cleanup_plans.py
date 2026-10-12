@@ -229,14 +229,14 @@ class LifecycleTests(PlanBase):
         p = self.reviewed()
         good = cp.approval_phrase(p)
         self.assertEqual(good, f"ARCHIVE 3 {p['plan_hash'][:8]}")
-        for bad in ("", "yes", "y", "ARCHIVE", f"ARCHIVE 4 {p['plan_hash'][:8]}", f"archive 3 {p['plan_hash'][:8]}",
-                    f"ARCHIVE 3 {p['plan_hash'][:7]}", f"ARCHIVE 3 {'0' * 8}", f"TRASH 3 {p['plan_hash'][:8]}", good + " now", None):
+        for bad in ("", "yes", "ARCHIVE", f"ARCHIVE 4 {p['plan_hash'][:8]}", f"archive 3 {p['plan_hash'][:8]}",
+                    f"ARCHIVE 3 {p['plan_hash'][:7]}", f"ARCHIVE 3 {'0' * 8}", f"TRASH 3 {p['plan_hash'][:8]}", good + " now"):
             with self.assertRaises(cp.PlanError, msg=bad) as cm:
                 cp.approve(self.index, ACCT, p["plan_id"], bad, now=T0)
             self.assertEqual(cm.exception.code, "BAD_CONFIRMATION")
         self.assertEqual(cp.get_plan(self.index, ACCT, p["plan_id"])["state"], "REVIEWED")
         self.assertEqual(self.count("cleanup_approval"), 0)
-        self.assertEqual(self.events().count("APPROVAL_REJECTED"), 11)  # every rejected attempt is logged
+        self.assertEqual(self.events().count("APPROVAL_REJECTED"), 9)  # every rejected attempt (below the lockout limit) is logged
         st = cp.approve(self.index, ACCT, p["plan_id"], good, now=T0)
         self.assertEqual(st["plan_state"], "APPROVED")
         self.assertEqual([a["status"] for a in st["approvals"]], ["VALID"])

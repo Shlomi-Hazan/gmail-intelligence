@@ -32,13 +32,17 @@ def summary(plan, decisions):
 
 
 def plan_show_text(plan, problems, decisions, approvals, page=None, page_size=cp.PAGE_SIZE, show_ids=False):
-    snap = cp.snapshot_of(plan)
+    try:
+        snap = cp.snapshot_of(plan)
+        policy_line = (f"  policy: cleanup v{snap['policy']['cleanup_policy']}, archive >= {snap['policy']['min_age_days']} days; "
+                       f"message-level only (no thread expansion)")
+    except cp.PlanError:
+        policy_line = "  policy: (snapshot unreadable: this plan cannot be used; cancel it and create a new one)"
     out = [f"Plan {plan['plan_id']} (version {plan['version']}" + (f", revises {plan['parent_id']}" if plan["parent_id"] else "") + ")",
            f"  account: {cleanup_protect.HIDDEN_ACCOUNT}   action: {plan['action']}   targets: {plan['item_count']}   state: {plan['state']}",
            f"  plan hash: {cp.short(plan['plan_hash'])}... (SHA-256 {plan['plan_hash']})",
            f"  created {plan['created_at']}   expires {plan['expires_at']}" + (f"   reviewed {plan['reviewed_at']}" if plan["reviewed_at"] else ""),
-           f"  policy: cleanup v{snap['policy']['cleanup_policy']}, archive >= {snap['policy']['min_age_days']} days; "
-           f"message-level only (no thread expansion)"]
+           policy_line]
     if plan["state"] in cp.TERMINAL:
         out.append(f"  This plan is {plan['state']} and can no longer be reviewed or approved.")
     elif problems:

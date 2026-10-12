@@ -99,6 +99,13 @@ CREATE TRIGGER cleanup_approval_only_for_reviewed BEFORE INSERT ON cleanup_appro
 WHEN NEW.status <> 'VALID' OR (SELECT state FROM cleanup_plan WHERE account = NEW.account AND plan_id = NEW.plan_id)
   IS NOT 'REVIEWED'
 BEGIN SELECT RAISE(ABORT, 'an approval can only be recorded for a REVIEWED plan'); END;
+CREATE TRIGGER cleanup_plan_approved_needs_approval BEFORE UPDATE OF state ON cleanup_plan
+WHEN NEW.state = 'APPROVED' AND NOT EXISTS (SELECT 1 FROM cleanup_approval
+  WHERE account = NEW.account AND plan_id = NEW.plan_id AND status = 'VALID')
+BEGIN SELECT RAISE(ABORT, 'a plan can only become APPROVED while it has a VALID approval record'); END;
+CREATE TRIGGER cleanup_plan_reviewed_needs_timestamp BEFORE UPDATE OF state ON cleanup_plan
+WHEN NEW.state IN ('REVIEWED','APPROVED') AND NEW.reviewed_at IS NULL
+BEGIN SELECT RAISE(ABORT, 'a reviewed plan must record when it was reviewed'); END;
 CREATE TRIGGER cleanup_plan_no_delete BEFORE DELETE ON cleanup_plan
 BEGIN SELECT RAISE(ABORT, 'cleanup plans are never deleted'); END;
 CREATE TRIGGER cleanup_item_no_update BEFORE UPDATE ON cleanup_item
@@ -123,6 +130,45 @@ BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 CREATE TRIGGER cleanup_audit_no_delete BEFORE DELETE ON cleanup_audit
 BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 """
+
+
+def _reserve_backup(base):
+    """Create a NEW empty file at `base` (or `base-N`) with mode 0600. O_EXCL guarantees an existing file is never touched."""
+    for n in range(100):
+        path = base if n == 0 else f"{base}-{n}"
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            os.fchmod(fd, 0o600)  # also correct under an unusual umask
+        finally:
+            os.close(fd)
+        return path
+    raise OSError("no free backup file name")
+
+
+def _write_backup(src_conn, path, version):
+    """Copy the database into the reserved file and check that the copy is complete and consistent."""
+    dest = sqlite3.connect(path)
+    try:
+        src_conn.backup(dest)
+    finally:
+        dest.close()
+    os.chmod(path, 0o600)
+    check = sqlite3.connect(path)
+    try:
+        if check.execute("PRAGMA user_version").fetchone()[0] != version or check.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise sqlite3.DatabaseError("backup verification failed")
+    finally:
+        check.close()
+
+
+def _discard_partial(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 class IndexProblem(Exception):
@@ -162,23 +208,38 @@ class Index:
             raise IndexProblem(f"unsupported index schema version {version} (expected {SCHEMA_VERSION})")
 
     def _migrate(self, version):
-        """Back up the database file, then add the missing tables in one transaction (all-or-nothing)."""
+        """Back up the database file, then add the missing tables in one transaction (all-or-nothing).
+
+        The backup file is created exclusively (never overwriting an existing file) with mode 0600 from the first byte; a partial
+        backup that WE created is removed if writing it fails; a complete, verified backup is always kept.
+        """
         tag = {1: "pre-m3", 2: "pre-m4a", 3: "pre-m4b"}[version]
         script = (SCHEMA_V2 if version == 1 else "") + (SCHEMA_V3 if version <= 2 else "") + SCHEMA_V4
-        backup = f"{self.path}.{tag}-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        base = f"{self.path}.{tag}-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        backup = None
         try:
-            dest = sqlite3.connect(backup)
-            try:
-                self.conn.backup(dest)
-            finally:
-                dest.close()
-            os.chmod(backup, 0o600)
+            backup = _reserve_backup(base)
+            _write_backup(self.conn, backup, version)
+        except (sqlite3.Error, OSError) as exc:
+            if backup:
+                _discard_partial(backup)
+            self.conn.close()
+            raise IndexProblem(f"could not create the safety backup ({type(exc).__name__}); the index was left unchanged "
+                               "and no partial backup was kept") from None
+        try:
             with self.conn:
                 self.conn.executescript("BEGIN;" + script + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        except (sqlite3.Error, OSError) as exc:
+        except sqlite3.Error as exc:
+            try:
+                done = self.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            except sqlite3.Error:
+                done = False
+            if done:  # another process finished the same upgrade first: our redundant backup (which we created) can go
+                _discard_partial(backup)
+                return
             self.conn.close()
             raise IndexProblem(f"could not upgrade the index to schema version {SCHEMA_VERSION}; it was left unchanged "
-                               f"({type(exc).__name__}); backup, if any: {backup}") from None
+                               f"({type(exc).__name__}); the verified backup was kept: {backup}") from None
         self.migrated_from = version
         self.backup_path = backup
 

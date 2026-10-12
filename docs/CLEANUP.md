@@ -104,15 +104,43 @@ re-validate live Gmail state per message immediately before acting.
 skip drifted messages; never retry or continue automatically after an ambiguous outcome; never widen the target set; never act
 from plan state alone.
 
-**Audit log and retention.** Every plan, review, approval, rejection, revision, cancellation and expiry appends an event holding
+**Audit log and retention.** Every plan, review, approval, rejection, revision, cancellation, expiry and lockout appends an event holding
 counts, hashes and state names only (no ids, senders, labels or content), chained to the previous event of the account
-(`audit verify`). This is tamper-*evident* only: someone controlling this macOS user account can drop triggers and rewrite the
-database, the chain or the approvals. Retention: plans, approvals and audit events stay local and are never deleted automatically;
-`mailbox purge` keeps them; nothing is purged while a plan is active or unresolved. Deleting or exporting them would be a separate,
-explicitly reviewed feature.
+(`audit verify`). What this does and does NOT give you:
+- Editing or removing an event in the *middle* of the chain is detected.
+- **Deleting the newest events, or the whole log, cannot be detected from the database alone.** Only a checkpoint you recorded
+  elsewhere reveals it: `audit verify` prints the head hash, `approve` prints it after each approval, and
+  `cleanup audit verify --checkpoint HASH_PREFIX` fails if that event is no longer in the chain. Nothing is sent anywhere; storing
+  the value outside this computer is up to you.
+- Anyone (or any program) controlling this macOS user account can drop the triggers and rewrite or re-chain everything. The log
+  is tamper-*evident* at best, never tamper-proof and never authenticated.
+Retention: plans, approvals and audit events stay local and are never deleted automatically; `mailbox purge` keeps them; nothing is
+purged while a plan is active or unresolved. Deleting or exporting them would be a separate, explicitly reviewed feature.
+
+**Trust boundary.** Direct modification of this database by the local account is OUTSIDE the trust boundary. SQLite triggers and the
+cross-checks below protect against bugs and naive edits; they do not authenticate a malicious local user, who can forge a plan, an
+approval row, its state change and a correctly chained audit event. Cheap consistency checks that exist: a plan cannot become
+APPROVED without a VALID approval row, cannot be REVIEWED without a review time; `verify_approved` also checks the approval's times
+(created after the plan, at most 24 h long, never beyond the plan), the audit chain, and that the approval is recorded in the audit
+log with the same plan hash and nonce hash. **A future executor must therefore never trust the ledger alone: it must re-validate live
+Gmail state per message and ask the owner again, interactively, at execution time.**
+
+**Clock.** Expiry uses the local wall clock. Review, approval, plan creation and revision are refused if the clock is more than
+5 minutes earlier than the last recorded event, and `verify_approved` flags an approval created "in the future". A wall clock alone
+cannot guarantee real elapsed time against someone who deliberately rolls it back; this only catches mistakes and naive rollbacks.
+The 24-hour approval lifetime is unchanged.
+
+**Failed confirmations.** After 10 failed review/approval confirmations for one plan within 15 minutes, further attempts on that plan
+(even with the correct phrase) are refused until the window passes; one `ATTEMPTS_LOCKED_OUT` event is logged and refused attempts
+write nothing, so the log cannot be flooded. If an audit entry for a failure cannot be written, the error says so.
+
+**Corrupt data.** A plan whose stored snapshot is unreadable or malformed fails closed with a generic message (no raw snapshot or
+JSON error text); it can still be cancelled.
 
 **Storage (schema v4).** `cleanup_plan`, `cleanup_item`, `cleanup_approval`, `cleanup_audit`. Opening a v3 index first writes a
-private backup (`...pre-m4b-backup-<UTC>`, mode 600), then adds the tables in one transaction; failure leaves v3 intact.
+private backup (`...pre-m4b-backup-<UTC>`): the file is created exclusively with mode 600 from its first byte (an existing file is
+never overwritten; a name clash gets a numeric suffix), verified, and a partial backup that failed to write is removed. The tables
+are then added in one transaction; failure leaves v3 intact and keeps the verified backup.
 
 ## Audit retention (see M4B above)
 Defined in the M4B section above: local, never deleted automatically, kept by `mailbox purge`.
