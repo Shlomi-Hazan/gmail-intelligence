@@ -8,6 +8,7 @@ import argparse
 import os
 import shutil
 import site
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -312,9 +313,14 @@ def _with_index(args, fn):
     try:
         account = _local_account(args)
         with idx.Index(create=False) as index:
+            if index.migrated_from:
+                print(f"Local index upgraded to schema v{idx.SCHEMA_VERSION} for classification (M2 data unchanged). "
+                      f"Backup: {index.backup_path}", file=sys.stderr)
             return fn(index, account)
     except (ValueError, idx.IndexProblem) as exc:
         return _fail(exc)
+    except sqlite3.DatabaseError:
+        return _fail("the local index database reported an error (corrupt or locked); no further changes were made")
 
 
 def cmd_mailbox_status(args):
@@ -345,12 +351,154 @@ def cmd_mailbox_purge(args):
     return _with_index(args, purge)
 
 
+# ---- classification (M3): local index only, never Gmail ----
+def _limit_arg(args):
+    if args.limit is not None and args.limit < 1:
+        raise ValueError("--limit must be at least 1")
+    return None if getattr(args, "all", False) else args.limit
+
+
+def cmd_classify_status(args):
+    from gmail_intelligence import classify_report
+    return _with_index(args, lambda i, a: print(classify_report.status_text(i, a)) or 0)
+
+
+def _classify_pass(args, persist):
+    from gmail_intelligence import ai, classifier, classify_report
+
+    def go(index, account):
+        try:
+            limit = _limit_arg(args)
+            backend = None
+            if persist and args.ai:
+                backend = ai.backend_from_config(ai.load_config())
+        except (ValueError, ai.AiError) as exc:
+            return _fail(exc)
+        try:
+            s = classifier.run(index, account, limit=limit, persist=persist, backend=backend)
+        except ai.AiError as exc:
+            return _fail(f"{exc}; nothing from the interrupted batch was saved")
+        print(classify_report.summary_text(s, ("Classified and stored" if persist else "PREVIEW ONLY - nothing was saved")
+                                            + f" ({account}; local index only, Gmail not contacted)"))
+        if not persist:
+            print("  (rules only; no local AI is used in preview). To save: classify run --limit N")
+        elif s["selected"] == 0:
+            print("Nothing to do: every indexed message already has a current result.")
+        return 0
+    return _with_index(args, go)
+
+
+def cmd_classify_preview(args):
+    return _classify_pass(args, persist=False)
+
+
+def cmd_classify_run(args):
+    return _classify_pass(args, persist=True)
+
+
+def cmd_classify_report(args):
+    from gmail_intelligence import classify_report
+    return _with_index(args, lambda i, a: print(classify_report.report_text(i, a, args.show_senders)) or 0)
+
+
+def cmd_classify_explain(args):
+    from gmail_intelligence import classify_report
+    return _with_index(args, lambda i, a: print(classify_report.explain_text(i, a, args.message_id, args.show_sender)) or 0)
+
+
+def cmd_classify_clear(args):
+    from gmail_intelligence import classifier
+
+    def clear(index, account):
+        if not args.yes and input(f"Delete stored classifications for {account}? Rules and the index are kept. [y/N] "
+                                  ).strip().lower() != "y":
+            return _fail("cancelled")
+        print(f"Removed {classifier.clear(index, account):,} stored classification rows. (M2 index, rules and Gmail untouched.)")
+        return 0
+    return _with_index(args, clear)
+
+
+def cmd_classify_rules_list(args):
+    from gmail_intelligence import classify_report
+    return _with_index(args, lambda i, a: print(classify_report.rules_text(i, a)) or 0)
+
+
+def cmd_classify_rules_add(args):
+    from gmail_intelligence import classifier
+    from gmail_intelligence.classify import RuleError
+
+    kind, value = ("type", args.type) if args.type else ("attention", args.attention)
+    fields = dict(kind=kind, value=value, confidence=args.confidence, priority=args.priority, sender=args.sender,
+                  domain=args.domain, label=args.label, unread=args.unread, note=args.note)
+
+    def add(index, account):
+        try:
+            if args.dry_run:
+                p = classifier.preview_rule(index, account, **fields)
+                print(f"DRY RUN - rule not saved. It would match {p['matched']:,} of {p['messages']:,} indexed messages; "
+                      f"{p['type_changes']:,} would get a different result ({p['now_unknown']:,} of the matches are "
+                      f"currently UNKNOWN). Save by repeating without --dry-run, then `classify run`.")
+                return 0
+            rid = classifier.add_rule(index, account, **fields)
+        except RuleError as exc:
+            return _fail(exc)
+        print(f"Rule {rid} added. Stored results are now stale; review with `classify preview`, apply with `classify run`.")
+        return 0
+    return _with_index(args, add)
+
+
+def _rule_toggle(args, enabled):
+    from gmail_intelligence import classifier
+
+    def go(index, account):
+        if not classifier.set_enabled(index, account, args.rule_id, enabled):
+            return _fail(f"no such user rule: {args.rule_id} (built-in rules cannot be changed)")
+        print(f"Rule {args.rule_id} {'enabled' if enabled else 'disabled'}. Run `classify run` to refresh results.")
+        return 0
+    return _with_index(args, go)
+
+
+def cmd_classify_rules_enable(args):
+    return _rule_toggle(args, True)
+
+
+def cmd_classify_rules_disable(args):
+    return _rule_toggle(args, False)
+
+
+def cmd_classify_rules_remove(args):
+    from gmail_intelligence import classifier
+
+    def go(index, account):
+        if not args.yes and input(f"Remove user rule {args.rule_id}? [y/N] ").strip().lower() != "y":
+            return _fail("cancelled")
+        if not classifier.remove_rule(index, account, args.rule_id):
+            return _fail(f"no such user rule: {args.rule_id} (built-in rules cannot be removed)")
+        print(f"Rule {args.rule_id} removed. Run `classify run` to refresh results.")
+        return 0
+    return _with_index(args, go)
+
+
+def cmd_classify_ai_status(_args):
+    from gmail_intelligence import ai
+    try:
+        cfg = ai.load_config()
+    except ai.AiError as exc:
+        return _fail(exc)
+    if not cfg["enabled"]:
+        print(f"Local AI: DISABLED - {cfg['reason']}. Rules work fully without it.")
+        return 0
+    print(f"Local AI: configured for model '{cfg['model']}' at {cfg['host']}:{cfg['port']} (loopback only). "
+          "Nothing was contacted; real inference is NOT VERIFIED until you run `classify run --ai` yourself.")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="gmail-intelligence",
         description="Gmail Intelligence (early development). Offline: no Gmail integration yet.",
     )
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{version,doctor,auth,gmail,mailbox}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{version,doctor,auth,gmail,mailbox,classify}")
     sub.add_parser("version", help="print the version").set_defaults(func=cmd_version)
     sub.add_parser("doctor", help="check local development prerequisites (offline)").set_defaults(func=cmd_doctor)
 
@@ -395,6 +543,68 @@ def build_parser():
             q.add_argument("--domains", action="store_true", help="group by domain instead of showing addresses")
         if name == "purge":
             q.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    cl = sub.add_parser("classify", help="rules and optional local-AI classification of the local index (M3; offline)")
+    csub = cl.add_subparsers(dest="classify_command", required=True,
+                             metavar="{status,preview,run,report,explain,clear,rules,ai}")
+
+    def account_opt(q):
+        q.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the logged-in account)")
+        return q
+
+    account_opt(csub.add_parser("status", help="classification coverage and staleness (local only)")).set_defaults(
+        func=cmd_classify_status)
+    for name, fn, helptext in (("preview", cmd_classify_preview, "show what `run` would produce; saves NOTHING"),
+                               ("run", cmd_classify_run, "classify unclassified/stale messages and store results locally")):
+        q = account_opt(csub.add_parser(name, help=helptext))
+        g = q.add_mutually_exclusive_group(required=name == "run")
+        g.add_argument("--limit", type=int, metavar="N", help="newest N messages needing work" + ("" if name == "run" else " (default 100)"))
+        g.add_argument("--all", action="store_true", help="every message needing work (explicit intent)")
+        if name == "preview":
+            q.set_defaults(limit=100)
+        else:
+            q.add_argument("--ai", action="store_true", help="also ask the configured LOCAL model about weak-evidence messages")
+        q.set_defaults(func=fn)
+    q = account_opt(csub.add_parser("report", help="aggregate results, rule provenance, unknown groups (local only)"))
+    q.add_argument("--show-senders", action="store_true", help="group unknowns by full address instead of domain")
+    q.set_defaults(func=cmd_classify_report)
+    q = account_opt(csub.add_parser("explain", help="show the stored results and reasons for one message id"))
+    q.add_argument("message_id")
+    q.add_argument("--show-sender", action="store_true", help="also print the sender address")
+    q.set_defaults(func=cmd_classify_explain)
+    q = account_opt(csub.add_parser("clear", help="delete stored classifications (rules and the index are kept)"))
+    q.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    q.set_defaults(func=cmd_classify_clear)
+
+    rl = csub.add_parser("rules", help="list, add, enable, disable or remove local classification rules")
+    rsub = rl.add_subparsers(dest="rules_command", required=True, metavar="{list,add,enable,disable,remove}")
+    account_opt(rsub.add_parser("list", help="show built-in and user rules")).set_defaults(func=cmd_classify_rules_list)
+    q = account_opt(rsub.add_parser("add", help="add a user rule (matches stored metadata only)"))
+    g = q.add_mutually_exclusive_group(required=True)
+    g.add_argument("--type", metavar="TYPE", help="message type to assign (e.g. NEWSLETTER)")
+    g.add_argument("--attention", metavar="SIGNAL", help="attention signal to assign (POTENTIALLY_IMPORTANT or REVIEW_NEEDED)")
+    q.add_argument("--sender", metavar="ADDRESS", help="exact sender address")
+    q.add_argument("--domain", metavar="DOMAIN", help="exact sender domain (subdomains are not matched)")
+    q.add_argument("--label", metavar="LABEL", help="Gmail label id or name (e.g. CATEGORY_UPDATES)")
+    u = q.add_mutually_exclusive_group()
+    u.add_argument("--unread", dest="unread", action="store_true", default=None, help="only unread messages")
+    u.add_argument("--read", dest="unread", action="store_false", help="only read messages")
+    q.add_argument("--confidence", default="HIGH", metavar="LEVEL", help="LOW, MEDIUM or HIGH (default HIGH)")
+    q.add_argument("--priority", type=int, default=0, metavar="N", help="higher wins among user rules (default 0)")
+    q.add_argument("--note", metavar="TEXT", help="short reason shown in explanations")
+    q.add_argument("--dry-run", action="store_true", help="show the impact on the local index without saving")
+    q.set_defaults(func=cmd_classify_rules_add)
+    for name, fn, helptext in (("enable", cmd_classify_rules_enable, "enable a user rule"),
+                               ("disable", cmd_classify_rules_disable, "disable a user rule (kept, not applied)"),
+                               ("remove", cmd_classify_rules_remove, "delete a user rule")):
+        q = account_opt(rsub.add_parser(name, help=helptext))
+        q.add_argument("rule_id", metavar="RULE_ID", help="e.g. u1")
+        if name == "remove":
+            q.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+        q.set_defaults(func=fn)
+
+    ai_p = csub.add_parser("ai", help="optional local-AI settings (disabled by default)")
+    aisub = ai_p.add_subparsers(dest="ai_command", required=True, metavar="{status}")
+    aisub.add_parser("status", help="show local-AI configuration; contacts nothing").set_defaults(func=cmd_classify_ai_status)
     return parser
 
 

@@ -1,7 +1,8 @@
 """Local SQLite metadata index (stdlib only). Stores no bodies, snippets, subjects or credentials.
 
 All data is keyed by account, so one account's rows are never mixed with another's. Schema version is
-kept in `PRAGMA user_version`; there is no migration framework (version 1 only).
+kept in `PRAGMA user_version`. There is no migration framework: version 1 (M2) is upgraded to version 2 (M3
+classification tables) by one additive script, after an automatic backup copy of the database file.
 """
 import os
 import sqlite3
@@ -9,7 +10,7 @@ from datetime import datetime, timezone
 
 from gmail_intelligence import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE messages (
   account TEXT NOT NULL, id TEXT NOT NULL, thread_id TEXT, internal_ms INTEGER, size INTEGER,
@@ -29,6 +30,20 @@ CREATE TABLE scans (
   listed INTEGER NOT NULL DEFAULT 0, indexed INTEGER NOT NULL DEFAULT 0, vanished INTEGER NOT NULL DEFAULT 0,
   failed INTEGER NOT NULL DEFAULT 0, pruned INTEGER NOT NULL DEFAULT 0, error TEXT);
 CREATE INDEX scans_account ON scans (account, id);
+"""
+# Version 2 (M3): purely additive, so M2 data is never rewritten. See docs/CLASSIFICATION.md.
+SCHEMA_V2 = """
+CREATE TABLE class_rules (
+  account TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL,
+  c_sender TEXT, c_domain TEXT, c_label TEXT, c_unread INTEGER,
+  confidence TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+  note TEXT, created_at TEXT NOT NULL, PRIMARY KEY (account, id)) WITHOUT ROWID;
+CREATE TABLE message_class (
+  account TEXT NOT NULL, message_id TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL,
+  confidence TEXT NOT NULL, source TEXT NOT NULL, rule_id TEXT NOT NULL, explanation TEXT NOT NULL,
+  ruleset_hash TEXT NOT NULL, msg_scan_id INTEGER NOT NULL, classified_at TEXT NOT NULL,
+  PRIMARY KEY (account, message_id, kind, value)) WITHOUT ROWID;
+CREATE INDEX message_class_value ON message_class (account, kind, value);
 """
 
 
@@ -51,13 +66,40 @@ class Index:
         self.conn = sqlite3.connect(self.path)
         os.chmod(self.path, 0o600)
         self.conn.row_factory = sqlite3.Row
-        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        self.migrated_from = self.backup_path = None
+        try:
+            version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        except sqlite3.DatabaseError:
+            self.conn.close()
+            raise IndexProblem("the local index file is unreadable or corrupt; nothing was changed. Restore a backup "
+                               "(e.g. index.sqlite3.pre-m3-backup-*) or remove the file and rescan") from None
         if version == 0:
             with self.conn:
-                self.conn.executescript("BEGIN;" + SCHEMA + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        elif version == 1:
+            self._migrate_v1_to_v2()
         elif version != SCHEMA_VERSION:
             self.conn.close()
             raise IndexProblem(f"unsupported index schema version {version} (expected {SCHEMA_VERSION})")
+
+    def _migrate_v1_to_v2(self):
+        """Back up the database file, then add the M3 tables in one transaction (all-or-nothing)."""
+        backup = f"{self.path}.pre-m3-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        try:
+            dest = sqlite3.connect(backup)
+            try:
+                self.conn.backup(dest)
+            finally:
+                dest.close()
+            os.chmod(backup, 0o600)
+            with self.conn:
+                self.conn.executescript("BEGIN;" + SCHEMA_V2 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        except (sqlite3.Error, OSError) as exc:
+            self.conn.close()
+            raise IndexProblem(f"could not upgrade the index to schema version {SCHEMA_VERSION}; it was left unchanged "
+                               f"({type(exc).__name__}); backup, if any: {backup}") from None
+        self.migrated_from = 1
+        self.backup_path = backup
 
     def close(self):
         self.conn.close()
@@ -153,14 +195,15 @@ class Index:
     def prune_unseen(self, account, scan_id):
         """After a COMPLETE full scan only: drop rows the scan did not see (no longer in Gmail)."""
         with self.conn:
-            self.conn.execute("DELETE FROM message_labels WHERE account=? AND message_id IN "
-                              "(SELECT id FROM messages WHERE account=? AND scan_id<>?)", (account, account, scan_id))
+            for table, col in (("message_labels", "message_id"), ("message_class", "message_id")):
+                self.conn.execute(f"DELETE FROM {table} WHERE account=? AND {col} IN "
+                                  "(SELECT id FROM messages WHERE account=? AND scan_id<>?)", (account, account, scan_id))
             cur = self.conn.execute("DELETE FROM messages WHERE account=? AND scan_id<>?", (account, scan_id))
         return cur.rowcount
 
     def purge(self, account):
         with self.conn:
-            for table in ("message_labels", "messages", "labels", "scans"):
+            for table in ("message_class", "message_labels", "messages", "labels", "scans"):  # class_rules (user config) is kept
                 self.conn.execute(f"DELETE FROM {table} WHERE account=?", (account,))
 
     def accounts(self):
