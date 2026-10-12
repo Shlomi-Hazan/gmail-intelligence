@@ -104,6 +104,15 @@ re-validate live Gmail state per message immediately before acting.
 skip drifted messages; never retry or continue automatically after an ambiguous outcome; never widen the target set; never act
 from plan state alone.
 
+**Overlapping plans.** Different plans may reference the same message: M4B does not enforce cross-plan uniqueness of message ids. Each
+plan has its own separate approval, bound to that plan's hash, action, count and account, so an approval for one plan can never
+authorize another. M4B itself never executes anything. A future executor (M4C) must therefore:
+- re-validate each exact message against current Gmail state before acting;
+- consume every plan's approval atomically and independently (one plan's execution neither consumes nor implies another's);
+- reconcile earlier or concurrent operations that involve the same message, and never blindly repeat an action only because a
+  different approved plan also lists that message;
+- fail closed on uncertain or conflicting state.
+
 **Audit log and retention.** Every plan, review, approval, rejection, revision, cancellation, expiry and lockout appends an event holding
 counts, hashes and state names only (no ids, senders, labels or content), chained to the previous event of the account
 (`audit verify`). What this does and does NOT give you:
