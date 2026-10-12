@@ -33,11 +33,24 @@ def show_text(index, account, ex, show_ids=False):
            "  items by state: " + (", ".join(f"{k}={v}" for k, v in sorted(ce.item_counts(index, account, ex["exec_id"]).items())) or "-")]
     for s in ce.slices(index, account, ex["exec_id"]):
         out.append(f"  slice {s['slice_no']}: {s['state']:<10} size {s['size']}" + (f"  confirmed {s['confirmed_at']}" if s["confirmed_at"] else ""))
-    if ex["state"] == "RECONCILIATION_REQUIRED":
-        out.append("  RECONCILIATION REQUIRED: some outcomes are unknown. Nothing is retried automatically; they must be checked against "
-                   "the real mailbox state before anything else can run.")
-    if ex["state"] in ("PARTIAL",):
-        out.append("  PARTIAL: some targets were not applied. Remaining slices need their own fresh confirmation.")
+    codes = ce.code_counts(index, account, ex["exec_id"])
+    if codes:
+        out.append("  reasons for items that were not applied (state / reason / count):")
+        for (state, code), n in sorted(codes.items()):
+            out.append(f"    {state:<14}{code:<26}{n:>5}   {ce.CODE_MEANING.get(code, '')}")
+    state = ex["state"]
+    if state == "RECONCILIATION_REQUIRED":
+        out.append("  RECONCILIATION REQUIRED: some outcomes are UNKNOWN (an attempt may or may not have changed the mailbox). Nothing is "
+                   "retried automatically; they must be compared with the real mailbox state before anything else can run.")
+    elif state == "AWAITING_CONTINUATION":
+        pending = [s["slice_no"] for s in ce.slices(index, account, ex["exec_id"]) if s["state"] == "PENDING"]
+        out.append(f"  AWAITING CONTINUATION: slice(s) {', '.join(map(str, pending))} still need their own fresh typed confirmation, or the execution can be aborted.")
+    elif state == "PARTIAL":
+        out.append("  PARTIAL (final): some targets were applied and some were not. Nothing continues from here; use a new plan for the rest.")
+    elif state == "FAILED":
+        out.append("  FAILED (final): nothing was applied. Nothing continues from here.")
+    elif state == "ABORTED":
+        out.append("  ABORTED (final): the owner abandoned the remaining slices; the consumed approval cannot be reused.")
     if show_ids:
         out.append("  items (id : state : code):")
         out += [f"    {r['message_id']} : {r['state']} : {r['error_code'] or '-'}" for r in index._q(

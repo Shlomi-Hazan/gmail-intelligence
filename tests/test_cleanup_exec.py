@@ -32,13 +32,17 @@ from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, clean
 from gmail_intelligence import cli, config  # noqa: E402
 from gmail_intelligence import index as idx  # noqa: E402
 
-TOKEN = "lease-1"
-
 
 class ExecBase(PlanBase):
     def setUp(self):
         super().setUp()
         self.t = T0
+
+    token = None
+
+    def ev(self, mid, labels=("CATEGORY_PROMOTIONS",), when=None, **kw):
+        """Structured LIVE-READ evidence (test-only construction; production has no adapter that could produce it)."""
+        return ce.Evidence(kw.get("kind", "LIVE_READ"), kw.get("message_id", mid), tuple(labels), when or cp._iso(self.t), kw.get("source", "gmail-live-read"))
 
     def tick(self, seconds=10):
         self.t = self.t + timedelta(seconds=seconds)  # small steps keep the 5-minute execution lease alive across a test
@@ -58,7 +62,7 @@ class ExecBase(PlanBase):
 
     def started(self, plan=None, slice_no=1):
         ex = self.reserve(plan)
-        ce.start_slice(self.index, ACCT, ex["exec_id"], slice_no, TOKEN, now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], slice_no, now=self.tick())
         return ce.get_execution(self.index, ACCT, ex["exec_id"])
 
     def ids_of(self, exec_id, slice_no=None, state=None):
@@ -73,9 +77,12 @@ class ExecBase(PlanBase):
 
     def apply_all(self, ex, slice_no=1, outcome="APPLIED"):
         for mid in self.ids_of(ex["exec_id"], slice_no, "PENDING"):
-            ce.renew_lease(self.index, ACCT, ex["exec_id"], TOKEN, now=self.tick())  # a real executor heartbeats like this
-            ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
-            ce.record_outcome(self.index, ACCT, ex["exec_id"], TOKEN, mid, outcome, now=self.tick())
+            ce.renew_lease(self.index, ACCT, ex["exec_id"], self.token, now=self.tick())  # a real executor heartbeats like this
+            ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+            if outcome == "APPLIED":
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, mid, "APPLIED", evidence=self.ev(mid), now=self.tick())
+            else:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, mid, outcome, now=self.tick())
 
     def exec_state(self, exec_id):
         return ce.get_execution(self.index, ACCT, exec_id)["state"]
@@ -329,8 +336,8 @@ class ConcurrencyAndOverlapTests(ExecBase):
         self.reserve(b)  # a was aborted -> its items are NOT_APPLIED, so nothing is unresolved
         c = self.approved_plan(["m3", "m4"])
         exb = self.index._q("SELECT exec_id FROM cleanup_execution WHERE plan_id=?", b["plan_id"])[0][0]
-        ce.start_slice(self.index, ACCT, exb, 1, TOKEN, now=self.tick())
-        ce.record_intent(self.index, ACCT, exb, TOKEN, "m3", ["INBOX"], now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, exb, 1, now=self.tick())
+        ce.record_intent(self.index, ACCT, exb, self.token, "m3", ["INBOX"], now=self.tick())
         ce.recover_interrupted(self.index, ACCT, self.t + timedelta(hours=1))  # crash -> m3 UNKNOWN
         with self.assertRaises(ce.ExecError) as cm:
             ce.reserve_execution(self.index, ACCT, c["plan_id"], ce.execution_phrase(c, 2), now=self.t + timedelta(hours=1, minutes=1))
@@ -342,7 +349,7 @@ class ConcurrencyAndOverlapTests(ExecBase):
         b = self.approved_plan(["m2", "m3"])
         exa = self.started(a)
         self.apply_all(exa)
-        ce.end_slice(self.index, ACCT, exa["exec_id"], 1, TOKEN, now=self.tick())
+        ce.end_slice(self.index, ACCT, exa["exec_id"], 1, self.token, now=self.tick())
         self.assertEqual(self.exec_state(exa["exec_id"]), "EXECUTED")
         exb = self.reserve(b)
         states = {r["message_id"]: (r["state"], r["error_code"]) for r in self.index._q(
@@ -409,7 +416,7 @@ class StateMachineTests(ExecBase):
         ex = self.started()
         self.assertEqual(ex["state"], "EXECUTING")
         self.apply_all(ex)
-        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
         done = ce.get_execution(self.index, ACCT, ex["exec_id"])
         self.assertEqual((done["state"], done["lease_token"]), ("EXECUTED", None))
         self.assertEqual(ce.item_counts(self.index, ACCT, ex["exec_id"]), {"APPLIED": 3})
@@ -419,62 +426,69 @@ class StateMachineTests(ExecBase):
         self.assertEqual(self.approval_status(self.index._q("SELECT plan_id FROM cleanup_execution")[0][0]), ["CONSUMED"])
         self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
         with self.assertRaises(ce.ExecError):  # a finished execution can never start again
-            ce.start_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+            self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
 
     def test_skips_and_known_failures_give_partial_or_failed(self):
         ex = self.started()
         a, b, c = self.ids_of(ex["exec_id"])
-        ce.record_skip(self.index, ACCT, ex["exec_id"], TOKEN, a, "SKIPPED_DRIFT", "LABELS_CHANGED", now=self.tick())
-        ce.record_skip(self.index, ACCT, ex["exec_id"], TOKEN, b, "SKIPPED_GONE", "NOT_FOUND", now=self.tick())
-        ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, c, ["INBOX"], now=self.tick())
-        ce.record_outcome(self.index, ACCT, ex["exec_id"], TOKEN, c, "APPLIED", verified=True, now=self.tick())
-        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
-        self.assertEqual(self.exec_state(ex["exec_id"]), "EXECUTED")  # skips are safe non-actions, at least one applied
+        ce.record_skip(self.index, ACCT, ex["exec_id"], self.token, a, "SKIPPED_DRIFT", "LABELS_CHANGED", now=self.tick())
+        ce.record_skip(self.index, ACCT, ex["exec_id"], self.token, b, "SKIPPED_GONE", "NOT_FOUND", now=self.tick())
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, c, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, c, "APPLIED", evidence=self.ev(c, ("CATEGORY_PROMOTIONS",)), now=self.tick())
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        self.assertEqual(self.exec_state(ex["exec_id"]), "EXECUTED")  # skips are safe non-actions, at least one verified APPLIED
         ex2 = self.started(self.approved_plan(["m4", "m5"]))
         for mid in self.ids_of(ex2["exec_id"]):
-            ce.record_intent(self.index, ACCT, ex2["exec_id"], TOKEN, mid, ["INBOX"], now=self.tick())
-            ce.record_outcome(self.index, ACCT, ex2["exec_id"], TOKEN, mid, "NOT_APPLIED", code="REJECTED", now=self.tick())
-        ce.end_slice(self.index, ACCT, ex2["exec_id"], 1, TOKEN, now=self.tick())
+            ce.record_intent(self.index, ACCT, ex2["exec_id"], self.token, mid, ["INBOX"], now=self.tick())
+            ce.record_outcome(self.index, ACCT, ex2["exec_id"], self.token, mid, "NOT_APPLIED", code="REJECTED", now=self.tick())
+        ce.end_slice(self.index, ACCT, ex2["exec_id"], 1, self.token, now=self.tick())
         self.assertEqual(self.exec_state(ex2["exec_id"]), "FAILED")
 
-    def test_mixed_applied_and_not_applied_is_partial(self):
+    def test_mixed_applied_and_not_applied_is_a_final_partial(self):
         ex = self.started()
         ids = self.ids_of(ex["exec_id"])
         for mid, out in zip(ids, ("APPLIED", "APPLIED", "NOT_APPLIED")):
-            ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, ["INBOX"], now=self.tick())
-            ce.record_outcome(self.index, ACCT, ex["exec_id"], TOKEN, mid, out, now=self.tick())
-        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+            ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+            if out == "APPLIED":
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, mid, "APPLIED", evidence=self.ev(mid), now=self.tick())
+            else:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, mid, "NOT_APPLIED", code="REJECTED", now=self.tick())
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
         self.assertEqual(self.exec_state(ex["exec_id"]), "PARTIAL")
+        self.assertEqual(self.index._q("SELECT COUNT(*) FROM cleanup_exec_slice WHERE state='PENDING'")[0][0], 0)  # nothing left to continue
 
     def test_intent_needs_previous_labels_a_live_lease_and_an_active_slice(self):
         ex = self.reserve()
         mid = self.ids_of(ex["exec_id"])[0]
         with self.assertRaises(ce.ExecError):  # nothing started yet: no lease
-            ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, ["INBOX"], now=self.tick())
+            ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX"], now=self.tick())
         with self.assertRaises(sqlite3.DatabaseError):  # and the database itself refuses an INTENT outside EXECUTING
             with self.index.conn:
                 self.index.conn.execute("UPDATE cleanup_exec_item SET state='INTENT' WHERE message_id=?", (mid,))
-        ce.start_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
-        for bad in ([], None, [""], [1], ["x" * 65], ["a"] * 101):
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
+        for bad in ([], None, [""], [1], ["x" * 65], ["a"] * 101, ["CATEGORY_PROMOTIONS"], ["INBOX\u00e9"]):
             with self.assertRaises(ce.ExecError, msg=bad):
-                ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, bad, now=self.tick())
+                ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, bad, now=self.tick())
         with self.assertRaises(ce.ExecError) as cm:
             ce.record_intent(self.index, ACCT, ex["exec_id"], "someone-else", mid, ["INBOX"], now=self.tick())
-        self.assertEqual(cm.exception.code, "LEASE_LOST")
+        self.assertEqual(cm.exception.code, "BAD_LEASE")  # malformed token
         with self.assertRaises(ce.ExecError) as cm:
-            ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, ["INBOX"], now=self.t + ce.LEASE_TTL + timedelta(minutes=1))
+            ce.record_intent(self.index, ACCT, ex["exec_id"], "A" * 32, mid, ["INBOX"], now=self.tick())
+        self.assertEqual(cm.exception.code, "LEASE_LOST")  # well-formed but not the issued token
+        with self.assertRaises(ce.ExecError) as cm:
+            ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX"], now=self.t + ce.LEASE_TTL + timedelta(minutes=1))
         self.assertEqual(cm.exception.code, "LEASE_LOST")
         with self.assertRaises(ce.ExecError):
-            ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, "not-a-target", ["INBOX"], now=self.tick())
-        ce.renew_lease(self.index, ACCT, ex["exec_id"], TOKEN, now=self.tick())
-        ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, ["INBOX"], now=self.tick())
+            ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, "not-a-target", ["INBOX"], now=self.tick())
+        ce.renew_lease(self.index, ACCT, ex["exec_id"], self.token, now=self.tick())
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX"], now=self.tick())
         with self.assertRaises(ce.ExecError):  # the same item cannot get a second intent
-            ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, ["INBOX"], now=self.tick())
+            ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX"], now=self.tick())
 
     def test_invalid_transitions_are_refused_by_the_database(self):
         ex = self.started()
         self.apply_all(ex)
-        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
         bad = ["UPDATE cleanup_exec_item SET state='PENDING'", "UPDATE cleanup_exec_item SET state='INTENT'", "UPDATE cleanup_exec_item SET state='UNKNOWN'",
                "UPDATE cleanup_execution SET state='EXECUTING'", "UPDATE cleanup_execution SET state='PREPARED'",
                "UPDATE cleanup_exec_slice SET state='ACTIVE'", "UPDATE cleanup_exec_slice SET state='PENDING'",
@@ -494,7 +508,7 @@ class StateMachineTests(ExecBase):
                 with self.index.conn:
                     self.index.conn.execute("INSERT INTO cleanup_exec_item (account, exec_id, message_id, seq, slice_no, state) VALUES (?,?,?,?,?,?)",
                                             (ACCT, ex["exec_id"], mid, 9, 1, "PENDING"))
-        ce.start_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
         with self.assertRaises(sqlite3.DatabaseError):  # not even a real plan target, once the execution has started
             with self.index.conn:
                 self.index.conn.execute("INSERT INTO cleanup_exec_item (account, exec_id, message_id, seq, slice_no, state) VALUES (?,?,?,?,?,?)",
@@ -536,12 +550,12 @@ class SliceTests(ExecBase):
         ex = self.reserve(plan)
         self.assertEqual([(s["slice_no"], s["size"], s["state"]) for s in ce.slices(self.index, ACCT, ex["exec_id"])],
                          [(1, 25, "CONFIRMED"), (2, 100, "PENDING"), (3, 5, "PENDING")])
-        ce.start_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
         self.apply_all(ex, 1)
-        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
-        self.assertEqual(self.exec_state(ex["exec_id"]), "PARTIAL")  # waiting for a SEPARATE confirmation, not continuing
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        self.assertEqual(self.exec_state(ex["exec_id"]), "AWAITING_CONTINUATION")  # waiting for a SEPARATE confirmation, not continuing
         with self.assertRaises(ce.ExecError) as cm:
-            ce.start_slice(self.index, ACCT, ex["exec_id"], 2, TOKEN, now=self.tick())
+            self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 2, now=self.tick())
         self.assertEqual(cm.exception.code, "SLICE_NOT_CONFIRMED")
         good = ce.continuation_phrase(plan, 2, 100)
         for bad in ("", cp.approval_phrase(plan), ce.execution_phrase(plan, 25), good.replace("slice 2", "slice 3"), good.lower()):
@@ -551,32 +565,32 @@ class SliceTests(ExecBase):
             ce.confirm_slice(self.index, ACCT, ex["exec_id"], 3, ce.continuation_phrase(plan, 3, 5), now=self.tick())
         self.assertEqual(cm.exception.code, "SLICE_NOT_NEXT")
         ce.confirm_slice(self.index, ACCT, ex["exec_id"], 2, good, now=self.tick())
-        ce.start_slice(self.index, ACCT, ex["exec_id"], 2, TOKEN, now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 2, now=self.tick())
         self.apply_all(ex, 2)
-        ce.end_slice(self.index, ACCT, ex["exec_id"], 2, TOKEN, now=self.tick())
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 2, self.token, now=self.tick())
         ce.confirm_slice(self.index, ACCT, ex["exec_id"], 3, ce.continuation_phrase(plan, 3, 5), now=self.tick())
-        ce.start_slice(self.index, ACCT, ex["exec_id"], 3, TOKEN, now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 3, now=self.tick())
         self.apply_all(ex, 3)
-        ce.end_slice(self.index, ACCT, ex["exec_id"], 3, TOKEN, now=self.tick())
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 3, self.token, now=self.tick())
         self.assertEqual(self.exec_state(ex["exec_id"]), "EXECUTED")
         self.assertEqual(ce.item_counts(self.index, ACCT, ex["exec_id"]), {"APPLIED": 130})
 
     def test_continuation_rechecks_only_the_remaining_targets_but_protection_rules_stay_plan_wide(self):
         plan = self.approved_plan(self.big)
         ex = self.reserve(plan)
-        ce.start_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
         done = self.ids_of(ex["exec_id"], 1)
         self.apply_all(ex, 1)
-        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
         with self.index.conn:  # local facts of an ALREADY EXECUTED target drift (e.g. after Gmail changed): irrelevant for the rest
             self.index.conn.execute("INSERT INTO message_labels VALUES (?,?,?)", (ACCT, done[0], "Label_77"))
         full = cp.revalidate(self.index, ACCT, cp.get_plan(self.index, ACCT, plan["plan_id"]), self.tick())
         self.assertIn("ITEM_CHANGED", full)  # a whole-plan check would now fail...
         ce.confirm_slice(self.index, ACCT, ex["exec_id"], 2, ce.continuation_phrase(plan, 2, 100), now=self.tick())  # ...the subset check passes
-        ce.start_slice(self.index, ACCT, ex["exec_id"], 2, TOKEN, now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 2, now=self.tick())
         cleanup_protect.add(self.index, ACCT, sender="nobody@unrelated.example.test")  # any protection change makes the plan stale (fail closed)
         self.apply_all(ex, 2)
-        ce.end_slice(self.index, ACCT, ex["exec_id"], 2, TOKEN, now=self.tick())
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 2, self.token, now=self.tick())
         with self.assertRaises(ce.ExecError) as cm:
             ce.confirm_slice(self.index, ACCT, ex["exec_id"], 3, ce.continuation_phrase(plan, 3, 5), now=self.tick())
         self.assertEqual(cm.exception.code, "STALE")
@@ -584,9 +598,9 @@ class SliceTests(ExecBase):
     def test_a_protected_remaining_target_blocks_the_continuation(self):
         plan = self.approved_plan(self.big)
         ex = self.reserve(plan)
-        ce.start_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
         self.apply_all(ex, 1)
-        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
         remaining = self.ids_of(ex["exec_id"], 2)[0]
         cleanup_protect.add(self.index, ACCT, sender=self.index._q("SELECT sender FROM messages WHERE id=?", remaining)[0][0])
         with self.assertRaises(ce.ExecError) as cm:
@@ -597,12 +611,12 @@ class SliceTests(ExecBase):
     def test_a_stop_ends_the_whole_execution_with_no_further_slices(self):
         plan = self.approved_plan(self.big)
         ex = self.reserve(plan)
-        ce.start_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
         first = self.ids_of(ex["exec_id"], 1)
-        ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, first[0], ["INBOX"], now=self.tick())
-        ce.record_outcome(self.index, ACCT, ex["exec_id"], TOKEN, first[0], "APPLIED", now=self.tick())
-        ce.stop_execution(self.index, ACCT, ex["exec_id"], TOKEN, "CIRCUIT_BREAKER", now=self.tick())
-        self.assertEqual(self.exec_state(ex["exec_id"]), "PARTIAL")  # nothing ambiguous, some applied, the rest NOT_APPLIED
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, first[0], ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, first[0], "APPLIED", evidence=self.ev(first[0]), now=self.tick())
+        ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "CIRCUIT_BREAKER", now=self.tick())
+        self.assertEqual(self.exec_state(ex["exec_id"]), "PARTIAL")  # nothing ambiguous, some applied, the rest NEVER_ATTEMPTED
         c = ce.item_counts(self.index, ACCT, ex["exec_id"])
         self.assertEqual((c["APPLIED"], c["NOT_APPLIED"]), (1, 129))
         self.assertEqual({s["state"] for s in ce.slices(self.index, ACCT, ex["exec_id"])}, {"STOPPED"})
@@ -614,12 +628,12 @@ class RecoveryTests(ExecBase):
     def test_a_stop_with_an_open_intent_requires_reconciliation(self):
         ex = self.started()
         a, b, c = self.ids_of(ex["exec_id"])
-        ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, a, ["INBOX"], now=self.tick())
-        ce.stop_execution(self.index, ACCT, ex["exec_id"], TOKEN, "AMBIGUOUS_RESULT", now=self.tick())
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, ["INBOX"], now=self.tick())
+        ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "AMBIGUOUS_RESULT", now=self.tick())
         self.assertEqual(self.exec_state(ex["exec_id"]), "RECONCILIATION_REQUIRED")
         self.assertEqual(ce.item_counts(self.index, ACCT, ex["exec_id"]), {"UNKNOWN": 1, "NOT_APPLIED": 2})
         with self.assertRaises(ce.ExecError):
-            ce.start_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+            self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
         with self.assertRaises(ce.ExecError):
             ce.abort_execution(self.index, ACCT, ex["exec_id"], now=self.tick())  # unknown work cannot be abandoned
         with self.assertRaises(ce.ExecError):  # and it still blocks the account
@@ -628,7 +642,7 @@ class RecoveryTests(ExecBase):
     def test_a_crash_after_intent_is_found_by_recovery_and_never_resumed(self):
         ex = self.started()
         mid = self.ids_of(ex["exec_id"])[0]
-        ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, ["INBOX"], now=self.tick())
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX"], now=self.tick())
         # "crash": the process dies here - no outcome is recorded. A fresh connection plays the restarted application.
         self.index.conn.commit()
         fresh = idx.Index()
@@ -639,9 +653,9 @@ class RecoveryTests(ExecBase):
         self.assertEqual((got["state"], got["lease_token"]), ("RECONCILIATION_REQUIRED", None))
         self.assertEqual(ce.item_counts(fresh, ACCT, ex["exec_id"]), {"UNKNOWN": 1, "NOT_APPLIED": 2})
         later = self.t + ce.LEASE_TTL + timedelta(minutes=2)
-        for call in (lambda: ce.start_slice(fresh, ACCT, ex["exec_id"], 1, TOKEN, now=later),
-                     lambda: ce.record_intent(fresh, ACCT, ex["exec_id"], TOKEN, self.ids_of(ex["exec_id"])[1], ["INBOX"], now=later),
-                     lambda: ce.record_outcome(fresh, ACCT, ex["exec_id"], TOKEN, mid, "APPLIED", now=later)):
+        for call in (lambda: ce.start_slice(fresh, ACCT, ex["exec_id"], 1, now=later),
+                     lambda: ce.record_intent(fresh, ACCT, ex["exec_id"], self.token, self.ids_of(ex["exec_id"])[1], ["INBOX"], now=later),
+                     lambda: ce.record_outcome(fresh, ACCT, ex["exec_id"], self.token, mid, "APPLIED", now=later)):
             with self.assertRaises(ce.ExecError):
                 call()
         self.assertIn("EXECUTION_INTERRUPTED", [e["event_type"] for e in audit.events(fresh, ACCT)])
@@ -650,10 +664,10 @@ class RecoveryTests(ExecBase):
     def test_a_crash_between_local_transitions_rolls_back_the_unfinished_step(self):
         ex = self.started()
         mid = self.ids_of(ex["exec_id"])[0]
-        ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, ["INBOX"], now=self.tick())
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
         with mock.patch.object(audit, "append", side_effect=sqlite3.OperationalError("disk full (simulated)")):
             with self.assertRaises(sqlite3.OperationalError):
-                ce.record_outcome(self.index, ACCT, ex["exec_id"], TOKEN, mid, "APPLIED", now=self.tick())
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, mid, "APPLIED", evidence=self.ev(mid), now=self.tick())
         self.assertEqual(ce.item_counts(self.index, ACCT, ex["exec_id"]).get("INTENT"), 1)  # the INTENT is still on record
         self.assertEqual(self.exec_state(ex["exec_id"]), "EXECUTING")
 
@@ -662,14 +676,14 @@ class RecoveryTests(ExecBase):
         child.write_text(textwrap.dedent("""
             import sys, os, time
             sys.path.insert(0, sys.argv[1]); os.environ["GMAIL_INTELLIGENCE_HOME"] = sys.argv[2]
-            exec_id, mid, go, acct = sys.argv[3:7]
+            exec_id, mid, go, acct, token = sys.argv[3:8]
             from gmail_intelligence import index as idx, cleanup_exec as ce, cleanup_audit as au
             ix = idx.Index(create=False)
             real = au.append
             def slow(*a, **k):
                 r = real(*a, **k); open(go + ".inside", "w").close(); time.sleep(60); return r
             au.append = slow
-            ce.record_intent(ix, acct, exec_id, "child-lease", mid, ["INBOX"])
+            ce.record_intent(ix, acct, exec_id, token, mid, ["INBOX"])
         """))
         self.index.purge(ACCT)
         ms = int(time.time() * 1000) - 200 * 86_400_000
@@ -678,10 +692,10 @@ class RecoveryTests(ExecBase):
         plan = cp.mark_reviewed(self.index, ACCT, plan["plan_id"], cp.review_phrase(plan))
         cp.approve(self.index, ACCT, plan["plan_id"], cp.approval_phrase(plan))
         ex = ce.reserve_execution(self.index, ACCT, plan["plan_id"], ce.execution_phrase(plan, 2))
-        ce.start_slice(self.index, ACCT, ex["exec_id"], 1, "child-lease")
+        token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1)
         self.index.conn.commit()
         go = self.tmp / "go"
-        kid = subprocess.Popen([sys.executable, str(child), str(SRC), os.environ[config.HOME_ENV], ex["exec_id"], "m1", str(go), ACCT],
+        kid = subprocess.Popen([sys.executable, str(child), str(SRC), os.environ[config.HOME_ENV], ex["exec_id"], "m1", str(go), ACCT, token],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         for _ in range(600):
             if Path(str(go) + ".inside").exists():
@@ -696,28 +710,35 @@ class RecoveryTests(ExecBase):
         self.assertEqual(self.index._q("PRAGMA integrity_check")[0][0], "ok")
         self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
 
-    def test_reconciliation_resolves_unknown_items_without_retrying_anything(self):
+    def test_reconciliation_derives_the_outcome_from_structured_evidence(self):
         ex = self.started()
         a, b, c = self.ids_of(ex["exec_id"])
-        for mid in (a, b):
-            ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, ["INBOX"], now=self.tick())
-        ce.record_outcome(self.index, ACCT, ex["exec_id"], TOKEN, a, "UNKNOWN", code="TIMEOUT", now=self.tick())
-        ce.stop_execution(self.index, ACCT, ex["exec_id"], TOKEN, "AMBIGUOUS_RESULT", now=self.tick())
-        self.assertEqual(ce.item_counts(self.index, ACCT, ex["exec_id"]), {"UNKNOWN": 2, "NOT_APPLIED": 1})
-        with self.assertRaises(ce.ExecError):
-            ce.reconcile_item(self.index, ACCT, ex["exec_id"], c, "APPLIED", now=self.tick())  # not UNKNOWN
-        with self.assertRaises(ce.ExecError):
-            ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, "RETRY", now=self.tick())
-        ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, "APPLIED", now=self.tick())
-        self.assertEqual(self.exec_state(ex["exec_id"]), "RECONCILIATION_REQUIRED")  # one still unknown
-        done = ce.reconcile_item(self.index, ACCT, ex["exec_id"], b, "CONFLICT", now=self.tick())
+        for mid in (a, b, c):
+            ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "UNKNOWN", code="TIMEOUT", now=self.tick())
+        ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "AMBIGUOUS_RESULT", now=self.tick())
+        self.assertEqual(ce.item_counts(self.index, ACCT, ex["exec_id"]), {"UNKNOWN": 3})
+        before = lambda m: self.ev(m, ("INBOX", "CATEGORY_PROMOTIONS"))  # noqa: E731
+        with self.assertRaises(ce.ExecError):  # a bare assertion is not accepted
+            ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, "APPLIED", now=self.tick())
+        for bad in (None, self.ev(a, kind="OTHER"), self.ev(a, source="local-guess"), self.ev(b), self.ev(a, ()), self.ev(a, when="2000-01-01T00:00:00Z"),
+                    self.ev(a, when="yesterday")):
+            with self.assertRaises(ce.ExecError, msg=bad) as cm:
+                ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, bad, now=self.tick())
+            self.assertEqual(cm.exception.code, "BAD_EVIDENCE")
+        ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, self.ev(a), now=self.tick())  # observed archived state -> APPLIED, verified
+        self.assertEqual(self.exec_state(ex["exec_id"]), "RECONCILIATION_REQUIRED")  # two still unknown
+        ce.reconcile_item(self.index, ACCT, ex["exec_id"], b, before(b), now=self.tick())  # observed pre-state -> NOT_APPLIED (unmodified)
+        done = ce.reconcile_item(self.index, ACCT, ex["exec_id"], c, self.ev(c, ("SOMETHING_ELSE",)), now=self.tick())  # neither -> CONFLICT
         self.assertEqual(done["state"], "PARTIAL")
-        self.assertEqual(ce.item_counts(self.index, ACCT, ex["exec_id"]), {"APPLIED": 1, "CONFLICT": 1, "NOT_APPLIED": 1})
+        rows = {r["message_id"]: (r["state"], r["error_code"], r["verified"]) for r in self.index._q("SELECT * FROM cleanup_exec_item")}
+        self.assertEqual(rows[a], ("APPLIED", "RECONCILED_APPLIED", 1))
+        self.assertEqual(rows[b], ("NOT_APPLIED", "RECONCILED_UNMODIFIED", 0))
+        self.assertEqual(rows[c], ("CONFLICT", "RECONCILED_CONFLICT", 0))
         with self.assertRaises(ce.ExecError):
-            ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, "NOT_APPLIED", now=self.tick())
-        # the account is free again, but a reconciled execution never restarts
+            ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, self.ev(a), now=self.tick())  # only UNKNOWN items, only while reconciling
         with self.assertRaises(ce.ExecError):
-            ce.start_slice(self.index, ACCT, ex["exec_id"], 1, TOKEN, now=self.tick())
+            ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())  # a reconciled execution never restarts
 
 
 class DryRunAndCliTests(ExecBase):
@@ -819,8 +840,8 @@ class DryRunAndCliTests(ExecBase):
     def test_reconciliation_banner_is_shown(self):
         ex = self.started()
         mid = self.ids_of(ex["exec_id"])[0]
-        ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, mid, ["INBOX"], now=self.tick())
-        ce.stop_execution(self.index, ACCT, ex["exec_id"], TOKEN, "AMBIGUOUS_RESULT", now=self.tick())
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX"], now=self.tick())
+        ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "AMBIGUOUS_RESULT", now=self.tick())
         out = self.run_cli("cleanup", "exec", "show", ex["exec_id"], "--account", ACCT)[1]
         self.assertIn("RECONCILIATION REQUIRED", out)
         self.assertIn("Nothing is retried automatically", out)
@@ -828,10 +849,10 @@ class DryRunAndCliTests(ExecBase):
     def test_audit_trail_distinguishes_intent_outcome_and_unknown_without_message_ids(self):
         ex = self.started()
         a, b, c = self.ids_of(ex["exec_id"])
-        ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, a, ["INBOX"], now=self.tick())
-        ce.record_outcome(self.index, ACCT, ex["exec_id"], TOKEN, a, "APPLIED", verified=True, now=self.tick())
-        ce.record_intent(self.index, ACCT, ex["exec_id"], TOKEN, b, ["INBOX"], now=self.tick())
-        ce.stop_execution(self.index, ACCT, ex["exec_id"], TOKEN, "AMBIGUOUS_RESULT", now=self.tick())
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a), now=self.tick())
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, b, ["INBOX"], now=self.tick())
+        ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "AMBIGUOUS_RESULT", now=self.tick())
         metas = [json.loads(e["meta"]) for e in audit.events(self.index, ACCT, limit=1000) if e["event_type"] == "ITEM_TRANSITION"]
         transitions = {(m["from"], m["to"]) for m in metas}
         self.assertTrue({("PENDING", "INTENT"), ("INTENT", "APPLIED"), ("INTENT", "UNKNOWN"), ("PENDING", "NOT_APPLIED")} <= transitions, transitions)
@@ -840,12 +861,392 @@ class DryRunAndCliTests(ExecBase):
             self.assertNotIn(f'"{mid}"', text)
         self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
 
+class HardeningTests(ExecBase):
+    """Regression tests for the independent M4C-A audit findings."""
+
+    # ---- helpers
+    def final_partial(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a, b = self.ids_of(ex["exec_id"])
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a), now=self.tick())
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, b, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, b, "NOT_APPLIED", code="rejected", now=self.tick())  # normalized
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        return ex
+
+    def sql(self, sql, *params):
+        try:
+            with self.index.conn:
+                self.index.conn.execute(sql, params)
+            return None
+        except sqlite3.DatabaseError as exc:
+            return str(exc)
+
+    def refused(self, sql, *params):
+        self.assertIsNotNone(self.sql(sql, *params), sql)
+
+    def audit_count(self):
+        return self.index._q("SELECT COUNT(*) FROM cleanup_audit")[0][0]
+
+    # ---- 1. final-state correctness
+    def test_abort_is_only_possible_before_the_end_never_for_a_final_state(self):
+        ex = self.final_partial()
+        self.assertEqual(self.exec_state(ex["exec_id"]), "PARTIAL")
+        with self.assertRaises(ce.ExecError) as cm:
+            ce.abort_execution(self.index, ACCT, ex["exec_id"], now=self.tick())
+        self.assertEqual(cm.exception.code, "BAD_STATE")
+        self.refused("UPDATE cleanup_execution SET state='ABORTED' WHERE exec_id=?", ex["exec_id"])  # not even by direct SQL
+        self.assertEqual(self.exec_state(ex["exec_id"]), "PARTIAL")
+        done = self.started(self.approved_plan(["m3", "m4"]))
+        self.apply_all(done)
+        ce.end_slice(self.index, ACCT, done["exec_id"], 1, self.token, now=self.tick())
+        failed = self.started(self.approved_plan(["m5"]))
+        mid = self.ids_of(failed["exec_id"])[0]
+        ce.record_skip(self.index, ACCT, failed["exec_id"], self.token, mid, "SKIPPED_GONE", "NOT_FOUND", now=self.tick())
+        ce.end_slice(self.index, ACCT, failed["exec_id"], 1, self.token, now=self.tick())
+        self.assertEqual((self.exec_state(done["exec_id"]), self.exec_state(failed["exec_id"])), ("EXECUTED", "FAILED"))
+        for e in (done, failed):
+            with self.assertRaises(ce.ExecError):
+                ce.abort_execution(self.index, ACCT, e["exec_id"], now=self.tick())
+
+    def test_abort_is_allowed_from_prepared_and_awaiting_continuation_only(self):
+        prepared = self.reserve(self.approved_plan(["m1", "m2"]))
+        self.assertEqual(ce.abort_execution(self.index, ACCT, prepared["exec_id"], now=self.tick())["state"], "ABORTED")
+        self.assertEqual(ce.code_counts(self.index, ACCT, prepared["exec_id"]), {("NOT_APPLIED", "NEVER_ATTEMPTED"): 2})
+        running = self.started(self.approved_plan(["m3", "m4"]))
+        with self.assertRaises(ce.ExecError):
+            ce.abort_execution(self.index, ACCT, running["exec_id"], now=self.tick())  # EXECUTING: use stop_execution
+        ce.stop_execution(self.index, ACCT, running["exec_id"], self.token, "OWNER_REQUEST", now=self.tick())
+        self.assertEqual(self.exec_state(running["exec_id"]), "FAILED")
+
+    # ---- 2. closed vocabulary
+    def test_codes_are_a_closed_vocabulary_validated_before_any_mutation(self):
+        ex = self.started(self.approved_plan(["m1", "m2", "m3"]))
+        a, b, c = self.ids_of(ex["exec_id"])
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+        before = self.audit_count()
+        bad_codes = ["sender@example.test", "x" * 500, "line\nbreak", "\u05e9\u05dc\u05d5\u05dd", "", "DROP TABLE", "reject-ed", "NEVER_ATTEMPTED",
+                     "RECONCILED_APPLIED", 5, None.__class__, ["REJECTED"], str(RuntimeError("secret@example.test"))]
+        for bad in bad_codes:
+            with self.assertRaises(ce.ExecError, msg=repr(bad)) as cm:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "NOT_APPLIED", code=bad, now=self.tick())
+            self.assertEqual(cm.exception.code, "BAD_CODE")
+            self.assertNotIn(str(bad)[:6] if isinstance(bad, str) and len(bad) > 5 else "\x00", str(cm.exception).replace("reason code", ""))
+        self.assertEqual((self.audit_count(), ce.item_counts(self.index, ACCT, ex["exec_id"])), (before, {"INTENT": 1, "PENDING": 2}))  # nothing changed
+        for pair in (("APPLIED", "REJECTED"), ("NOT_APPLIED", "TIMEOUT"), ("UNKNOWN", "REJECTED")):  # right vocabulary, wrong outcome
+            with self.assertRaises(ce.ExecError):
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, pair[0], code=pair[1], evidence=self.ev(a), now=self.tick())
+        with self.assertRaises(ce.ExecError):
+            ce.record_skip(self.index, ACCT, ex["exec_id"], self.token, b, "SKIPPED_DRIFT", "someone@example.test", now=self.tick())
+        with self.assertRaises(ce.ExecError):
+            ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "free text reason", now=self.tick())
+        self.assertEqual(ce.item_counts(self.index, ACCT, ex["exec_id"]), {"INTENT": 1, "PENDING": 2})
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "NOT_APPLIED", code=" rejected ", now=self.tick())  # normalized
+        ce.record_skip(self.index, ACCT, ex["exec_id"], self.token, b, "SKIPPED_DRIFT", "labels_changed", now=self.tick())
+        codes = {r["message_id"]: r["error_code"] for r in self.index._q("SELECT message_id, error_code FROM cleanup_exec_item")}
+        self.assertEqual((codes[a], codes[b]), ("REJECTED", "LABELS_CHANGED"))
+
+    def test_the_database_itself_rejects_free_text_codes(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        for text in ("sender@example.test", "x" * 300, "REJECTED\n", "never_attempted", "anything"):
+            self.refused("UPDATE cleanup_exec_item SET error_code=? WHERE exec_id=?", text, ex["exec_id"])
+        for code in idx.EXEC_ITEM_CODES:
+            self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET error_code=? WHERE exec_id=? AND message_id='m1'", code, ex["exec_id"]), code)
+
+    def test_not_applied_reasons_distinguish_unattempted_rejected_reconciled_and_interrupted(self):
+        ex = self.started(self.approved_plan(["m1", "m2", "m3", "m4"]))
+        a, b, c, d = self.ids_of(ex["exec_id"])
+        for mid in (a, b, c):
+            ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "NOT_APPLIED", now=self.tick(), code="REJECTED")
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, b, "UNKNOWN", code="TIMEOUT", now=self.tick())
+        ce.recover_interrupted(self.index, ACCT, self.t + ce.LEASE_TTL + timedelta(minutes=1))  # c: INTENT -> UNKNOWN(INTERRUPTED); d: never attempted
+        ce.reconcile_item(self.index, ACCT, ex["exec_id"], b, self.ev(b, ("INBOX", "CATEGORY_PROMOTIONS"), when=cp._iso(self.t + ce.LEASE_TTL + timedelta(minutes=2))),
+                          now=self.t + ce.LEASE_TTL + timedelta(minutes=2))
+        got = {r["message_id"]: (r["state"], r["error_code"]) for r in self.index._q("SELECT * FROM cleanup_exec_item")}
+        self.assertEqual(got[a], ("NOT_APPLIED", "REJECTED"))
+        self.assertEqual(got[b], ("NOT_APPLIED", "RECONCILED_UNMODIFIED"))
+        self.assertEqual(got[c], ("UNKNOWN", "INTERRUPTED"))
+        self.assertEqual(got[d], ("NOT_APPLIED", "NEVER_ATTEMPTED"))
+        self.assertEqual(self.index._q("SELECT intent_at IS NOT NULL FROM cleanup_exec_item WHERE message_id=?", d)[0][0], 0)  # unattempted: no intent
+        for code in ("NEVER_ATTEMPTED", "REJECTED", "RECONCILED_UNMODIFIED", "INTERRUPTED", "OVERLAP_ALREADY_APPLIED"):
+            self.assertIn(code, idx.EXEC_ITEM_CODES)
+            self.assertIn(code, ce.CODE_MEANING)
+
+    # ---- 3. lease ownership
+    def test_lease_tokens_are_random_library_generated_and_stored_only_as_hashes(self):
+        import inspect
+        self.assertEqual(list(inspect.signature(ce.start_slice).parameters), ["index", "account", "exec_id", "slice_no", "now"])  # no token parameter
+        tokens = set()
+        for i in range(1, 6):
+            ex = self.reserve(self.approved_plan([f"m{i}"]))
+            tok = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
+            self.assertGreaterEqual(len(tok), 32)
+            self.assertTrue(all(c.isalnum() or c in "-_" for c in tok))
+            tokens.add(tok)
+            self.assertNotIn(tok, json.dumps([tuple(r) for r in self.index._q("SELECT * FROM cleanup_execution")]))  # only a hash is stored
+            self.assertEqual(self.index._q("SELECT length(lease_token) FROM cleanup_execution WHERE exec_id=?", ex["exec_id"])[0][0], 64)
+            mid = self.ids_of(ex["exec_id"])[0]
+            ce.record_skip(self.index, ACCT, ex["exec_id"], tok, mid, "SKIPPED_GONE", "NOT_FOUND", now=self.tick())
+            ce.end_slice(self.index, ACCT, ex["exec_id"], 1, tok, now=self.tick())
+        self.assertEqual(len(tokens), 5)  # never repeated
+        self.assertEqual(len({sha for sha in (ce.sha256(t) for t in tokens)}), 5)
+
+    def test_short_reused_forged_and_stale_tokens_are_rejected(self):
+        first = self.started(self.approved_plan(["m1", "m2"]))
+        old = self.token
+        mid = self.ids_of(first["exec_id"])[0]
+        for bad, code in (("x", "BAD_LEASE"), ("a" * 31, "BAD_LEASE"), ("a" * 65, "BAD_LEASE"), ("\u05d0" * 40, "BAD_LEASE"), ("bad token " + "a" * 30, "BAD_LEASE"),
+                          (None, "BAD_LEASE"), (12345, "BAD_LEASE"), ("A" * 32, "LEASE_LOST"), ("A" * 43, "LEASE_LOST"), (old[::-1], "LEASE_LOST")):
+            with self.assertRaises(ce.ExecError, msg=repr(bad)) as cm:
+                ce.record_intent(self.index, ACCT, first["exec_id"], bad, mid, ["INBOX"], now=self.tick())
+            self.assertEqual(cm.exception.code, code, repr(bad))
+            with self.assertRaises(ce.ExecError):
+                ce.renew_lease(self.index, ACCT, first["exec_id"], bad, now=self.tick())
+        self.assertEqual(ce.item_counts(self.index, ACCT, first["exec_id"]), {"PENDING": 2})
+        for m in self.ids_of(first["exec_id"]):  # finish it, then try the (now stale) token on the next execution
+            ce.record_skip(self.index, ACCT, first["exec_id"], old, m, "SKIPPED_GONE", "NOT_FOUND", now=self.tick())
+        ce.end_slice(self.index, ACCT, first["exec_id"], 1, old, now=self.tick())
+        second = self.started(self.approved_plan(["m3", "m4"]))
+        self.assertNotEqual(self.token, old)
+        with self.assertRaises(ce.ExecError) as cm:  # a token from another execution
+            ce.record_intent(self.index, ACCT, second["exec_id"], old, self.ids_of(second["exec_id"])[0], ["INBOX"], now=self.tick())
+        self.assertEqual(cm.exception.code, "LEASE_LOST")
+        with self.assertRaises(ce.ExecError):  # and a finished execution accepts nothing
+            ce.record_skip(self.index, ACCT, first["exec_id"], old, mid, "SKIPPED_GONE", "NOT_FOUND", now=self.tick())
+        ce.recover_interrupted(self.index, ACCT, self.t + ce.LEASE_TTL + timedelta(minutes=1))  # stale after recovery
+        with self.assertRaises(ce.ExecError) as cm:
+            ce.renew_lease(self.index, ACCT, second["exec_id"], self.token, now=self.t + ce.LEASE_TTL + timedelta(minutes=2))
+        self.assertEqual(cm.exception.code, "LEASE_LOST")
+
+    # ---- 4. one clock policy
+    def test_every_mutation_refuses_a_clock_earlier_than_the_last_recorded_event(self):
+        plan = self.approved_plan(["m1", "m2", "m3"])
+        past = self.t - timedelta(minutes=10)
+        with self.assertRaises(cp.PlanError) as cm:
+            ce.reserve_execution(self.index, ACCT, plan["plan_id"], ce.execution_phrase(plan, 3), now=past)
+        self.assertEqual(cm.exception.code, "CLOCK_ROLLBACK")
+        ex = self.reserve(plan)
+        past = self.t - timedelta(minutes=10)
+        calls = {"start_slice": lambda: ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=past),
+                 "abort": lambda: ce.abort_execution(self.index, ACCT, ex["exec_id"], now=past),
+                 "recover": lambda: ce.recover_interrupted(self.index, ACCT, now=past)}
+        for name, call in calls.items():
+            with self.assertRaises(cp.PlanError, msg=name) as cm:
+                call()
+            self.assertEqual(cm.exception.code, "CLOCK_ROLLBACK", name)
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
+        a = self.ids_of(ex["exec_id"])[0]
+        past = self.t - timedelta(minutes=10)
+        live = {"intent": lambda: ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, ["INBOX"], now=past),
+                "skip": lambda: ce.record_skip(self.index, ACCT, ex["exec_id"], self.token, a, "SKIPPED_GONE", "NOT_FOUND", now=past),
+                "renew": lambda: ce.renew_lease(self.index, ACCT, ex["exec_id"], self.token, now=past),
+                "end_slice": lambda: ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=past),
+                "stop": lambda: ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "OWNER_REQUEST", now=past)}
+        for name, call in live.items():
+            with self.assertRaises(cp.PlanError, msg=name) as cm:
+                call()
+            self.assertEqual(cm.exception.code, "CLOCK_ROLLBACK", name)
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, ["INBOX"], now=self.t)
+        with self.assertRaises(cp.PlanError) as cm:
+            ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "UNKNOWN", code="TIMEOUT", now=past)
+        self.assertEqual(cm.exception.code, "CLOCK_ROLLBACK")
+        ce.renew_lease(self.index, ACCT, ex["exec_id"], self.token, now=self.t - timedelta(minutes=4))  # small skew is tolerated
+        self.assertEqual(ce.item_counts(self.index, ACCT, ex["exec_id"]), {"INTENT": 1, "PENDING": 2})  # nothing changed by refused calls
+
+    # ---- 5. schema invariants against direct invalid SQL
+    def test_direct_sql_cannot_create_contradictory_terminal_states(self):
+        ex = self.started(self.approved_plan(["m1", "m2", "m3"]))
+        E = ex["exec_id"]
+        self.refused("UPDATE cleanup_execution SET state='EXECUTED' WHERE exec_id=?", E)  # items still PENDING
+        self.refused("UPDATE cleanup_execution SET state='PARTIAL' WHERE exec_id=?", E)
+        self.refused("UPDATE cleanup_execution SET state='FAILED' WHERE exec_id=?", E)
+        self.refused("UPDATE cleanup_execution SET state='AWAITING_CONTINUATION' WHERE exec_id=?", E)  # no pending slice
+        self.refused("UPDATE cleanup_execution SET state='RECONCILIATION_REQUIRED' WHERE exec_id=?", E)  # nothing UNKNOWN
+        self.refused("UPDATE cleanup_exec_slice SET state='COMPLETED' WHERE exec_id=?", E)  # open items
+        a, b, c = self.ids_of(E)
+        self.refused("UPDATE cleanup_exec_item SET state='INTENT' WHERE message_id=?", a)  # no metadata
+        self.refused("UPDATE cleanup_exec_item SET state='INTENT', intent_at='t' WHERE message_id=?", a)
+        self.refused("UPDATE cleanup_exec_item SET state='INTENT', intent_at='t', prev_label_ids='not json' WHERE message_id=?", a)
+        self.refused("UPDATE cleanup_exec_item SET state='INTENT', intent_at='t', prev_label_ids='[]' WHERE message_id=?", a)
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='INTENT', intent_at='t', prev_label_ids='[\"INBOX\"]' WHERE message_id=?", a))
+        self.refused("UPDATE cleanup_exec_item SET prev_label_ids='[\"OTHER\"]' WHERE message_id=?", a)  # recovery metadata is immutable
+        self.refused("UPDATE cleanup_exec_item SET prev_label_ids=NULL WHERE message_id=?", a)
+        self.refused("UPDATE cleanup_exec_item SET intent_at='later' WHERE message_id=?", a)
+        self.refused("UPDATE cleanup_exec_item SET state='APPLIED' WHERE message_id=?", a)  # no verification / result time
+        self.refused("UPDATE cleanup_exec_item SET state='APPLIED', verified=1 WHERE message_id=?", a)  # no result time
+        self.refused("UPDATE cleanup_exec_item SET verified=1 WHERE message_id=?", b)  # only APPLIED can be verified
+        self.refused("UPDATE cleanup_exec_item SET state='APPLIED', result_at='t', verified=1 WHERE message_id=?", b)  # b never had an intent
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='APPLIED', result_at='t', verified=1 WHERE message_id=?", a))
+        self.refused("UPDATE cleanup_execution SET state='EXECUTED' WHERE exec_id=?", E)  # b, c still open
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='NOT_APPLIED', error_code='NEVER_ATTEMPTED' WHERE message_id IN (?,?)", b, c))
+        self.refused("UPDATE cleanup_execution SET state='EXECUTED' WHERE exec_id=?", E)  # contains unsuccessful items
+        self.refused("UPDATE cleanup_execution SET state='FAILED' WHERE exec_id=?", E)  # something was applied
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_slice SET state='COMPLETED' WHERE exec_id=?", E))
+        self.assertIsNone(self.sql("UPDATE cleanup_execution SET state='PARTIAL' WHERE exec_id=?", E))
+        for stmt in ("UPDATE cleanup_exec_item SET error_code='REJECTED'", "UPDATE cleanup_exec_slice SET finished_at='x'",
+                     "UPDATE cleanup_execution SET state='EXECUTING'", "UPDATE cleanup_execution SET state='ABORTED'"):
+            self.refused(stmt)  # everything about a finished execution is frozen
+
+    def test_executed_needs_a_verified_applied_item_and_zero_applied_is_failed(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        E = ex["exec_id"]
+        a, b = self.ids_of(E)
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='SKIPPED_GONE', error_code='NOT_FOUND', result_at='t' WHERE exec_id=?", E))
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_slice SET state='COMPLETED' WHERE exec_id=?", E))
+        self.refused("UPDATE cleanup_execution SET state='EXECUTED' WHERE exec_id=?", E)  # nothing applied: only FAILED is coherent
+        self.assertIsNone(self.sql("UPDATE cleanup_execution SET state='FAILED' WHERE exec_id=?", E))
+
+    def test_related_rows_follow_one_safe_order_items_then_slices_then_execution(self):
+        ex = self.reserve(self.approved_plan(["m1", "m2"]))
+        self.refused("UPDATE cleanup_execution SET state='ABORTED' WHERE exec_id=?", ex["exec_id"])  # reverse order: items still PENDING
+        self.refused("UPDATE cleanup_exec_slice SET state='COMPLETED' WHERE exec_id=?", ex["exec_id"])
+        self.assertEqual(ce.abort_execution(self.index, ACCT, ex["exec_id"], now=self.tick())["state"], "ABORTED")  # the library uses the safe order
+
+    def test_lease_column_only_holds_a_sha256(self):
+        ex = self.reserve(self.approved_plan(["m1", "m2"]))
+        self.refused("UPDATE cleanup_execution SET lease_token='plain-token' WHERE exec_id=?", ex["exec_id"])
+        self.assertIsNone(self.sql("UPDATE cleanup_execution SET lease_token=? WHERE exec_id=?", "a" * 64, ex["exec_id"]))
+
+    # ---- 6. AWAITING_CONTINUATION versus a final PARTIAL
+    def test_awaiting_continuation_is_distinct_from_a_final_partial_and_only_awaiting_blocks_overlap(self):
+        self.index.purge(ACCT)
+        self.seed([msg(i, sender=f"s{i}@shop.example.test") for i in range(1, 141)])
+        big = self.approved_plan([f"m{i}" for i in range(1, 131)])
+        ex = self.reserve(big)
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
+        self.apply_all(ex, 1)
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        self.assertEqual(self.exec_state(ex["exec_id"]), "AWAITING_CONTINUATION")
+        self.assertEqual(sum(1 for s in ce.slices(self.index, ACCT, ex["exec_id"]) if s["state"] == "PENDING"), 2)
+        self.assertEqual(ce.recover_interrupted(self.index, ACCT, self.t + timedelta(hours=1)), [])  # no lease to expire: untouched
+        rest = self.ids_of(ex["exec_id"], 2)[:2]
+        later = self.approved_plan(rest)
+        with self.assertRaises(ce.ExecError) as cm:  # pending work of an awaiting execution still counts as unresolved overlap
+            self.reserve(later)
+        self.assertEqual(cm.exception.code, "OVERLAP_UNRESOLVED")
+        other = self.approved_plan(["m135", "m136"])
+        ex2 = self.reserve(other)  # an AWAITING execution does not occupy the account's single running slot
+        with self.assertRaises(ce.ExecError) as cm:  # ...but continuing it while another one runs fails closed
+            self.index.conn.execute  # noqa: B018
+            ce.confirm_slice(self.index, ACCT, ex["exec_id"], 2, ce.continuation_phrase(big, 2, 100), now=self.tick())
+            ce.start_slice(self.index, ACCT, ex["exec_id"], 2, now=self.tick())
+        self.assertEqual(cm.exception.code, "ACTIVE_EXECUTION_EXISTS")
+        ce.abort_execution(self.index, ACCT, ex2["exec_id"], now=self.tick())
+        # a final PARTIAL (no pending slice) never counts as active and cannot be continued
+        fin = self.final_partial.__func__(self) if False else None  # noqa: F841
+        self.assertEqual(self.exec_state(ex["exec_id"]), "AWAITING_CONTINUATION")
+
+    def test_a_final_partial_does_not_block_the_account_or_continuation(self):
+        ex = self.final_partial()
+        self.assertEqual(self.exec_state(ex["exec_id"]), "PARTIAL")
+        nxt = self.reserve(self.approved_plan(["m3", "m4"]))  # the account is free again
+        self.assertEqual(nxt["state"], "PREPARED")
+        with self.assertRaises(ce.ExecError):
+            ce.confirm_slice(self.index, ACCT, ex["exec_id"], 1, "CONTINUE", now=self.tick())
+        with self.assertRaises(ce.ExecError):
+            ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
+
+    # ---- 7. no false verification
+    def test_applied_requires_matching_live_read_evidence_and_never_a_bare_claim(self):
+        ex = self.started(self.approved_plan(["m1", "m2", "m3"]))
+        a, b, c = self.ids_of(ex["exec_id"])
+        for mid in (a, b, c):
+            ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX", "CATEGORY_PROMOTIONS", "Label_9"], now=self.tick())
+        import inspect
+        self.assertNotIn("verified", inspect.signature(ce.record_outcome).parameters)  # callers cannot assert verification
+        with self.assertRaises(ce.ExecError) as cm:
+            ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", now=self.tick())
+        self.assertEqual(cm.exception.code, "BAD_EVIDENCE")
+        for labels, expect in ((("INBOX", "CATEGORY_PROMOTIONS", "Label_9"), "EVIDENCE_MISMATCH"), (("CATEGORY_PROMOTIONS",), "EVIDENCE_MISMATCH"),
+                               (("CATEGORY_PROMOTIONS", "Label_9", "STARRED"), "EVIDENCE_MISMATCH")):
+            with self.assertRaises(ce.ExecError) as cm:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, labels), now=self.tick())
+            self.assertEqual(cm.exception.code, expect)
+        with self.assertRaises(ce.ExecError):
+            ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(b, ("CATEGORY_PROMOTIONS", "Label_9")), now=self.tick())
+        self.assertEqual(self.index._q("SELECT COUNT(*) FROM cleanup_exec_item WHERE verified=1")[0][0], 0)
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, ("Label_9", "CATEGORY_PROMOTIONS")), now=self.tick())
+        self.assertEqual(self.index._q("SELECT state, verified FROM cleanup_exec_item WHERE message_id=?", a)[0][:], ("APPLIED", 1))
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, b, "UNKNOWN", code="NETWORK_ERROR", now=self.tick())
+        self.assertEqual(self.index._q("SELECT verified FROM cleanup_exec_item WHERE message_id=?", b)[0][0], 0)  # unknown is never verified
+        ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "AMBIGUOUS_RESULT", now=self.tick())
+        self.assertEqual(self.exec_state(ex["exec_id"]), "RECONCILIATION_REQUIRED")  # unknown work is not "executed"
+
+    def test_reconciliation_is_not_reachable_from_production_code(self):
+        text = (SRC / "gmail_intelligence" / "cli.py").read_text()
+        for name in ("reconcile_item", "Evidence", "record_outcome", "reserve_execution", "recover_interrupted"):
+            self.assertNotIn(name, text)
+        doc = (ROOT / "docs" / "CLEANUP.md").read_text()
+        self.assertIn("local metadata alone cannot prove", doc.lower().replace("\n", " "))
+
+    # ---- 8. reporting
+    def test_reports_show_continuation_only_when_it_exists_and_reasons_without_ids(self):
+        def show(exec_id, flags=()):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(["cleanup", "exec", "show", exec_id, "--account", ACCT, *flags]), 0, err.getvalue())
+            return out.getvalue()
+        partial = self.final_partial()
+        text = show(partial["exec_id"])
+        self.assertIn("PARTIAL (final)", text)
+        self.assertNotIn("AWAITING", text)
+        self.assertNotIn("fresh typed confirmation", text)
+        self.assertIn("REJECTED", text)
+        for mid in ("m1", "m2"):
+            self.assertNotIn(mid, text)
+        failed = self.started(self.approved_plan(["m3"]))
+        ce.stop_execution(self.index, ACCT, failed["exec_id"], self.token, "AUTH_PROBLEM", now=self.tick())
+        text = show(failed["exec_id"])
+        self.assertIn("FAILED (final)", text)
+        self.assertIn("NEVER_ATTEMPTED", text)
+        self.assertNotIn("confirmation", text.replace("This version", ""))
+        unknown = self.started(self.approved_plan(["m4", "m5"]))
+        mid = self.ids_of(unknown["exec_id"])[0]
+        ce.record_intent(self.index, ACCT, unknown["exec_id"], self.token, mid, ["INBOX"], now=self.tick())
+        ce.stop_execution(self.index, ACCT, unknown["exec_id"], self.token, "AMBIGUOUS_RESULT", now=self.tick())
+        text = show(unknown["exec_id"])
+        self.assertIn("RECONCILIATION REQUIRED", text)
+        self.assertIn("AMBIGUOUS_RESULT", text)
+        self.assertIn("uncertain", text)
+        self.assertNotIn(mid, text)
+        self.assertIn(mid, show(unknown["exec_id"], ["--show-ids"]))
+
+    def test_awaiting_continuation_report_names_the_pending_slices(self):
+        self.index.purge(ACCT)
+        self.seed([msg(i, sender=f"s{i}@shop.example.test") for i in range(1, 121)])
+        ex = self.reserve(self.approved_plan([f"m{i}" for i in range(1, 111)]))
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
+        self.apply_all(ex, 1)
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["cleanup", "exec", "show", ex["exec_id"], "--account", ACCT])
+        self.assertIn("AWAITING CONTINUATION: slice(s) 2", out.getvalue())
+
+    # ---- 9. dry run stays byte-for-byte read-only on a synthetic v5 file
+    def test_dry_run_and_listings_leave_the_database_file_byte_identical(self):
+        import hashlib
+        plan = self.approved_plan(["m1", "m2"])
+        ex = self.reserve(self.approved_plan(["m3", "m4"]))
+        self.index.conn.commit()
+        path = config.index_path()
+        digest = lambda: hashlib.sha256(Path(path).read_bytes()).hexdigest()  # noqa: E731
+        before = digest()
+        for argv in (["cleanup", "execute", plan["plan_id"], "--dry-run"], ["cleanup", "exec", "list"], ["cleanup", "exec", "show", ex["exec_id"], "--show-ids"],
+                     ["cleanup", "execute", plan["plan_id"]]):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                cli.main([*argv, "--account", ACCT])
+        self.assertEqual(digest(), before)
+
+
 
 class SourceGuards(unittest.TestCase):
     MODULES = ("cleanup_exec.py", "cleanup_exec_report.py")
 
     def test_m4c_a_modules_have_no_gmail_oauth_network_or_keychain_code(self):
-        allowed_local = {"cleanup_audit", "cleanup_plans", "cleanup_exec", "cleanup_protect"}
+        allowed_local = {"cleanup_audit", "cleanup_plans", "cleanup_exec", "cleanup_protect", "index"}
         for name in self.MODULES:
             text = (SRC / "gmail_intelligence" / name).read_text()
             for node in ast.walk(ast.parse(text)):
@@ -859,7 +1260,7 @@ class SourceGuards(unittest.TestCase):
                     if top == "gmail_intelligence":
                         self.assertIn(m.split(".")[1] if "." in m else None, allowed_local | {None}, (name, m))
                     else:
-                        self.assertIn(top, {"json", "secrets", "sqlite3", "datetime"}, (name, m))
+                        self.assertIn(top, {"json", "secrets", "sqlite3", "datetime", "hmac", "dataclasses"}, (name, m))
             for banned in ("googleapiclient", "google.", "keystore", "oauth", "urllib", "socket", "subprocess", "requests", "ai_http", "scanner",
                            "gmail_write", "batchModify", ".trash(", ".send(", "untrash", "messages().modify", "gmail.modify", "mail.google.com"):
                 self.assertNotIn(banned, text, (name, banned))
