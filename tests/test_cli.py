@@ -89,6 +89,7 @@ class HiddenPthTests(unittest.TestCase):
 class OfflineGuarantees(unittest.TestCase):
     # Only these modules may import third-party / Google libraries (all lazily imported by the CLI).
     GOOGLE_MODULES = {"oauth.py", "gmail.py", "keystore.py"}  # scanner/index/report stay stdlib-only
+    LOOPBACK_AI_MODULES = {"ai_http.py"}  # M3: the only stdlib-networking module; may import urllib, nothing broader
 
     def test_runtime_dependencies_are_the_reviewed_set(self):
         text = (ROOT / "pyproject.toml").read_text()
@@ -107,6 +108,9 @@ class OfflineGuarantees(unittest.TestCase):
                     names = [node.module]
                 for name in names:
                     top = name.split(".")[0]
+                    if path.name in self.LOOPBACK_AI_MODULES:
+                        self.assertNotIn(top, {"socket", "ssl", "http", "smtplib", "imaplib", "poplib", "ftplib"}, path.name)
+                        continue
                     if path.name in self.GOOGLE_MODULES:
                         self.assertNotIn(top, {"socket", "ssl", "http", "urllib", "smtplib", "imaplib", "poplib"}, path.name)
                         continue

@@ -28,10 +28,20 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D19 | Project license: **MIT** (owner decision). Dependencies are Apache-2.0, MIT and BSD-3-Clause (no publication constraint found). |
 | D20 | Before public release, commit author/committer email addresses were replaced with the maintainer's GitHub noreply address (messages, timestamps and file contents unchanged) and the cleaned history was published as a fresh repository; the original private development repository is kept as an archive. |
 
+## M3 decisions
+| ID | Decision |
+|----|----------|
+| D21 | Classification is local and offline over the M2 index only. Taxonomy: multi-valued **type**, separate **attention** signal, and **evidence** (LOW/MEDIUM/HIGH, not a probability). User rules always beat built-ins; ties keep compatible types and flag conflicts `REVIEW_NEEDED`. Details: [CLASSIFICATION.md](CLASSIFICATION.md). |
+| D22 | Rules are plain data (exact sender/domain/label + optional unread); no regex or code execution. User rules live in SQLite (`class_rules`, per account), outside Git; `mailbox purge` keeps them. |
+| D23 | Index schema v2 adds `class_rules` and `message_class` (additive). Upgrade is automatic on first open, after a private backup copy, in one transaction; no framework, no rescan. |
+| D24 | Results carry the ruleset hash and scan id; a changed ruleset or rescan makes them stale. `run` is explicit (`--limit`/`--all`); `preview` never writes. Reports show domains, not addresses, unless `--show-senders`. |
+| D25 | Local AI is optional, disabled by default, loopback-only, opt-in via `ai.json` plus `--ai`, domain/system-label input only, strict output schema, LOW-evidence additions only for weak messages, never above user rules. `ai_http.py` is the single module allowed to import `urllib`. Real inference NOT VERIFIED. |
+| D26 | Subject/body-based classification is out of scope for M3 (the index does not store them, D16); it needs a separate collection-policy decision. |
+
 ## M2 decisions
 | ID | Decision |
 |----|----------|
-| D15 | Local SQLite index (`index.sqlite3` in the app-data dir, 700/600, schema version 1 via `PRAGMA user_version`, no migration framework). Tables: `messages`, `message_labels` (needed for label/category counts), `labels`, `scans`. All keyed by account. |
+| D15 | Local SQLite index (`index.sqlite3` in the app-data dir, 700/600, schema version 1 via `PRAGMA user_version`, no migration framework; v2 added in M3, see D23). Tables: `messages`, `message_labels` (needed for label/category counts), `labels`, `scans`. All keyed by account. |
 | D16 | Collection policy: ids, dates, size estimate, label ids, unread flag and the lower-cased `From` address only. No bodies, snippets, subjects, attachments or other headers. Reports show sender domains; addresses only via `top-senders`. Subjects deferred until explicitly approved. |
 | D17 | Scans: newest first, 500 ids/page, one metadata fetch per message under a 4,500 units/minute budget (75% of the documented 6,000), checkpoints every 50 messages, resume via saved page token with a safe restart fallback. Rows are pruned only after a COMPLETE full scan. |
 | D18 | `*.sqlite3`/`*.db` stay git-ignored; iCloud conflict copies (`* 2.*`) are ignored too. |
