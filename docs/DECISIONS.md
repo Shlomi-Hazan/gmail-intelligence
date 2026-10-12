@@ -51,6 +51,17 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D40 | **M4B-to-M4C contract.** The executor must call `verify_approved`, consume the approval atomically at execution start, re-validate live Gmail state per message, skip drifted messages, never auto-retry or continue after ambiguity, never widen targets, and never act from plan state alone. Overlapping plans (the same message in several plans) are allowed in M4B; each plan keeps its own approval, which the executor must consume atomically and independently, reconciling earlier or concurrent operations on the same message instead of repeating an action, and failing closed on conflicting state (see [CLEANUP.md](CLEANUP.md)). |
 | D41 | **Hardening after the independent audit** (no P0-P2 findings). Backups are created exclusively with mode 600 and verified, partial ones removed; unrelated constraint errors are not reported as duplicate approvals; plan/approval state is cross-checked cheaply (triggers, approval-vs-audit) while stating that a database writer is outside the trust boundary; clock rollback is refused beyond a 5-minute tolerance; failed confirmations lock a plan for 15 minutes after 10 attempts; audit limits are validated; malformed snapshots fail with clean errors. Remaining limits are documented in [CLEANUP.md](CLEANUP.md). |
 
+## M4C decisions (owner design direction; M4C-A implemented offline in its branch)
+| ID | Decision |
+|----|----------|
+| D42 | **M4C scope.** ARCHIVE only. Future live calls are individual `messages.modify` (remove `INBOX` only) with a read-only `messages.get`/`threads.get(format=minimal)` check; no `batchModify` (it returns no per-message result), no trash/untrash, no thread writes. This narrows the original M4C issue text. |
+| D43 | **Execution state is separate from plan state.** Plan tables stay immutable; schema v5 adds `cleanup_execution`, `cleanup_exec_slice` and `cleanup_exec_item`. A plan with an execution can no longer change state. |
+| D44 | **Independent confirmations.** Plan approval (M4B), a fresh typed execution confirmation per slice (M4C), and a separate write OAuth authorization (M4C-B) are three different gates; none substitutes another. The approval is consumed atomically with the reservation of an execution and never becomes valid again. |
+| D45 | **Interruption and ambiguity.** Intent is committed before a Gmail call and the outcome after it; a crash or lost lease yields `UNKNOWN` items and `RECONCILIATION_REQUIRED`; nothing resumes or retries automatically; unknown work blocks the account until reconciled from observed state. |
+| D46 | **Overlap and concurrency.** One non-final execution per account; overlapping plans never cause automatic duplicate operations (already-applied targets are pre-skipped, unresolved overlap refuses). |
+| D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
+
+
 ## M3 decisions
 | ID | Decision |
 |----|----------|
@@ -64,7 +75,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 ## M2 decisions
 | ID | Decision |
 |----|----------|
-| D15 | Local SQLite index (`index.sqlite3` in the app-data dir, 700/600, schema version 1 via `PRAGMA user_version`, no migration framework; v2 added in M3 (D23), v3 in M4A (D35), v4 in M4B (D39)). Tables: `messages`, `message_labels` (needed for label/category counts), `labels`, `scans`. All keyed by account. |
+| D15 | Local SQLite index (`index.sqlite3` in the app-data dir, 700/600, schema version 1 via `PRAGMA user_version`, no migration framework; v2 added in M3 (D23), v3 in M4A (D35), v4 in M4B (D39), v5 in M4C-A (D43)). Tables: `messages`, `message_labels` (needed for label/category counts), `labels`, `scans`. All keyed by account. |
 | D16 | Collection policy: ids, dates, size estimate, label ids, unread flag and the lower-cased `From` address only. No bodies, snippets, subjects, attachments or other headers. Reports show sender domains; addresses only via `top-senders`. Subjects deferred until explicitly approved. |
 | D17 | Scans: newest first, 500 ids/page, one metadata fetch per message under a 4,500 units/minute budget (75% of the documented 6,000), checkpoints every 50 messages, resume via saved page token with a safe restart fallback. Rows are pruned only after a COMPLETE full scan. |
 | D18 | `*.sqlite3`/`*.db` stay git-ignored; iCloud conflict copies (`* 2.*`) are ignored too. |

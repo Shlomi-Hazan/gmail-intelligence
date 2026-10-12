@@ -138,7 +138,7 @@ class BackupSafetyTests(Base):
         [t.join() for t in threads]
         self.assertIn("ok", out)
         c = sqlite3.connect(self.db)
-        self.assertEqual((c.execute("PRAGMA user_version").fetchone()[0], c.execute("PRAGMA integrity_check").fetchone()[0]), (4, "ok"))
+        self.assertEqual((c.execute("PRAGMA user_version").fetchone()[0], c.execute("PRAGMA integrity_check").fetchone()[0]), (idx.SCHEMA_VERSION, "ok"))
         c.close()
         # the winner keeps its backup; a loser that found the upgrade already done discards only its own redundant copy
         self.assertEqual(len(backups(self.db)), 1 + out.count("problem"))

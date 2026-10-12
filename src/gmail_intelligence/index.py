@@ -2,7 +2,7 @@
 
 All data is keyed by account, so one account's rows are never mixed with another's. Schema version is
 kept in `PRAGMA user_version`. There is no migration framework: older versions are upgraded by additive scripts (v2 = M3
-classification tables, v3 = M4A protection rules, v4 = M4B plans/approvals/audit) in ONE transaction, after an automatic backup copy of the database file.
+classification tables, v3 = M4A protection rules, v4 = M4B plans/approvals/audit, v5 = M4C-A local execution state) in ONE transaction, after an automatic backup copy of the database file.
 """
 import os
 import sqlite3
@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from gmail_intelligence import config
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SCHEMA = """
 CREATE TABLE messages (
   account TEXT NOT NULL, id TEXT NOT NULL, thread_id TEXT, internal_ms INTEGER, size INTEGER,
@@ -131,6 +131,106 @@ CREATE TRIGGER cleanup_audit_no_delete BEFORE DELETE ON cleanup_audit
 BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 """
 
+# Version 5 (M4C-A): LOCAL execution state only. Nothing here talks to Gmail; the plan tables above stay untouched and immutable.
+# An execution is created in the same transaction that consumes the plan's approval. Triggers keep the state machines forward-only,
+# freeze the target set, and lock the plan once an execution exists. They guard against bugs, not against someone who can write the file.
+SCHEMA_V5 = """
+CREATE TABLE cleanup_execution (
+  account TEXT NOT NULL, exec_id TEXT NOT NULL, plan_id TEXT NOT NULL, plan_hash TEXT NOT NULL CHECK (length(plan_hash) = 64),
+  approval_nonce TEXT NOT NULL UNIQUE, action TEXT NOT NULL CHECK (action IN ('ARCHIVE')),
+  state TEXT NOT NULL CHECK (state IN ('PREPARED','EXECUTING','PARTIAL','EXECUTED','FAILED','ABORTED','RECONCILIATION_REQUIRED')),
+  item_count INTEGER NOT NULL CHECK (item_count >= 1), slice_count INTEGER NOT NULL CHECK (slice_count >= 1),
+  confirmation_sha256 TEXT NOT NULL, created_at TEXT NOT NULL, state_changed_at TEXT NOT NULL,
+  lease_token TEXT, lease_expires_at TEXT,
+  PRIMARY KEY (account, exec_id),
+  FOREIGN KEY (account, plan_id) REFERENCES cleanup_plan (account, plan_id)) WITHOUT ROWID;
+CREATE UNIQUE INDEX cleanup_exec_one_per_plan ON cleanup_execution (account, plan_id);
+CREATE UNIQUE INDEX cleanup_exec_one_active_per_account ON cleanup_execution (account)
+  WHERE state IN ('PREPARED','EXECUTING','RECONCILIATION_REQUIRED');
+CREATE TABLE cleanup_exec_slice (
+  account TEXT NOT NULL, exec_id TEXT NOT NULL, slice_no INTEGER NOT NULL CHECK (slice_no >= 1),
+  size INTEGER NOT NULL CHECK (size >= 1),
+  state TEXT NOT NULL CHECK (state IN ('PENDING','CONFIRMED','ACTIVE','COMPLETED','STOPPED')),
+  confirmation_sha256 TEXT, confirmed_at TEXT, started_at TEXT, finished_at TEXT,
+  PRIMARY KEY (account, exec_id, slice_no),
+  FOREIGN KEY (account, exec_id) REFERENCES cleanup_execution (account, exec_id)) WITHOUT ROWID;
+CREATE TABLE cleanup_exec_item (
+  account TEXT NOT NULL, exec_id TEXT NOT NULL, message_id TEXT NOT NULL, seq INTEGER NOT NULL, slice_no INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('PENDING','INTENT','APPLIED','SKIPPED_DRIFT','SKIPPED_GONE','NOT_APPLIED','UNKNOWN','CONFLICT')),
+  prev_label_ids TEXT, intent_at TEXT, result_at TEXT, error_code TEXT, verified INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account, exec_id, message_id),
+  FOREIGN KEY (account, exec_id) REFERENCES cleanup_execution (account, exec_id),
+  FOREIGN KEY (account, exec_id, slice_no) REFERENCES cleanup_exec_slice (account, exec_id, slice_no)) WITHOUT ROWID;
+CREATE UNIQUE INDEX cleanup_exec_item_seq ON cleanup_exec_item (account, exec_id, seq);
+CREATE TRIGGER cleanup_exec_insert_guard BEFORE INSERT ON cleanup_execution
+WHEN NEW.state <> 'PREPARED'
+  OR NOT EXISTS (SELECT 1 FROM cleanup_approval a WHERE a.account = NEW.account AND a.plan_id = NEW.plan_id
+      AND a.nonce = NEW.approval_nonce AND a.plan_hash = NEW.plan_hash AND a.status = 'CONSUMED')
+  OR NOT EXISTS (SELECT 1 FROM cleanup_plan p WHERE p.account = NEW.account AND p.plan_id = NEW.plan_id AND p.state = 'APPROVED'
+      AND p.plan_hash = NEW.plan_hash AND p.item_count = NEW.item_count AND p.action = NEW.action)
+BEGIN SELECT RAISE(ABORT, 'an execution needs a CONSUMED approval of an APPROVED plan and must start PREPARED'); END;
+CREATE TRIGGER cleanup_exec_content_immutable BEFORE UPDATE ON cleanup_execution
+WHEN NEW.account IS NOT OLD.account OR NEW.exec_id IS NOT OLD.exec_id OR NEW.plan_id IS NOT OLD.plan_id
+  OR NEW.plan_hash IS NOT OLD.plan_hash OR NEW.approval_nonce IS NOT OLD.approval_nonce OR NEW.action IS NOT OLD.action
+  OR NEW.item_count IS NOT OLD.item_count OR NEW.slice_count IS NOT OLD.slice_count
+  OR NEW.confirmation_sha256 IS NOT OLD.confirmation_sha256 OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'execution content is immutable'); END;
+CREATE TRIGGER cleanup_exec_state_forward_only BEFORE UPDATE OF state ON cleanup_execution
+WHEN NEW.state <> OLD.state AND NOT (
+     (OLD.state = 'PREPARED' AND NEW.state IN ('EXECUTING','ABORTED'))
+  OR (OLD.state = 'EXECUTING' AND NEW.state IN ('PARTIAL','EXECUTED','FAILED','RECONCILIATION_REQUIRED'))
+  OR (OLD.state = 'PARTIAL' AND NEW.state IN ('EXECUTING','ABORTED'))
+  OR (OLD.state = 'RECONCILIATION_REQUIRED' AND NEW.state IN ('PARTIAL','EXECUTED','FAILED')))
+BEGIN SELECT RAISE(ABORT, 'illegal execution state transition'); END;
+CREATE TRIGGER cleanup_exec_start_needs_frozen_targets BEFORE UPDATE OF state ON cleanup_execution
+WHEN OLD.state = 'PREPARED' AND NEW.state = 'EXECUTING' AND (
+     (SELECT COUNT(*) FROM cleanup_exec_item i WHERE i.account = NEW.account AND i.exec_id = NEW.exec_id) <> NEW.item_count
+  OR (SELECT COUNT(*) FROM cleanup_exec_slice s WHERE s.account = NEW.account AND s.exec_id = NEW.exec_id) <> NEW.slice_count)
+BEGIN SELECT RAISE(ABORT, 'an execution may only start with exactly its frozen targets and slices'); END;
+CREATE TRIGGER cleanup_exec_no_delete BEFORE DELETE ON cleanup_execution
+BEGIN SELECT RAISE(ABORT, 'executions are never deleted'); END;
+CREATE TRIGGER cleanup_exec_slice_insert_guard BEFORE INSERT ON cleanup_exec_slice
+WHEN NEW.state NOT IN ('PENDING','CONFIRMED')
+  OR (SELECT state FROM cleanup_execution e WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id) IS NOT 'PREPARED'
+BEGIN SELECT RAISE(ABORT, 'slices can only be created while the execution is being reserved'); END;
+CREATE TRIGGER cleanup_exec_slice_immutable BEFORE UPDATE ON cleanup_exec_slice
+WHEN NEW.account IS NOT OLD.account OR NEW.exec_id IS NOT OLD.exec_id OR NEW.slice_no IS NOT OLD.slice_no OR NEW.size IS NOT OLD.size
+BEGIN SELECT RAISE(ABORT, 'slice identity is immutable'); END;
+CREATE TRIGGER cleanup_exec_slice_state_forward_only BEFORE UPDATE OF state ON cleanup_exec_slice
+WHEN NEW.state <> OLD.state AND NOT (
+     (OLD.state = 'PENDING' AND NEW.state IN ('CONFIRMED','STOPPED'))
+  OR (OLD.state = 'CONFIRMED' AND NEW.state IN ('ACTIVE','STOPPED'))
+  OR (OLD.state = 'ACTIVE' AND NEW.state IN ('COMPLETED','STOPPED')))
+BEGIN SELECT RAISE(ABORT, 'illegal slice state transition'); END;
+CREATE TRIGGER cleanup_exec_slice_no_delete BEFORE DELETE ON cleanup_exec_slice
+BEGIN SELECT RAISE(ABORT, 'slices are never deleted'); END;
+CREATE TRIGGER cleanup_exec_item_insert_guard BEFORE INSERT ON cleanup_exec_item
+WHEN NEW.state NOT IN ('PENDING','SKIPPED_DRIFT')
+  OR (SELECT state FROM cleanup_execution e WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id) IS NOT 'PREPARED'
+  OR NOT EXISTS (SELECT 1 FROM cleanup_execution e JOIN cleanup_item ci ON ci.account = e.account AND ci.plan_id = e.plan_id
+      WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id AND ci.message_id = NEW.message_id)
+BEGIN SELECT RAISE(ABORT, 'execution targets must be exactly items of the approved plan and are fixed at reservation'); END;
+CREATE TRIGGER cleanup_exec_item_identity_immutable BEFORE UPDATE ON cleanup_exec_item
+WHEN NEW.account IS NOT OLD.account OR NEW.exec_id IS NOT OLD.exec_id OR NEW.message_id IS NOT OLD.message_id
+  OR NEW.seq IS NOT OLD.seq OR NEW.slice_no IS NOT OLD.slice_no
+BEGIN SELECT RAISE(ABORT, 'execution item identity is immutable'); END;
+CREATE TRIGGER cleanup_exec_item_state_forward_only BEFORE UPDATE OF state ON cleanup_exec_item
+WHEN NEW.state <> OLD.state AND NOT (
+     (OLD.state = 'PENDING' AND NEW.state IN ('INTENT','SKIPPED_DRIFT','SKIPPED_GONE','NOT_APPLIED'))
+  OR (OLD.state = 'INTENT' AND NEW.state IN ('APPLIED','NOT_APPLIED','UNKNOWN'))
+  OR (OLD.state = 'UNKNOWN' AND NEW.state IN ('APPLIED','NOT_APPLIED','CONFLICT')))
+BEGIN SELECT RAISE(ABORT, 'illegal execution item state transition'); END;
+CREATE TRIGGER cleanup_exec_item_intent_only_while_executing BEFORE UPDATE OF state ON cleanup_exec_item
+WHEN NEW.state = 'INTENT' AND (SELECT state FROM cleanup_execution e WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id)
+  IS NOT 'EXECUTING'
+BEGIN SELECT RAISE(ABORT, 'an intent can only be recorded while the execution is EXECUTING'); END;
+CREATE TRIGGER cleanup_exec_item_no_delete BEFORE DELETE ON cleanup_exec_item
+BEGIN SELECT RAISE(ABORT, 'execution items are never deleted'); END;
+CREATE TRIGGER cleanup_plan_locked_by_execution BEFORE UPDATE OF state ON cleanup_plan
+WHEN NEW.state <> OLD.state AND EXISTS (SELECT 1 FROM cleanup_execution e WHERE e.account = OLD.account AND e.plan_id = OLD.plan_id)
+BEGIN SELECT RAISE(ABORT, 'a plan that has an execution can no longer change state'); END;
+"""
+
 
 def _reserve_backup(base):
     """Create a NEW empty file at `base` (or `base-N`) with mode 0600. O_EXCL guarantees an existing file is never touched."""
@@ -200,8 +300,8 @@ class Index:
                                "(e.g. index.sqlite3.pre-m3-backup-*) or remove the file and rescan") from None
         if version == 0:
             with self.conn:
-                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + SCHEMA_V3 + SCHEMA_V4 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3):
+                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + SCHEMA_V3 + SCHEMA_V4 + SCHEMA_V5 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        elif version in (1, 2, 3, 4):
             self._migrate(version)
         elif version != SCHEMA_VERSION:
             self.conn.close()
@@ -213,8 +313,8 @@ class Index:
         The backup file is created exclusively (never overwriting an existing file) with mode 0600 from the first byte; a partial
         backup that WE created is removed if writing it fails; a complete, verified backup is always kept.
         """
-        tag = {1: "pre-m3", 2: "pre-m4a", 3: "pre-m4b"}[version]
-        script = (SCHEMA_V2 if version == 1 else "") + (SCHEMA_V3 if version <= 2 else "") + SCHEMA_V4
+        tag = {1: "pre-m3", 2: "pre-m4a", 3: "pre-m4b", 4: "pre-m4c"}[version]
+        script = "".join([SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5][version - 1:])  # names resolved now, so tests can patch them
         base = f"{self.path}.{tag}-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         backup = None
         try:

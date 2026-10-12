@@ -52,3 +52,5 @@ M3 note: the index is schema v2 (adds `class_rules` and `message_class`; upgrade
 M4A note: the index is schema v3 (adds `protect_rules`; upgraded automatically with a backup, see [CLEANUP.md](CLEANUP.md)). `mailbox purge` keeps protection rules.
 
 M4B note: the index is schema v4 (adds plan, approval and audit tables; upgraded automatically with a backup, see [CLEANUP.md](CLEANUP.md)). `mailbox purge` keeps plans, approvals and the audit log.
+
+M4C-A note: the index is schema v5 (adds local execution tables; upgraded automatically with a backup, see [CLEANUP.md](CLEANUP.md)). `mailbox purge` keeps execution records.

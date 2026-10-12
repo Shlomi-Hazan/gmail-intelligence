@@ -638,11 +638,11 @@ class MigrationV4Tests(Base):
         c.close()
         return data
 
-    def test_v3_to_v4_preserves_all_rows_with_private_backup(self):
+    def test_v3_upgrade_preserves_all_rows_with_private_backup(self):
         path = self.make_v3()
         before = self.logical(path)
         with idx.Index(str(path)) as index:
-            self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (3, 4))
+            self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (3, idx.SCHEMA_VERSION))
             for t in ("cleanup_plan", "cleanup_item", "cleanup_approval", "cleanup_audit"):
                 self.assertEqual(index._q(f"SELECT COUNT(*) FROM {t}")[0][0], 0)
             backup = Path(index.backup_path)
@@ -685,7 +685,7 @@ class MigrationV4Tests(Base):
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 3)
         c.close()
 
-    def test_v1_and_v2_chains_reach_v4(self):
+    def test_v1_and_v2_chains_reach_the_latest_schema(self):
         for version in (1, 2):
             path = self.tmp / f"chain{version}" / "index.sqlite3"
             path.parent.mkdir(mode=0o700, parents=True)
@@ -693,7 +693,7 @@ class MigrationV4Tests(Base):
             c.executescript("BEGIN;" + idx.SCHEMA + (idx.SCHEMA_V2 if version == 2 else "") + f"PRAGMA user_version = {version};COMMIT;")
             c.close()
             with idx.Index(str(path)) as index:
-                self.assertEqual(index.conn.execute("PRAGMA user_version").fetchone()[0], 4)
+                self.assertEqual(index.conn.execute("PRAGMA user_version").fetchone()[0], idx.SCHEMA_VERSION)
                 self.assertEqual(index._q("SELECT COUNT(*) FROM cleanup_plan")[0][0], 0)
 
     def test_foreign_keys_are_enforced(self):

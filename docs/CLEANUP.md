@@ -151,6 +151,64 @@ private backup (`...pre-m4b-backup-<UTC>`): the file is created exclusively with
 never overwritten; a name clash gets a numeric suffix), verified, and a partial backup that failed to write is removed. The tables
 are then added in one transaction; failure leaves v3 intact and keeps the verified backup.
 
+## M4C-A: local execution state (offline foundation; NO Gmail execution)
+M4C-A adds only the **local bookkeeping** that a later executor will drive. There is no Gmail client, no write OAuth credential, no
+network and no way to archive anything in this version. The only production commands are read-only:
+```bash
+gmail-intelligence cleanup execute PLAN_ID --dry-run --account EMAIL   # what a reservation would check; writes and consumes nothing
+gmail-intelligence cleanup exec list --account EMAIL
+gmail-intelligence cleanup exec show EXEC_ID [--show-ids] --account EMAIL
+```
+`cleanup execute` without `--dry-run` is refused. Reserving, starting, confirming, aborting and reconciling exist as tested library
+functions (`cleanup_exec.py`) but have **no CLI**; nothing can consume an approval from the command line.
+
+**Three separate gates (none substitutes another).** (1) the M4B plan approval (a local record), (2) a fresh typed **execution
+confirmation** (`EXECUTE ARCHIVE <slice size> <hash8>`, different from the approval phrase) that is required to reserve an
+execution, and (3) a future separate OAuth write authorization (M4C-B). Dry runs, listings and status never consume anything.
+
+**Schema v5** (after an automatic private backup; failure keeps v4): `cleanup_execution`, `cleanup_exec_slice`, `cleanup_exec_item`.
+The M4B plan tables stay immutable and unchanged; execution state lives in its own tables, and a plan that has an execution can no
+longer be cancelled, revised or expired.
+
+| Level | States (forward only, enforced by triggers) |
+|---|---|
+| Execution | `PREPARED` -> `EXECUTING` -> `PARTIAL` / `EXECUTED` / `FAILED` / `RECONCILIATION_REQUIRED`; `ABORTED` from `PREPARED`/`PARTIAL`; `PARTIAL` -> `EXECUTING` for a confirmed continuation |
+| Slice | `PENDING` -> `CONFIRMED` -> `ACTIVE` -> `COMPLETED` (or `STOPPED`) |
+| Item | `PENDING` -> `INTENT` -> `APPLIED` / `NOT_APPLIED` / `UNKNOWN`; `PENDING` -> `SKIPPED_DRIFT` / `SKIPPED_GONE` / `NOT_APPLIED`; `UNKNOWN` -> `APPLIED` / `NOT_APPLIED` / `CONFLICT` (reconciliation only) |
+
+Deviation from the first sketch: `PARTIAL` doubles as "waiting for a continuation confirmation" and as the final state of an
+execution with some targets not applied (the item counts tell them apart); `NOT_APPLIED` is also used for targets that were never
+attempted because the execution stopped.
+
+**Approval consumption and reservation (one short transaction).** `reserve_execution` verifies the plan (`verify_approved`),
+checks the execution confirmation, refuses if the account already has a non-final execution, refuses overlap with unresolved work
+of another execution, then atomically turns the approval `VALID` -> `CONSUMED` (never reversible), creates the execution
+(`PREPARED`), its slices (slice 1 `CONFIRMED`) and **all** items. The database rejects an execution without a consumed approval of
+an `APPROVED` plan and rejects items that are not exact targets of the plan or are added after reservation. Slices follow the
+M4 policy: up to 100 targets in one slice; larger plans start with a canary of 25, then slices of at most 100, each needing its own
+fresh typed confirmation (`CONTINUE ...`) and a local re-check of the remaining targets only (the protection/classification
+digests stay plan-wide, so any rule change makes the continuation stale).
+
+**Concurrency and overlap.** One non-final execution per account (a partial unique index); a second reservation fails closed and
+keeps its own approval `VALID`. Targets already `APPLIED` by another execution are pre-skipped (`SKIPPED_DRIFT`, code
+`OVERLAP_ALREADY_APPLIED`), never repeated; targets with unresolved work elsewhere refuse the reservation; a plan whose targets
+were all done elsewhere is refused (`NOTHING_TO_DO`) without consuming anything.
+
+**Intent, interruption and recovery.** A future executor must commit the item `INTENT` (with the label ids before the change, for a
+later undo) before any Gmail call and the outcome after it; SQLite and Gmail cannot commit atomically, so a crash in between
+leaves an `INTENT`. Execution holds a short **lease**; if it expires, `recover_interrupted` turns every open `INTENT` into `UNKNOWN`
+and the execution into `RECONCILIATION_REQUIRED`. An execution is **never resumed automatically**; `UNKNOWN` items can only be resolved by
+`reconcile_item` from an observed state (a read, performed by the caller), and an execution with unknown work cannot be aborted.
+
+**Audit.** Reservation, confirmations, interruption and every execution, slice and item transition append an event (state names,
+counts, an item sequence number; never message ids) so intended operations, confirmed outcomes and unknown outcomes are
+distinguishable. Item rows keep ids, timestamps, codes and previous label ids; no message content or credentials are stored.
+The chain remains tamper-evident only (see the M4B limits); executions and their history are never deleted automatically.
+
+**Not in M4C-A (deferred).** The write OAuth client and Keychain item (M4C-B), the guarded Gmail transport, live per-message
+re-validation, real archive calls, retries and the circuit breaker (M4C-C), adversarial tests and live-canary readiness (M4C-D),
+and undo (M4D).
+
 ## Audit retention (see M4B above)
 Defined in the M4B section above: local, never deleted automatically, kept by `mailbox purge`.
 

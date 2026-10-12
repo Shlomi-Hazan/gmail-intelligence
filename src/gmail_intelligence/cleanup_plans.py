@@ -213,7 +213,7 @@ def snapshot_of(plan):
 
 
 # ---------------------------------------------------------------- freshness
-def revalidate(index, account, plan, now=None, _out=None):
+def revalidate(index, account, plan, now=None, _out=None, only_ids=None):
     """Fail-closed freshness check against the LOCAL index. Returns {problem_code: count}; empty means fresh.
 
     Never trims the target set: any single stale or ineligible target makes the whole plan stale.
@@ -246,13 +246,16 @@ def revalidate(index, account, plan, now=None, _out=None):
         bad("INDEX_NOT_COMPLETE")
     elif anchor != snap["index"]:
         bad("INDEX_RESCANNED")
-    ids = [i["id"] for i in snap["items"]]
+    wanted = None if only_ids is None else set(only_ids)  # continuation checks only the not-yet-executed targets
+    ids = [i["id"] for i in snap["items"] if wanted is None or i["id"] in wanted]
     facts = _facts(index, account, ids)
     res = cc.evaluate_all(index, account, now_ms=_ms(now), min_age_days=min_age)
     decisions = {d.message_id: d for d in res.decisions}
     if _out is not None:
         _out["decisions"] = decisions
     for item in snap["items"]:
+        if wanted is not None and item["id"] not in wanted:
+            continue
         cur = facts.get(item["id"])
         if cur is None:
             bad("ITEM_MISSING")
@@ -265,6 +268,10 @@ def revalidate(index, account, plan, now=None, _out=None):
             for code in (d.codes if d else ()):
                 bad("REASON_" + code)
     return problems
+
+
+def _has_execution(index, account, plan_id):
+    return bool(index._q("SELECT 1 FROM cleanup_execution WHERE account=? AND plan_id=? LIMIT 1", account, plan_id))
 
 
 def _describe(problems):
@@ -294,7 +301,8 @@ def expire_due(index, account, now=None):
     due = [r["plan_id"] for r in index._q(
         "SELECT p.plan_id FROM cleanup_plan p WHERE p.account=? AND p.state IN ('DRAFT','REVIEWED','APPROVED') AND "
         "(p.expires_at <= ? OR EXISTS (SELECT 1 FROM cleanup_approval a WHERE a.account=p.account AND a.plan_id=p.plan_id "
-        "AND a.status='VALID' AND a.expires_at <= ?))", account, at, at)]
+        "AND a.status='VALID' AND a.expires_at <= ?)) AND NOT EXISTS (SELECT 1 FROM cleanup_execution e "
+        "WHERE e.account=p.account AND e.plan_id=p.plan_id)", account, at, at)]
     if not due:
         return 0
     with _txn(index):
@@ -382,6 +390,8 @@ def revise_exclude(index, account, plan_id, exclude_ids, now=None):
         parent = get_plan(index, account, plan_id)
         if parent["state"] not in LIVE_STATES:
             raise PlanError("NOT_ACTIVE", f"plan is {parent['state']}; only an active plan can be revised")
+        if _has_execution(index, account, plan_id):
+            raise PlanError("HAS_EXECUTION", "this plan already has an execution record and can no longer be revised")
         if integrity_problems(parent):
             raise PlanError("INTEGRITY", "stored plan failed its integrity check; refusing to revise it")
         current = {i["message_id"] for i in parent["items"]}
@@ -508,6 +518,8 @@ def cancel(index, account, plan_id, now=None):
         plan = _row(index, account, plan_id)
         if plan["state"] not in LIVE_STATES:
             raise PlanError("NOT_ACTIVE", f"plan is already {plan['state']}")
+        if _has_execution(index, account, plan_id):
+            raise PlanError("HAS_EXECUTION", "this plan already has an execution record and can no longer be cancelled")
         if _close_approvals(index, account, plan_id, "REVOKED", at):
             audit.append(index, account, plan_id, "APPROVAL_REVOKED", at, {"reason": "cancelled"})
         _set_state(index, account, plan_id, "CANCELLED", at)
