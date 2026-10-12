@@ -4,7 +4,7 @@ Status legend: **[Approved]** decided · **[Proposal]** recommended, awaiting ap
 
 Evidence tags: **[Verified]** = checked against the cited official Google page on 2026-10-11 (see §16) · **[Unverified]** = assumption not confirmed by a page read during M0B; must be verified before it is relied on · **[Design]** = our own decision, not a provider fact.
 
-> Nothing described here is implemented. The repository contains documentation and tooling only.
+> Implemented through M2: read-only OAuth and Keychain storage (M1), resumable metadata scan, SQLite index and local reports (M2). Everything else here (classification, planning/approval/execution, write-capable client, filters, dashboard, history sync) is a proposal or future work and is **not implemented**.
 > **Zero Additional Cost is a mandatory, approved project-wide constraint** (§14). Provider limits and prices can change; nothing here promises that any provider stays free.
 
 ## 1. Principles

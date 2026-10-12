@@ -20,7 +20,13 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | A1 | **Token storage:** macOS Keychain preferred. Keychain is not a defense against every malicious process running with the user's privileges. | Python integration compatibility; item accessibility; token refresh workflow; access-control behavior; safe error handling |
 | A2 | **Local database:** SQLite with restrictive file permissions, stored outside the Git repo, FileVault where available/enabled, no message bodies or attachments by default, explicit handling of backups and synchronized folders. SQLCipher is a possible future optional enhancement (not in M0B). | Permission enforcement; backup/sync exclusion; residual-risk documentation |
 | A3 | **LLM privacy:** external LLM classification disabled by default; deterministic local rules preferred; no private content to an external model without explicit consent; show what data and which provider before transmission; consent separate from cleanup approval; permitted transfers recorded locally without retaining sensitive content; email text is untrusted; LLM output never directly triggers Gmail modifications. Zero-cost: only free local models are eligible. | Provider/model policy (Q2); local-model performance and privacy review |
-| A4 | **GitHub security:** accept the absence of native secret scanning for the private repo; keep repo PRIVATE; keep the local scanner as defense in depth; hooks can be bypassed (documented); Gitleaks is a possible future enhancement requiring dependency review; do not upgrade the GitHub plan. | Dependency review if Gitleaks is considered (Q10) |
+| A4 | **GitHub security:** native secret scanning was unavailable in the original private repository (accepted, no plan upgrade); enable GitHub secret scanning and push protection on the public repository only if they are free; keep the local scanner as defense in depth; hooks can be bypassed (documented); Gitleaks is a possible future enhancement requiring dependency review; do not upgrade the GitHub plan. | Dependency review if Gitleaks is considered (Q10) |
+
+## Public-release preparation decisions
+| ID | Decision |
+|----|----------|
+| D19 | Project license: **MIT** (owner decision). Dependencies are Apache-2.0, MIT and BSD-3-Clause (no publication constraint found). |
+| D20 | Before public release, commit author/committer email addresses were replaced with the maintainer's GitHub noreply address (messages, timestamps and file contents unchanged) and the cleaned history was published as a fresh repository; the original private development repository is kept as an archive. |
 
 ## M2 decisions
 | ID | Decision |

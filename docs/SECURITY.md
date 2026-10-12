@@ -5,7 +5,7 @@ See also: [ARCHITECTURE.md](ARCHITECTURE.md), [DECISIONS.md](DECISIONS.md), [DEV
 Nothing here is implemented yet except repo-level controls (§5). Application controls are **[Proposal]** or **[Design]** until built and tested. Evidence tags follow [ARCHITECTURE.md](ARCHITECTURE.md): **[Verified]** (checked against a cited official page), **[Unverified]**.
 
 ## 1. Principles
-- Repository is PRIVATE and must remain so. No secrets, tokens, mailbox data or personal messages in Git.
+- Whatever the repository's visibility, no secrets, tokens, mailbox data or personal messages may enter Git, issues or pull requests.
 - Email content is untrusted input; it is data, never instructions.
 - Least privilege: read-only first; modification scopes only when needed and separately consented.
 - No permanent deletion by the application.
@@ -74,8 +74,8 @@ Controls: **P**reventive · **D**etective · **R**ecovery.
 ### 5.2 Other controls
 | Control | Type | State |
 |---|---|---|
-| Repo visibility private | Enforced by GitHub | Observed |
-| Secret scanning, push protection | Native GitHub features | **Unavailable** for this private repo on the current plan (API: "not available for this repository"). **Accepted gap** (decision); the plan is not upgraded (zero-cost). |
+| Repo visibility | Maintainer decision | Public after the maintainer's release approval; the maintainer changes visibility manually |
+| Secret scanning, push protection | Native GitHub features | Were **unavailable** in the original private repository on a free plan (API: "not available for this repository"). For the public repository, enable them only if free (to be verified after publication); the plan is never upgraded (zero-cost). |
 | Local metadata index (M2): outside Git, 700/600 permissions, metadata only, account-keyed, `purge` command | Application control | Implemented, offline-tested; **backups (Time Machine) will contain sender addresses and label names**; no encryption beyond FileVault |
 | macOS Keychain token storage, read-only scope check (M1) | Application control | Implemented and offline-tested; the owner reported a successful live login and read-only check (not independently reproduced by the assistant) |
 | Local pre-commit scanner | **Convention** (opt-in per clone: `git config core.hooksPath .githooks`) | Covered by a 27-test regression suite (§5.3) |

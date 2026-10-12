@@ -1,58 +1,39 @@
 # Gmail Intelligence
 
-> **Status: M2 — read-only mailbox index and reports (in review; offline-tested, owner-reported live scan succeeded). Gmail access is read-only; the app cannot change your mailbox.**
-> No application code exists yet. This repository currently contains documentation and project scaffolding only.
+A local-first command-line tool that connects to **your own Gmail account with read-only access**, builds a private metadata index on your Mac, and reports on your mailbox (volume, senders, labels, age). It never changes your mailbox.
 
-## Vision
+> **Independent project.** Gmail Intelligence is not affiliated with, endorsed by, or sponsored by Google. Gmail and Google Cloud are trademarks of Google LLC. Released under the [MIT License](LICENSE).
 
-A local-first, AI-assisted Gmail management system for mailbox auditing, intelligent classification, safe bulk cleanup, Labels and Filters management, analytics, and ongoing maintenance.
+## What works today (milestones M0-M2 complete)
+- **M0** foundation, security model, documentation, local secret scanner.
+- **M1** Google OAuth (desktop flow, `gmail.readonly` only), tokens in the macOS Keychain, `auth` and `gmail check` commands.
+- **M2** resumable read-only mailbox scan into a local SQLite index (message ids, dates, size estimates, label ids, sender address; no bodies, subjects or attachments) and local reports: `mailbox scan | status | report | top-senders | purge`.
 
-## Planned core capabilities (future, not implemented)
+## Planned, not implemented
+M3 rules and classification, M4 safe bulk cleanup (dry-run, approvals, rollback), M5 Labels and Filters management, M6 local dashboard, M7 incremental sync. Any future feature that changes a mailbox will require its own explicit design, extra OAuth scopes and user approval. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
-- Read-only Gmail connection via OAuth
-- Mailbox audit and local indexing
-- Rule-based and AI-assisted classification
-- Safe bulk cleanup with dry-run, explicit approval, and rollback
-- Labels and Filters management
-- Local dashboard and analytics
-- Incremental sync and ongoing maintenance
+## Requirements and limitations
+- macOS (tokens use the macOS Keychain), Python 3.10+, and a Google account.
+- **You must create your own Google Cloud project and OAuth client** (free; do not link a billing account). No credentials are shipped or shared; follow [docs/SETUP-GMAIL.md](docs/SETUP-GMAIL.md).
+- Personal apps in Google's Testing mode get refresh tokens that expire after 7 days, so you re-run `auth login` weekly.
+- The local index contains sender addresses and label names; it is not encrypted beyond FileVault and will appear in backups ([docs/MAILBOX.md](docs/MAILBOX.md)).
+- Early-stage software: no stability guarantees.
 
-## Local-first philosophy
+## Local-first and privacy
+Mailbox data stays on your machine. Nothing is sent to third-party services, and no AI service is used. Email content is treated as untrusted input. Never share OAuth files, tokens or index files; see [SECURITY.md](SECURITY.md).
 
-Mailbox data is processed and stored on the user's machine. Nothing is uploaded to third-party services by default. Any future use of an external AI service must be an explicit, documented, opt-in decision (see `docs/DECISIONS.md`).
-
-## Quick start (offline; no Gmail access)
+## Quick start
 ```bash
-git config core.hooksPath .githooks
+git clone https://github.com/Shlomi-Hazan/gmail-intelligence.git && cd gmail-intelligence
+git config core.hooksPath .githooks            # optional: local secret-scan hook for contributors
 python3 -m venv .venv && .venv/bin/pip install .
-.venv/bin/gmail-intelligence doctor
-.venv/bin/python -I -m unittest discover -s tests
+.venv/bin/gmail-intelligence doctor            # offline prerequisite check
+.venv/bin/python -I -m unittest discover -s tests   # offline tests, no Google account needed
 ```
-Setup details, Skills and the PR workflow: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Connecting Gmail (read-only, free): [docs/SETUP-GMAIL.md](docs/SETUP-GMAIL.md). Mailbox index and reports: [docs/MAILBOX.md](docs/MAILBOX.md).
+Then connect Gmail ([docs/SETUP-GMAIL.md](docs/SETUP-GMAIL.md)) and run `mailbox scan --limit 100`.
 
-## Milestones
+## Zero additional cost
+The project is designed to cost nothing: no billing accounts, paid APIs, paid dependencies or hosting. Free tiers can change; nothing promises that a provider stays free ([docs/DECISIONS.md](docs/DECISIONS.md) D8).
 
-| Milestone | Scope |
-|-----------|-------|
-| M0 | Foundation & Security (M0A: GitHub bootstrap — current) |
-| M1 | Gmail OAuth & Read-Only Connection |
-| M2 | Mailbox Audit & Local Indexing |
-| M3 | Rules & AI Classification |
-| M4 | Safe Bulk Cleanup |
-| M5 | Labels & Filters Management |
-| M6 | Local Dashboard |
-| M7 | Incremental Sync & Maintenance |
-
-See `docs/ROADMAP.md` for details.
-
-## Zero Additional Cost (mandatory)
-The project must incur zero additional financial cost: no billing accounts, paid APIs or LLMs, paid dependencies, paid hosting or paid GitHub features. It is designed to run on the user's own Mac. A feature that would require payment is disabled, replaced with a genuinely free alternative, or deferred. Free tiers can change; nothing promises any provider stays free. See `docs/DECISIONS.md` (D8).
-
-## Security and privacy commitments
-
-- The repository is private and must never contain credentials, tokens, or mailbox data.
-- Emails are treated as untrusted input.
-- No modification of real Gmail data without a separately approved execution workflow.
-- Least-privilege Gmail scopes; read-only first.
-
-See `docs/SECURITY.md`. Docs index: [Architecture](docs/ARCHITECTURE.md) · [Security](docs/SECURITY.md) · [Development](docs/DEVELOPMENT.md) · [Skills plan](docs/SKILLS.md) · [Decisions](docs/DECISIONS.md) · [Roadmap](docs/ROADMAP.md).
+## Documentation
+[Architecture](docs/ARCHITECTURE.md) · [Security model](docs/SECURITY.md) · [Development](docs/DEVELOPMENT.md) · [Gmail setup](docs/SETUP-GMAIL.md) · [Mailbox index](docs/MAILBOX.md) · [Skills](docs/SKILLS.md) · [Decisions](docs/DECISIONS.md) · [Roadmap](docs/ROADMAP.md)
