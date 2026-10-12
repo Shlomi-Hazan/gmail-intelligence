@@ -314,7 +314,7 @@ def _with_index(args, fn):
         account = _local_account(args)
         with idx.Index(create=False) as index:
             if index.migrated_from:
-                print(f"Local index upgraded to schema v{idx.SCHEMA_VERSION} for classification (M2 data unchanged). "
+                print(f"Local index upgraded to schema v{idx.SCHEMA_VERSION} (existing data unchanged). "
                       f"Backup: {index.backup_path}", file=sys.stderr)
             return fn(index, account)
     except (ValueError, idx.IndexProblem) as exc:
@@ -493,12 +493,82 @@ def cmd_classify_ai_status(_args):
     return 0
 
 
+# ---- cleanup candidates (M4A): local preview only, never Gmail, never executes anything ----
+def cmd_cleanup_candidates(args):
+    from gmail_intelligence import cleanup_candidates, cleanup_report
+
+    def go(index, account):
+        try:
+            if args.limit is not None and args.limit < 0:
+                raise ValueError("--limit must not be negative")
+            res = cleanup_candidates.evaluate_all(index, account, min_age_days=args.min_age_days)
+        except ValueError as exc:
+            return _fail(exc)
+        print(cleanup_report.candidates_text(res, account, review=args.review, limit=args.limit, show_ids=args.show_ids,
+                                             show_senders=args.show_senders, by_domain=args.by_domain))
+        return 0
+    return _with_index(args, go)
+
+
+def cmd_cleanup_protect_list(args):
+    from gmail_intelligence import cleanup_report
+    return _with_index(args, lambda i, a: print(cleanup_report.protect_text(i, a, args.show_values)) or 0)
+
+
+def cmd_cleanup_protect_add(args):
+    from gmail_intelligence import cleanup_protect
+    from gmail_intelligence.classify import RuleError
+
+    def add(index, account):
+        try:
+            rid = cleanup_protect.add(index, account, sender=args.sender, domain=args.domain, label=args.label, note=args.note)
+        except RuleError as exc:
+            return _fail(exc)
+        print(f"Protection rule {rid} added. Matching messages are excluded from all cleanup candidates "
+              "(no Gmail change was made).")
+        return 0
+    return _with_index(args, add)
+
+
+def _protect_toggle(args, enabled):
+    from gmail_intelligence import cleanup_protect
+
+    def go(index, account):
+        if not cleanup_protect.set_enabled(index, account, args.rule_id, enabled):
+            return _fail(f"no such protection rule: {args.rule_id}")
+        print(f"Protection rule {args.rule_id} {'enabled' if enabled else 'DISABLED (messages it covered may become candidates again)'}.")
+        return 0
+    return _with_index(args, go)
+
+
+def cmd_cleanup_protect_enable(args):
+    return _protect_toggle(args, True)
+
+
+def cmd_cleanup_protect_disable(args):
+    return _protect_toggle(args, False)
+
+
+def cmd_cleanup_protect_remove(args):
+    from gmail_intelligence import cleanup_protect
+
+    def go(index, account):
+        if not args.yes and input(f"Remove protection rule {args.rule_id}? Messages it covered may become candidates. [y/N] "
+                                  ).strip().lower() != "y":
+            return _fail("cancelled")
+        if not cleanup_protect.remove(index, account, args.rule_id):
+            return _fail(f"no such protection rule: {args.rule_id}")
+        print(f"Protection rule {args.rule_id} removed.")
+        return 0
+    return _with_index(args, go)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="gmail-intelligence",
         description="Gmail Intelligence (early development). Offline: no Gmail integration yet.",
     )
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{version,doctor,auth,gmail,mailbox,classify}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{version,doctor,auth,gmail,mailbox,classify,cleanup}")
     sub.add_parser("version", help="print the version").set_defaults(func=cmd_version)
     sub.add_parser("doctor", help="check local development prerequisites (offline)").set_defaults(func=cmd_doctor)
 
@@ -605,6 +675,35 @@ def build_parser():
     ai_p = csub.add_parser("ai", help="optional local-AI settings (disabled by default)")
     aisub = ai_p.add_subparsers(dest="ai_command", required=True, metavar="{status}")
     aisub.add_parser("status", help="show local-AI configuration; contacts nothing").set_defaults(func=cmd_classify_ai_status)
+    cu = sub.add_parser("cleanup", help="safe-cleanup candidate preview and protection rules (M4A; local, read-only)")
+    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,protect}")
+    q = account_opt(cusub.add_parser("candidates", help="preview archive recommendations; changes NOTHING, contacts nothing"))
+    q.add_argument("--review", action="store_true", help="show the informational REVIEW_REQUIRED view instead")
+    q.add_argument("--limit", type=int, default=20, metavar="N", help="example rows to list (default 20; 0 = none)")
+    q.add_argument("--min-age-days", type=int, default=90, metavar="N", help="minimum age in days (90 or more)")
+    q.add_argument("--show-ids", action="store_true", help="include message ids in the example rows")
+    q.add_argument("--show-senders", action="store_true", help="include sender addresses in the example rows")
+    q.add_argument("--by-domain", action="store_true", help="also group by sender domain")
+    q.set_defaults(func=cmd_cleanup_candidates)
+    pr = cusub.add_parser("protect", help="list, add, enable, disable or remove protection rules")
+    prsub = pr.add_subparsers(dest="protect_command", required=True, metavar="{list,add,enable,disable,remove}")
+    q = account_opt(prsub.add_parser("list", help="show protection rules (values masked by default)"))
+    q.add_argument("--show-values", action="store_true", help="display the stored sender/domain/label values")
+    q.set_defaults(func=cmd_cleanup_protect_list)
+    q = account_opt(prsub.add_parser("add", help="protect messages matching ALL given conditions"))
+    q.add_argument("--sender", metavar="ADDRESS", help="exact sender address")
+    q.add_argument("--domain", metavar="DOMAIN", help="exact sender domain (subdomains are not matched)")
+    q.add_argument("--label", metavar="LABEL", help="Gmail label id or name")
+    q.add_argument("--note", metavar="TEXT", help="short reason (shown only with --show-values)")
+    q.set_defaults(func=cmd_cleanup_protect_add)
+    for name, fn, helptext in (("enable", cmd_cleanup_protect_enable, "enable a protection rule"),
+                               ("disable", cmd_cleanup_protect_disable, "disable a protection rule (kept, not applied)"),
+                               ("remove", cmd_cleanup_protect_remove, "delete a protection rule")):
+        q = account_opt(prsub.add_parser(name, help=helptext))
+        q.add_argument("rule_id", metavar="RULE_ID", help="e.g. p1")
+        if name == "remove":
+            q.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+        q.set_defaults(func=fn)
     return parser
 
 

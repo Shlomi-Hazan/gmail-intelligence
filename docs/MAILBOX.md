@@ -48,3 +48,5 @@ Known environment issue (not an M2 defect): on macOS folders synced by iCloud, a
 AI classification (M3), cleanup/labels/filters (M4/M5), dashboard (M6), history-based incremental sync (M7).
 
 M3 note: the index is schema v2 (adds `class_rules` and `message_class`; upgraded automatically with a backup, see [CLASSIFICATION.md](CLASSIFICATION.md)). `mailbox purge` also deletes stored classifications but keeps your user rules.
+
+M4A note: the index is schema v3 (adds `protect_rules`; upgraded automatically with a backup, see [CLEANUP.md](CLEANUP.md)). `mailbox purge` keeps protection rules.

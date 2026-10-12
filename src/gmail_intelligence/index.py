@@ -1,8 +1,8 @@
 """Local SQLite metadata index (stdlib only). Stores no bodies, snippets, subjects or credentials.
 
 All data is keyed by account, so one account's rows are never mixed with another's. Schema version is
-kept in `PRAGMA user_version`. There is no migration framework: version 1 (M2) is upgraded to version 2 (M3
-classification tables) by one additive script, after an automatic backup copy of the database file.
+kept in `PRAGMA user_version`. There is no migration framework: older versions are upgraded by additive scripts (v2 = M3
+classification tables, v3 = M4A protection rules) in ONE transaction, after an automatic backup copy of the database file.
 """
 import os
 import sqlite3
@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from gmail_intelligence import config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA = """
 CREATE TABLE messages (
   account TEXT NOT NULL, id TEXT NOT NULL, thread_id TEXT, internal_ms INTEGER, size INTEGER,
@@ -45,6 +45,13 @@ CREATE TABLE message_class (
   PRIMARY KEY (account, message_id, kind, value)) WITHOUT ROWID;
 CREATE INDEX message_class_value ON message_class (account, kind, value);
 """
+# Version 3 (M4A): user protection rules only. Candidate results are never stored (computed on demand).
+SCHEMA_V3 = """
+CREATE TABLE protect_rules (
+  account TEXT NOT NULL, id TEXT NOT NULL, c_sender TEXT, c_domain TEXT, c_label TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1, note TEXT, created_at TEXT NOT NULL,
+  PRIMARY KEY (account, id)) WITHOUT ROWID;
+"""
 
 
 class IndexProblem(Exception):
@@ -75,16 +82,18 @@ class Index:
                                "(e.g. index.sqlite3.pre-m3-backup-*) or remove the file and rescan") from None
         if version == 0:
             with self.conn:
-                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version == 1:
-            self._migrate_v1_to_v2()
+                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + SCHEMA_V3 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        elif version in (1, 2):
+            self._migrate(version)
         elif version != SCHEMA_VERSION:
             self.conn.close()
             raise IndexProblem(f"unsupported index schema version {version} (expected {SCHEMA_VERSION})")
 
-    def _migrate_v1_to_v2(self):
-        """Back up the database file, then add the M3 tables in one transaction (all-or-nothing)."""
-        backup = f"{self.path}.pre-m3-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    def _migrate(self, version):
+        """Back up the database file, then add the missing tables in one transaction (all-or-nothing)."""
+        tag = "pre-m3" if version == 1 else "pre-m4a"
+        script = (SCHEMA_V2 if version == 1 else "") + SCHEMA_V3
+        backup = f"{self.path}.{tag}-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         try:
             dest = sqlite3.connect(backup)
             try:
@@ -93,12 +102,12 @@ class Index:
                 dest.close()
             os.chmod(backup, 0o600)
             with self.conn:
-                self.conn.executescript("BEGIN;" + SCHEMA_V2 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+                self.conn.executescript("BEGIN;" + script + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         except (sqlite3.Error, OSError) as exc:
             self.conn.close()
             raise IndexProblem(f"could not upgrade the index to schema version {SCHEMA_VERSION}; it was left unchanged "
                                f"({type(exc).__name__}); backup, if any: {backup}") from None
-        self.migrated_from = 1
+        self.migrated_from = version
         self.backup_path = backup
 
     def close(self):

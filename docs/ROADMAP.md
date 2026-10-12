@@ -5,8 +5,8 @@ No dates are assigned. Everything below M0A is **future** and requires approval 
 - **M0 — Foundation & Security** (M0A bootstrap: done; M0B architecture/security/workflow: merged in PR #11; M0C Python foundation, tests, Skills: merged in PR #13). **M0-M2 are complete.**
 - **M1 — Gmail OAuth & Read-Only Connection** (merged in PR #14; owner-reported live check succeeded)
 - **M2 — Mailbox Audit & Local Indexing** (merged in PR #15; owner-reported limited and full scans succeeded)
-- **M3 — Rules & AI Classification** (offline rules engine, local store and CLI implemented; local-AI boundary implemented with a fake backend, real inference NOT VERIFIED; in review - see [CLASSIFICATION.md](CLASSIFICATION.md))
-- **M4 — Safe Bulk Cleanup** (dry-run, approvals, rollback)
+- **M3 — Rules & AI Classification** (merged in PR #2; offline rules, local store and CLI verified; the optional local-AI boundary is tested with a fake backend only, real inference NOT VERIFIED - see [CLASSIFICATION.md](CLASSIFICATION.md))
+- **M4 — Safe Cleanup** (dry-run, approvals, rollback). Phases M4A candidate engine and protection rules (implemented, in review - see [CLEANUP.md](CLEANUP.md)), M4B plans/approvals/audit, M4C write authorization and executor, M4D recovery/undo/audit.
 - **M5 — Labels & Filters Management**
 - **M6 — Local Dashboard**
 - **M7 — Incremental Sync & Maintenance**
