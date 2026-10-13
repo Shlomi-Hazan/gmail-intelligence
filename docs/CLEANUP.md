@@ -248,6 +248,12 @@ the rule is violated: remaining items become `NOT_APPLIED`/`NEVER_ATTEMPTED`, re
 for the state machine; the live circuit breaker (thresholds, rates, auth problems) belongs to the future executor and is not built here. Continuing after such a stop
 needs a new plan, a new approval and a new execution.
 
+*Continuation versus final status.* The rule above only decides whether the NEXT slice may be offered; it is never relaxed. The final status of an execution is a
+separate, execution-wide classification: when no slice remains, an execution whose earlier slices reached the observed archived state (`APPLIED`, with checked
+evidence) and whose last slice contains only safe skips (nothing attempted, nothing failed) is `EXECUTED`; if nothing was applied anywhere it is `FAILED`. A completed
+slice with no application never leads to a further slice, and no further execution is authorized automatically in any case. `EXECUTED` describes recorded, observed state
+only; it does not prove that this executor made the change (see the evidence section).
+
 **Approval consumption and reservation (one short transaction).** `reserve_execution` verifies the plan (`verify_approved`),
 checks the execution confirmation, refuses if the account already has a non-final execution, refuses overlap with unresolved work
 of another execution, then atomically turns the approval `VALID` -> `CONSUMED` (never reversible), creates the execution
