@@ -72,6 +72,18 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
 
+## Product roadmap decisions (owner-approved direction; planning only, nothing implemented)
+| ID | Decision |
+|----|----------|
+| D58 | **Product direction.** Gmail Intelligence expands beyond cleanup into a local-first platform for understanding, organizing, protecting and maintaining Gmail: M5 Intelligent Inbox Organization, M6 Inbox Intelligence Dashboard, M7 Incremental Sync & Smart Maintenance (these three expand the original M5-M7 commitments), and new M8 Important Mail & Action Center, M9 Subscription Intelligence, M10 Attachment Intelligence, M11 Ask Your Inbox. M0-M4 and every approved security requirement are preserved. Scope and gates: [PRODUCT-ROADMAP.md](PRODUCT-ROADMAP.md). |
+| D59 | **Recommendation first, one execution boundary per operation class.** Each capability ships as read-only, explainable recommendations before any execution exists. Label changes, filter creation or any other mutation each need their own separately approved allowlist entry, plan, approval, audit and recovery design (the M4 pattern); nothing is created, merged, renamed or deleted automatically. |
+| D60 | **Explainability.** Findings show why they appeared, their source message(s) and a confidence/uncertainty indicator, and are phrased as recommendations, never as guaranteed detections. |
+| D61 | **Email content is untrusted input** for every analysis, extraction and model: never executed, never treated as instructions, no tool access, model output schema-validated, and no Gmail mutation as a side effect of analysis, a question, a dashboard view or a scheduled job. |
+| D62 | **Content indexing is a separate explicit decision (Q15).** The index is metadata-only today. Subjects, snippets, bodies and attachment content are indexed only per data class with owner consent, locally, with stated retention and at-rest protection. |
+| D63 | **No paid services and no external AI disclosure.** No paid API, model, dependency or hosting; optional free local inference only; nothing is sent to an external model without explicit per-use consent; attachment contents are never sent externally. |
+| D64 | **Subscriptions are recommendation-only.** No automatic unsubscribe request, link visit, one-click POST or unsubscribe e-mail (sending stays forbidden); unsubscribe links are stored as host and presence flags only. |
+| D65 | **Scopes and scheduling.** The recommendation phases of M5-M11 request no new OAuth scope. `gmail.settings.basic` (filters) is considered only for a separately approved filter-execution phase. Scheduled analysis is opt-in persistent configuration, read-only, with no access to write credentials. |
+
 ## M3 decisions
 | ID | Decision |
 |----|----------|
@@ -133,5 +145,10 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | Q12 | **Billing status (M0C research, still not proven).** Official pages read: Google's "create a project" guide lists billing as optional and says only that you *might* need it depending on the APIs used; the Gmail API guide pages and quota page say nothing about pricing or billing; the consent-screen help says an unpublished (Testing) app needs no verification. So: no evidence that a personal Gmail OAuth app needs billing, but no official statement that it is free. **M1 blocker/gate:** before creating anything, the Cloud console flow for creating the project, enabling the Gmail API and configuring the consent screen must complete without any billing prompt; if a billing account or card is requested at any step, stop and report. |
 | Q13 | Validate OAuth separation (A vs B): token scope behavior of a second authorization on the same desktop client is undocumented in pages read. |
 | Q14 | Claude Code subscription/usage-limit assumptions (external to the application's zero-cost objective). |
+| Q15 | **Content-indexing scope** (M8, M10, M11): which data classes (subject, snippet, body, attachment text) may be indexed locally, with what consent, retention and at-rest protection (the SQLite index is not encrypted). |
+| Q16 | **Build order** of M5-M11 after M4 (a recommendation is in PRODUCT-ROADMAP.md section 5; not binding). |
+| Q17 | **Read-adapter extensions:** extra headers (`List-Unsubscribe`, `List-Id`) for M9B and attachment part metadata without body data for M10A; feasibility to be verified, each reviewed separately. |
+| Q18 | **Frontend toolchain** for M6C: every dependency free, reviewed for license and supply chain (extends Q1). |
+| Q19 | **Scheduling** of read-only analysis (M7 stretch): mechanism, consent and logging. |
 
 Resolved in this correction: Q4 → A2 (approved direction); Q11 → A4 (accepted gap, no upgrade).
