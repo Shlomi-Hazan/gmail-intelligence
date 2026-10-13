@@ -4,7 +4,7 @@ Status legend: **[Approved]** decided · **[Proposal]** recommended, awaiting ap
 
 Evidence tags: **[Verified]** = checked against the cited official Google page on 2026-10-11 (see §16) · **[Unverified]** = assumption not confirmed by a page read during M0B; must be verified before it is relied on · **[Design]** = our own decision, not a provider fact.
 
-> Implemented through M2: read-only OAuth and Keychain storage (M1), resumable metadata scan, SQLite index and local reports (M2). Everything else here (classification, planning/approval/execution, write-capable client, filters, dashboard, history sync) is a proposal or future work and is **not implemented**.
+> Implemented to date (offline-tested; no live Gmail write has ever run): read-only OAuth and Keychain storage (M1), resumable metadata scan, SQLite index and local reports (M2), deterministic rules and an optional local-model boundary (M3, real inference not verified), cleanup candidates, immutable plans, local approvals and audit (M4A-M4B), local execution state (M4C-A) and an offline, fake-tested write-authorization and archive-only transport foundation (M4C-B1). **Not implemented:** the executor (M4C-C), the live canary (M4C-D), undo (M4D), label and filter management, the dashboard, history-based sync and everything in M5-M11 (§17). Where this document describes those, it is a proposal or future work.
 > **Zero Additional Cost is a mandatory, approved project-wide constraint** (§14). Provider limits and prices can change; nothing here promises that any provider stays free.
 
 ## 1. Principles
@@ -64,7 +64,7 @@ Language/stack: Python 3.12+, `google-api-python-client`/`google-auth-oauthlib`,
 > **The application's prohibition on sending, forwarding, replying and permanent deletion is an application-level policy. It is NOT enforced by OAuth when `gmail.modify` is granted.** Safety therefore depends on the code boundary below, not on the scope.
 
 ### 3.2 Scope plan **[Proposal]**
-M1-M3 `gmail.readonly` only · M4 add `gmail.modify` (separate consent, see §3.4) · M5 add `gmail.settings.basic` only when M5 starts.
+M1-M3 `gmail.readonly` only · M4 add `gmail.modify` (separate consent, see §3.4) · M5-M11 recommendation phases add **no** scope; `gmail.settings.basic` is considered only if a filter-execution phase is separately approved (§17).
 
 ### 3.3 Required design boundaries **[Design; implementation not yet verified]**
 **Read boundary**
@@ -73,7 +73,7 @@ M1-M3 `gmail.readonly` only · M4 add `gmail.modify` (separate consent, see §3.
 
 **Write boundary**
 - Only the dedicated execution engine may construct or use the write adapter.
-- The write adapter exposes a **strict allowlist**: add/remove label IDs, archive (remove `INBOX`), move to Trash, their inverses, and (M5) create/delete a previewed filter. Sending, forwarding, replying, draft sending and permanent deletion (`messages.delete`, `batchDelete`, empty Trash) are **not exposed** and have no code path.
+- **Implemented today (M4C-B1, offline-tested only):** the write transport's allowlist permits exactly one mutation, an individual `messages.modify` that removes `INBOX` from one message (ARCHIVE only, D42), together with the minimal profile, message and thread reads. **Possible future operations are NOT approved and NOT enabled merely by being listed here:** adding or removing other labels, creating or modifying labels, moving to Trash, inverse actions (undo) and, only after a separately approved filter-execution phase (§17), creating or deleting a previewed filter. Each needs its own review, allowlist entry, approval, audit and recovery design (D59). Sending, forwarding, replying, draft sending and permanent deletion (`messages.delete`, `batchDelete`, empty Trash) are **not exposed** and have no code path.
 - Every privileged call validates (a) a valid approval bound to the plan hash, (b) the exact message IDs in the plan, and (c) preconditions re-checked at execution time (§10, TOCTOU).
 - Every write is preceded by an audit/intent record and followed by a result record, enabling reconciliation (§11).
 - Automated test (future): importing the write adapter from any module other than `execute` fails.
@@ -174,7 +174,7 @@ Key rules **[Proposal]**:
 - **Partial batch failures.** `batchModify` accepts up to 1000 IDs per request and returns an empty body on success **[Verified]**; the documentation does not state whether a batch is atomic or whether items can fail independently **[Unverified]**. Design: on any error or timeout the executor marks the batch `unknown`, then **reconciles by re-reading** the affected messages before retrying. Operations are idempotent (add/remove label sets), so retry is safe.
 - **Quota behavior.** See §7; bulk operations are chunked and paced.
 - **No permanent deletion.** Trash only; Gmail permanently deletes Trash contents after 30 days **[Verified]** (an irreversibility horizon). Empty-trash is never performed by the app.
-- **Filters (M5).** `users.settings.filters` act on incoming messages and can add/remove labels (including TRASH and INBOX) or forward to verified addresses; only one user-defined label per filter; a filter applies to individual messages, not the whole thread **[Verified]**. Whether filters act retroactively and the maximum filter count are **not stated** in the pages reviewed **[Unverified]**; the required scope for filters is `gmail.settings.basic` per the scopes page **[Verified]**. App policy **[Proposal]**: never create filters that forward or add TRASH, and none that skip the inbox, without an explicit approved plan; every filter creation is previewed and recorded for removal.
+- **Filters (M5, recommendation-only first).** `users.settings.filters` act on incoming messages and can add/remove labels (including TRASH and INBOX) or forward to verified addresses; only one user-defined label per filter; a filter applies to individual messages, not the whole thread **[Verified]**. Whether filters act retroactively and the maximum filter count are **not stated** in the pages reviewed **[Unverified]**; the required scope for filters is `gmail.settings.basic` per the scopes page **[Verified]**. App policy **[Proposal]**: never create filters that forward or add TRASH, and none that skip the inbox, without an explicit approved plan; every filter creation is previewed and recorded for removal.
 - **Search query safety.** Queries are validated and previewed (count + sample) before becoming plans; overly broad queries (empty, `in:anywhere`, bare `*`) are rejected for modifying plans.
 
 ## 11. Failure recovery and state reconciliation
@@ -192,7 +192,7 @@ Key rules **[Proposal]**:
 
 ## 13. Dashboard boundary (M6) **[Future]**
 
-- React SPA served locally; talks only to the local API bound to `127.0.0.1` with a per-session token and strict CORS/Origin checks (DNS-rebinding protection). The dashboard holds no Gmail tokens and cannot call Gmail directly. Rendering email-derived strings must escape/sanitize (XSS).
+- A local web SPA (React was an early direction, D5; the technology and toolchain are undecided, Q18) served locally; talks only to the local API bound to `127.0.0.1` with a per-session token and strict CORS/Origin checks (DNS-rebinding protection). The dashboard holds no Gmail tokens and cannot call Gmail directly. Rendering email-derived strings must escape/sanitize (XSS).
 
 ## 14. Zero Additional Cost constraint **[Approved — mandatory, project-wide]**
 
@@ -224,3 +224,13 @@ Only claims tagged **[Verified]** rely on these pages:
 - OAuth token expiry: https://developers.google.com/identity/protocols/oauth2#expiration
 - OAuth web-server / incremental authorization: https://developers.google.com/identity/protocols/oauth2/web-server
 - OAuth for desktop apps: https://developers.google.com/identity/protocols/oauth2/native-app
+
+## 17. Roadmap extensions M5-M11 **[Future; planning only, nothing implemented]**
+
+The product direction in [PRODUCT-ROADMAP.md](PRODUCT-ROADMAP.md) adds label organization (M5), a dashboard (M6), incremental sync (M7), an action center (M8), subscription (M9) and attachment (M10) intelligence and question answering (M11). Architectural consequences, stated here so later designs do not drift:
+- **Capability boundary unchanged.** Analysis, recommendation, dashboard and question paths read only the local index. They have no Gmail client, no Keychain access and no write path; mutations stay confined to the allowlisted write boundary of M4C, extended one reviewed operation class at a time.
+- **The index is metadata-only today.** Subjects, snippets, bodies and attachment information are not stored. Anything content-based (M8B-M8D, M10, M11 semantic search) requires the content-indexing decision (Q15) and, for headers or attachment part metadata, a reviewed read-adapter extension (Q17), still within `gmail.readonly`.
+- **Untrusted content.** Every extractor and any local model treats message-derived text as data (D61); retrieval for questions is delimited, tool-less, schema-validated and read-only.
+- **Sync and plans.** Incremental sync (M7) changes the index anchor that M4 plans are bound to; its design must define how an anchor change affects approved plans before it ships.
+- **Local presentation.** The dashboard stays behind §13; nothing is exposed beyond loopback.
+- **Cost.** Every added dependency (frontend, parsers, local models) must pass the Zero Additional Cost review (§14).

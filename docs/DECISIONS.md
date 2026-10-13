@@ -28,7 +28,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D19 | Project license: **MIT** (owner decision). Dependencies are Apache-2.0, MIT and BSD-3-Clause (no publication constraint found). |
 | D20 | Before public release, commit author/committer email addresses were replaced with the maintainer's GitHub noreply address (messages, timestamps and file contents unchanged) and the cleaned history was published as a fresh repository; the original private development repository is kept as an archive. |
 
-## M4 decisions (owner-approved; M4A merged)
+## M4 decisions (owner-approved direction for M4; M4A, M4B, M4C-A and M4C-B1 are merged)
 | ID | Decision |
 |----|----------|
 | D27 | **Scope of operations.** Message-level only; no thread-wide execution. Archive and Trash are the eventual operations; the first live verification is archive only. No permanent deletion, send, forward, reply or draft operation. This narrows the broader M0B allowlist (labels, thread-level when verified, ARCHITECTURE §3/§9, P4) for M4. |
@@ -41,7 +41,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D34 | **Revalidation.** Gmail state is re-checked immediately before execution and drifted messages are skipped. The documentation never claims absolute protection against concurrent Gmail changes. (M4C) |
 | D35 | **Constraints.** Zero Additional Cost is mandatory. No Gmail write access or live verification without a new explicit owner approval. M4A is local-only; its only schema change is v3 (`protect_rules`); candidate results are computed on demand, never stored. |
 
-## M4B decisions (implemented in the M4B branch)
+## M4B decisions (implemented; merged in public PR #8)
 | ID | Decision |
 |----|----------|
 | D36 | **Plan model.** A plan is explicit message ids for one account and `ARCHIVE` only, frozen as canonical JSON and bound by its full SHA-256 covering every security-relevant field (ids, versions, times, policy, M3 ruleset, protection digest, index anchor, per-target digests). Targets must be currently ELIGIBLE (M4A); any ineligible id rejects the whole plan; max 500 targets; 48 h lifetime. Changes create a new version (new hash) and supersede the old plan. |
@@ -51,7 +51,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D40 | **M4B-to-M4C contract.** The executor must call `verify_approved`, consume the approval atomically at execution start, re-validate live Gmail state per message, skip drifted messages, never auto-retry or continue after ambiguity, never widen targets, and never act from plan state alone. Overlapping plans (the same message in several plans) are allowed in M4B; each plan keeps its own approval, which the executor must consume atomically and independently, reconciling earlier or concurrent operations on the same message instead of repeating an action, and failing closed on conflicting state (see [CLEANUP.md](CLEANUP.md)). |
 | D41 | **Hardening after the independent audit** (no P0-P2 findings). Backups are created exclusively with mode 600 and verified, partial ones removed; unrelated constraint errors are not reported as duplicate approvals; plan/approval state is cross-checked cheaply (triggers, approval-vs-audit) while stating that a database writer is outside the trust boundary; clock rollback is refused beyond a 5-minute tolerance; failed confirmations lock a plan for 15 minutes after 10 attempts; audit limits are validated; malformed snapshots fail with clean errors. Remaining limits are documented in [CLEANUP.md](CLEANUP.md). |
 
-## M4C decisions (owner design direction; M4C-A implemented offline in its branch)
+## M4C decisions (owner design direction; M4C-A merged in public PR #9 and M4C-B1 in public PR #10; M4C-C onward is not approved or started)
 | ID | Decision |
 |----|----------|
 | D42 | **M4C scope.** ARCHIVE only. Future live calls are individual `messages.modify` (remove `INBOX` only) with a read-only `messages.get`/`threads.get(format=minimal)` check; no `batchModify` (it returns no per-message result), no trash/untrash, no thread writes. This narrows the original M4C issue text. |
@@ -71,6 +71,18 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D57 | **Merge-preparation closeout (M4C-B1).** Project numbers must be canonical (no leading zero); the optional `installed.project_id` is validated and compared when present on both sides (equal ids contradict "separate", malformed fails closed, absent is never invented) and is bound into the attestation; a manual Google Cloud verification checklist is documented as a prerequisite of the future M4C-B2 and does not authorize login; post-consent failures are documented as possibly leaving a grant active. |
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
+
+## Product roadmap decisions (owner-approved direction; planning only, nothing implemented)
+| ID | Decision |
+|----|----------|
+| D58 | **Product direction.** Gmail Intelligence expands beyond cleanup into a local-first platform for understanding, organizing, protecting and maintaining Gmail: M5 Intelligent Inbox Organization, M6 Inbox Intelligence Dashboard, M7 Incremental Sync & Smart Maintenance (these three expand the original M5-M7 commitments), and new M8 Important Mail & Action Center, M9 Subscription Intelligence, M10 Attachment Intelligence, M11 Ask Your Inbox. M0-M4 and every approved security requirement are preserved. Scope and gates: [PRODUCT-ROADMAP.md](PRODUCT-ROADMAP.md). |
+| D59 | **Recommendation first, one execution boundary per operation class.** Each capability ships as read-only, explainable recommendations before any execution exists. Label changes, filter creation or any other mutation each need their own separately approved allowlist entry, plan, approval, audit and recovery design (the M4 pattern); nothing is created, merged, renamed or deleted automatically. |
+| D60 | **Explainability.** Findings show why they appeared, their source message(s) and a confidence/uncertainty indicator, and are phrased as recommendations, never as guaranteed detections. |
+| D61 | **Email content is untrusted input** for every analysis, extraction and model: never executed, never treated as instructions, no tool access, model output schema-validated, and no Gmail mutation as a side effect of analysis, a question, a dashboard view or a scheduled job. |
+| D62 | **Content indexing is a separate explicit decision (Q15).** The index is metadata-only today. Subjects, snippets, bodies and attachment content are indexed only per data class with owner consent, locally, with stated retention and at-rest protection. |
+| D63 | **No paid services and no external AI disclosure.** No paid API, model, dependency or hosting; optional free local inference only; nothing is sent to an external model without explicit per-use consent; attachment contents are never sent externally. |
+| D64 | **Subscriptions are recommendation-only.** No automatic unsubscribe request, link visit, one-click POST or unsubscribe e-mail (sending stays forbidden); unsubscribe links are stored as host and presence flags only. |
+| D65 | **Scopes and scheduling.** The recommendation phases of M5-M11 request no new OAuth scope. `gmail.settings.basic` (filters) is considered only for a separately approved filter-execution phase. Scheduled analysis is opt-in persistent configuration, read-only, with no access to write credentials. |
 
 ## M3 decisions
 | ID | Decision |
@@ -105,7 +117,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D10 | CI workflow is committed but **manual-trigger only** until the owner confirms the account has no payment method / $0 Actions budget (private-repo minutes beyond the free quota bill when a payment method exists; the API did not expose billing settings). Free quota per GitHub docs: 2,000 min/month on GitHub Free. |
 | D11 | Four read-only/advisory project Skills; no Gmail-operational Skills until the functionality exists. |
 
-## Proposed (from M0B PR #11, awaiting owner approval)
+## Proposed (from the private archive M0B PR #11, awaiting owner approval)
 | ID | Proposal |
 |----|----------|
 | P1 | Scopes: `gmail.readonly` through M3; `gmail.modify` only at M4; `gmail.settings.basic` only at M5; never `https://mail.google.com/`. Note: `gmail.modify` also permits sending, so the no-send rule is an application policy. |
@@ -119,6 +131,8 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | P9 | Only the `execute` module may use the write-capable client. |
 
 ## Unresolved
+Note: the row labelled `Q12 update` is a historical supplement to Q12 (billing status), not a separate question; the repeated Q12 identifier is a known historical quirk and is intentionally left unchanged.
+
 | ID | Question |
 |----|----------|
 | Q1 | Final stack/dependency review (Python version, Gmail client libs, FastAPI vs alternatives) — each dependency must be free. |
@@ -133,5 +147,10 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | Q12 | **Billing status (M0C research, still not proven).** Official pages read: Google's "create a project" guide lists billing as optional and says only that you *might* need it depending on the APIs used; the Gmail API guide pages and quota page say nothing about pricing or billing; the consent-screen help says an unpublished (Testing) app needs no verification. So: no evidence that a personal Gmail OAuth app needs billing, but no official statement that it is free. **M1 blocker/gate:** before creating anything, the Cloud console flow for creating the project, enabling the Gmail API and configuring the consent screen must complete without any billing prompt; if a billing account or card is requested at any step, stop and report. |
 | Q13 | Validate OAuth separation (A vs B): token scope behavior of a second authorization on the same desktop client is undocumented in pages read. |
 | Q14 | Claude Code subscription/usage-limit assumptions (external to the application's zero-cost objective). |
+| Q15 | **Content-indexing scope** (M8, M10, M11): which data classes (subject, snippet, body, attachment text) may be indexed locally, with what consent, retention and at-rest protection (the SQLite index is not encrypted). |
+| Q16 | **Build order** of M5-M11 after M4 (a recommendation is in PRODUCT-ROADMAP.md section 5; not binding). |
+| Q17 | **Read-adapter extensions:** extra headers (`List-Unsubscribe`, `List-Id`) for M9B and attachment part metadata without body data for M10A; feasibility to be verified, each reviewed separately. |
+| Q18 | **Frontend toolchain** for M6C: every dependency free, reviewed for license and supply chain (extends Q1). |
+| Q19 | **Scheduling** of read-only analysis (M7 stretch): mechanism, consent and logging. |
 
 Resolved in this correction: Q4 → A2 (approved direction); Q11 → A4 (accepted gap, no upgrade).
