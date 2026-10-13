@@ -28,7 +28,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D19 | Project license: **MIT** (owner decision). Dependencies are Apache-2.0, MIT and BSD-3-Clause (no publication constraint found). |
 | D20 | Before public release, commit author/committer email addresses were replaced with the maintainer's GitHub noreply address (messages, timestamps and file contents unchanged) and the cleaned history was published as a fresh repository; the original private development repository is kept as an archive. |
 
-## M4 decisions (owner-approved; M4A merged)
+## M4 decisions (owner-approved direction for M4; M4A, M4B, M4C-A and M4C-B1 are merged)
 | ID | Decision |
 |----|----------|
 | D27 | **Scope of operations.** Message-level only; no thread-wide execution. Archive and Trash are the eventual operations; the first live verification is archive only. No permanent deletion, send, forward, reply or draft operation. This narrows the broader M0B allowlist (labels, thread-level when verified, ARCHITECTURE §3/§9, P4) for M4. |
@@ -41,7 +41,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D34 | **Revalidation.** Gmail state is re-checked immediately before execution and drifted messages are skipped. The documentation never claims absolute protection against concurrent Gmail changes. (M4C) |
 | D35 | **Constraints.** Zero Additional Cost is mandatory. No Gmail write access or live verification without a new explicit owner approval. M4A is local-only; its only schema change is v3 (`protect_rules`); candidate results are computed on demand, never stored. |
 
-## M4B decisions (implemented in the M4B branch)
+## M4B decisions (implemented; merged in public PR #8)
 | ID | Decision |
 |----|----------|
 | D36 | **Plan model.** A plan is explicit message ids for one account and `ARCHIVE` only, frozen as canonical JSON and bound by its full SHA-256 covering every security-relevant field (ids, versions, times, policy, M3 ruleset, protection digest, index anchor, per-target digests). Targets must be currently ELIGIBLE (M4A); any ineligible id rejects the whole plan; max 500 targets; 48 h lifetime. Changes create a new version (new hash) and supersede the old plan. |
@@ -51,7 +51,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D40 | **M4B-to-M4C contract.** The executor must call `verify_approved`, consume the approval atomically at execution start, re-validate live Gmail state per message, skip drifted messages, never auto-retry or continue after ambiguity, never widen targets, and never act from plan state alone. Overlapping plans (the same message in several plans) are allowed in M4B; each plan keeps its own approval, which the executor must consume atomically and independently, reconciling earlier or concurrent operations on the same message instead of repeating an action, and failing closed on conflicting state (see [CLEANUP.md](CLEANUP.md)). |
 | D41 | **Hardening after the independent audit** (no P0-P2 findings). Backups are created exclusively with mode 600 and verified, partial ones removed; unrelated constraint errors are not reported as duplicate approvals; plan/approval state is cross-checked cheaply (triggers, approval-vs-audit) while stating that a database writer is outside the trust boundary; clock rollback is refused beyond a 5-minute tolerance; failed confirmations lock a plan for 15 minutes after 10 attempts; audit limits are validated; malformed snapshots fail with clean errors. Remaining limits are documented in [CLEANUP.md](CLEANUP.md). |
 
-## M4C decisions (owner design direction; M4C-A implemented offline in its branch)
+## M4C decisions (owner design direction; M4C-A merged in public PR #9 and M4C-B1 in public PR #10; M4C-C onward is not approved or started)
 | ID | Decision |
 |----|----------|
 | D42 | **M4C scope.** ARCHIVE only. Future live calls are individual `messages.modify` (remove `INBOX` only) with a read-only `messages.get`/`threads.get(format=minimal)` check; no `batchModify` (it returns no per-message result), no trash/untrash, no thread writes. This narrows the original M4C issue text. |
@@ -117,7 +117,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D10 | CI workflow is committed but **manual-trigger only** until the owner confirms the account has no payment method / $0 Actions budget (private-repo minutes beyond the free quota bill when a payment method exists; the API did not expose billing settings). Free quota per GitHub docs: 2,000 min/month on GitHub Free. |
 | D11 | Four read-only/advisory project Skills; no Gmail-operational Skills until the functionality exists. |
 
-## Proposed (from M0B PR #11, awaiting owner approval)
+## Proposed (from the private archive M0B PR #11, awaiting owner approval)
 | ID | Proposal |
 |----|----------|
 | P1 | Scopes: `gmail.readonly` through M3; `gmail.modify` only at M4; `gmail.settings.basic` only at M5; never `https://mail.google.com/`. Note: `gmail.modify` also permits sending, so the no-send rule is an application policy. |
@@ -131,6 +131,8 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | P9 | Only the `execute` module may use the write-capable client. |
 
 ## Unresolved
+Note: the row labelled `Q12 update` is a historical supplement to Q12 (billing status), not a separate question; the repeated Q12 identifier is a known historical quirk and is intentionally left unchanged.
+
 | ID | Question |
 |----|----------|
 | Q1 | Final stack/dependency review (Python version, Gmail client libs, FastAPI vs alternatives) — each dependency must be free. |

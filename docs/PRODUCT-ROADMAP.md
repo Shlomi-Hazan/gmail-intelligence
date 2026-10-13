@@ -3,7 +3,8 @@
 > **Status: direction approved by the owner; NOTHING in this document is implemented.** It adds product direction to the planning documents. It does
 > not authorize implementing any feature, any live Gmail operation, any new OAuth scope, any new dependency or any change to an existing security
 > boundary. Every milestone below needs its own explicit owner approval to start, and every increment needs its own Draft PR and review.
-> Tracking lives in GitHub Milestones and Issues; the proposals in section 6 have **not** been created there. See [ROADMAP.md](ROADMAP.md) for the
+> **Authority:** this document grants no authority to implement any part of M4C (M4C-B2/B3, M4C-C, M4C-D) or M4D, or to access real Gmail, OAuth,
+> Keychain or the real index; each of those stages needs its own explicit approval. Tracking lives in GitHub Milestones and Issues; the proposals in section 6 have **not** been created there. See [ROADMAP.md](ROADMAP.md) for the
 > short list, [DECISIONS.md](DECISIONS.md) (D58-D65, Q15-Q19) for the decisions and [ARCHITECTURE.md](ARCHITECTURE.md) section 17 for the architecture notes.
 
 ## 1. Where the project actually stands (baseline, not aspiration)
@@ -41,13 +42,14 @@ Each milestone is split into small increments that ship as separate Draft PRs. "
 Every milestone carries the project-wide **Zero Additional Cost verification** ([ROADMAP.md](ROADMAP.md)): no billing account or paid service, no paid
 API or model, no paid dependency, free-tier terms of any external service checked and recorded, unknown billing treated as a blocker.
 
-### M5 - Intelligent Inbox Organization (expands the original "Labels & Filters Management")
+### M5 — Intelligent Inbox Organization (expands the original "Labels & Filters Management")
 - **Goal and value:** make the label system understandable and tidy, and suggest how to classify mail, without touching the mailbox.
 - **MVP (M5A-M5C):** label inventory and hygiene report (duplicates and near-duplicates, unused labels, over-deep or inconsistent nesting, orphaned
   parents); label and tag recommendations from existing classification and sender patterns; suggested classification rules with an impact preview
   (reusing the M3 rule preview). All local, read-only, no network.
 - **Stretch:** label-change plans (create, rename, nest, merge) as immutable plans with typed approvals and audit, offline (M5D); filter suggestions
-  with preview (M5E); an execution milestone only after separate approval (M5F).
+  with preview (M5E); an execution milestone only after separate approval (M5F). **M5F is intentionally deferred and is NOT proposed for GitHub
+  tracking in section 6:** it would be proposed only after M5D has been designed and reviewed, M4 is complete and the execution class is separately approved.
 - **Dependencies:** M2 index and labels; M3 classification; M4B plan/approval pattern. Execution additionally needs a generalized, newly allowlisted write
   boundary, the M4C-C/D executor pattern and M4D recovery. Filters need the `gmail.settings.basic` scope, which does not exist in the project today.
 - **Privacy:** label names are private user content and never go to GitHub, logs or fixtures; recommendations use metadata only; any local model sees
@@ -56,26 +58,34 @@ API or model, no paid dependency, free-tier terms of any external service checke
   creation are separate execution classes, each needing its own allowlist entry, plan, approval, audit and recovery review. Recovery limits must be
   documented before approval: deleting a label removes it from messages; a created filter's effect on already-routed mail is not retroactively undone
   ([SECURITY.md](SECURITY.md)). Filters that forward, trash or skip the inbox stay forbidden without an explicit approved plan.
+- **Recovery and undo expectations:** the recommendation phases (M5A-M5C) change nothing, so there is nothing to undo. For later executed changes,
+  recovery is promised only where technically feasible and is documented per operation class before approval. Adding or removing a label on a message
+  can be inverted if the previous label set was recorded first (the M4 pattern). Deleting a label cannot be undone because the messages lose it, so a
+  merge is irreversible unless every affected message's previous labels were recorded and can be re-applied; the effect of a created filter on mail it
+  already routed is not retroactively undone, and deleting a filter only stops future effects ([SECURITY.md](SECURITY.md)). How renaming a parent label
+  affects nested children is not verified and must be checked against Google's documentation before any rename is approved.
+- **Zero Additional Cost:** no paid service, API, model or dependency; recommendations use local code and the free local-model boundary of M3.
 - **Acceptance (MVP):** reproducible, explained, local-only recommendations; synthetic fixtures only; no write scope or Gmail call; Zero Additional
   Cost verified.
 - **Owner approval gates:** start of M5; plan-and-approval design (M5D); each execution class; the filter scope.
 
-### M6 - Inbox Intelligence Dashboard (expands the original "Local Dashboard")
+### M6 — Inbox Intelligence Dashboard (expands the original "Local Dashboard")
 - **Goal and value:** an at-a-glance, explainable picture of the mailbox and of what cleanup achieved.
 - **MVP (M6A-M6C):** aggregate analytics library and CLI/JSON reports first; then a local API bound to `127.0.0.1` with a per-session token; then a
   read-only local web UI: inbox overview, top senders, newsletter and notification share, category and volume trends, cleanup recommendations and
   outcomes (from the M4 audit).
 - **Stretch:** inbox growth and reduction timeline; aggregate-only, privacy-safe export.
-- **Dependencies:** M2, M3, M4 audit data; M7 for freshness of trends; a frontend toolchain dependency review (Q1), since none exists yet.
+- **Dependencies:** M2, M3, M4 audit data; M7 for freshness of trends; a frontend toolchain dependency review (Q1), since none exists yet. The UI technology is undecided: D5 recorded a React dashboard only as an early direction, no stack is approved here, and the toolchain is open question Q18.
 - **Privacy:** aggregated and explainable by default; sender addresses masked unless the owner asks; no telemetry, no remote fonts, scripts or CDN assets;
   nothing leaves the machine.
 - **Security boundaries:** the API listens on loopback only with a per-session token and strict Origin/CORS checks (ARCHITECTURE section 13); no mutation
   endpoints in the MVP; the dashboard holds no Gmail tokens and cannot reach Gmail; strict escaping and a content security policy for email-derived text.
 - **Acceptance:** loopback-only (tested), no tokens in the UI process, read-only endpoints, escaped output, synthetic data, license and cost review of
   every frontend dependency.
+- **Zero Additional Cost:** no hosted service; every frontend dependency must be free and reviewed (license, supply chain) before approval; no paid fonts, CDNs or telemetry.
 - **Owner approval gates:** start; frontend dependency set; API design; any future action button (for example "create a cleanup plan").
 
-### M7 - Incremental Sync & Smart Maintenance (expands the original "Incremental Sync & Maintenance")
+### M7 — Incremental Sync & Smart Maintenance (expands the original "Incremental Sync & Maintenance")
 - **Goal and value:** a fresh, trustworthy local index without full rescans, plus health checks.
 - **MVP (M7A-M7C):** `history.list`-based incremental indexing with checkpoints and a full-rescan fallback when the history id has expired; change and
   deletion detection; local integrity checks (database integrity, orphaned rows, scan completeness, backup verification); user-triggered maintenance
@@ -89,27 +99,29 @@ API or model, no paid dependency, free-tier terms of any external service checke
   or write client; a schedule is persistent configuration and needs explicit approval.
 - **Acceptance:** resumable and idempotent sync, deletion detection tested with fakes, no write capability reachable, Zero Additional Cost verified
   (quota use stays within documented free limits).
+- **Zero Additional Cost:** only the existing free Gmail API quota (documented limits in ARCHITECTURE section 7); scheduling uses the owner's own Mac, with no paid automation or hosting.
 - **Owner approval gates:** start; the plan-anchor interaction design; any scheduling.
 
-### M8 - Important Mail & Action Center (new)
+### M8 — Important Mail & Action Center (new)
 - **Goal and value:** surface messages that may deserve attention, in a source-linked review queue.
 - **MVP (M8A, metadata only):** attention candidates from already indexed signals (starred, Gmail "important", unread age, personal versus automated
   sender) with explanations, uncertainty indicators and a source-linked review queue.
-- **Content-gated increments (M8B-M8D, only after Q15 is decided):** upcoming deadlines and payments, outstanding registrations and replies, important
-  documents (linking to M10), and messages possibly needing follow-up.
+- **Stretch (all content-gated, only after Q15 is decided), as three small deliverables:** M8B upcoming deadlines and payments; M8C outstanding
+  registrations, awaited replies and messages possibly needing follow-up; M8D important documents (linking to M10 once it exists).
 - **Dependencies:** M3 classification; M7 for freshness; the content-indexing decision (Q15); M10 for documents.
 - **Privacy:** subjects and snippets are sensitive; store minimal extracted facts rather than text where possible, with stated retention; local only.
 - **Security boundaries:** deterministic extraction first; a local model only through a strict output schema and never with tools; findings never trigger
   Gmail changes; no automatic replies (sending is forbidden project-wide).
 - **Acceptance:** each finding shows explanation, confidence and source link; wording says "possibly", never "detected"; measured on synthetic fixtures
   including adversarial email text; no Gmail write.
+- **Zero Additional Cost:** deterministic extraction first; any model is a free local one; no paid API or service.
 - **Owner approval gates:** start; the content-indexing scope; any model use.
 
-### M9 - Subscription Intelligence (new)
+### M9 — Subscription Intelligence (new)
 - **Goal and value:** understand newsletters and mailing lists, and see which subscriptions look inactive or low value.
 - **MVP (M9A, metadata only):** group senders, analyse frequency and volume, estimate low-value subscriptions from unread ratio and age, and list
   suggested unsubscribe opportunities for the owner to act on manually.
-- **M9B (header-gated):** recognize legitimate `List-Unsubscribe` and `List-Id` metadata. Today only the `From` header is fetched, so this needs a
+- **Stretch (M9B, header-gated):** recognize legitimate `List-Unsubscribe` and `List-Id` metadata. Today only the `From` header is fetched, so this needs a
   reviewed extension of the read adapter and index (still `gmail.readonly`) and a rescan.
 - **Dependencies:** M2, M3; M7 for refreshing headers; M6 for display.
 - **Privacy:** unsubscribe links often carry per-user tokens: store only presence flags and the host, never full links.
@@ -117,9 +129,10 @@ API or model, no paid dependency, free-tier terms of any external service checke
   forbidden). Links are never fetched; classification is by syntax only; displayed links carry warnings. Any future active path needs its own threat
   model and approval.
 - **Acceptance:** no network or Gmail write in the recommendation phase, hosts only, synthetic fixtures, Zero Additional Cost verified.
+- **Zero Additional Cost:** local analysis only; no paid service; no sender interaction.
 - **Owner approval gates:** start; the header extension; any active unsubscribe (not planned).
 
-### M10 - Attachment Intelligence (new)
+### M10 — Attachment Intelligence (new)
 - **Goal and value:** find receipts, invoices and documents, and spot duplicates.
 - **MVP (M10A):** attachment metadata only (file name, type, size, part count) indexed through a reviewed read-adapter extension; local search; duplicate
   candidates by metadata. The feasibility of fetching part metadata without any body data must be verified first.
@@ -131,9 +144,10 @@ API or model, no paid dependency, free-tier terms of any external service checke
 - **Security boundaries:** attachments are untrusted files: never opened or executed; size limits; any parser (for example PDF) needs a dependency
   review and isolation; read-only scope.
 - **Acceptance:** metadata-only MVP with no download path; the content path blocked behind explicit permission and tested; synthetic files only.
+- **Zero Additional Cost:** only free, open-source local parsers, and only after dependency review; no paid OCR, storage or API.
 - **Owner approval gates:** start; the read-adapter extension; each class of content analysis; parser dependencies.
 
-### M11 - Ask Your Inbox (new)
+### M11 — Ask Your Inbox (new)
 - **Goal and value:** ask natural-language questions about the indexed mailbox and get source-linked, evidence-based answers.
 - **MVP (M11A):** a deterministic question-to-query layer over the existing metadata index (counts, senders, dates, labels). An optional local model may
   only propose a *validated query plan*, never SQL or an action. Answers list their sources and the evidence used, and say plainly when the evidence is
@@ -146,6 +160,7 @@ API or model, no paid dependency, free-tier terms of any external service checke
   and no network, outputs are schema-validated, the database handle is read-only; the question path has no Gmail client, no Keychain access and no write
   path, so asking can never change the mailbox.
 - **Acceptance:** adversarial-email test suite, source-linked answers, calibrated "insufficient evidence" behavior, no network (tested), no paid model.
+- **Zero Additional Cost:** free local embeddings and inference only; no paid or external model or API.
 - **Owner approval gates:** start; the model; content retrieval; any follow-up feature that acts on an answer (not planned).
 
 ## 4. Cross-cutting gates
@@ -157,13 +172,16 @@ API or model, no paid dependency, free-tier terms of any external service checke
 | **Execution boundary per operation class** (plan, approval, audit, recovery, allowlist, scope) | any mutation in M5 and later |
 | **Dependency review** (frontend toolchain, parsers, local models, embeddings: licenses, supply chain, cost) | M6, M10 parsers, M11 |
 | **Scheduling approval** (persistent configuration) | M7 stretch |
-| **M4 completion** (M4C-C executor, M4C-D live canary, M4D recovery) | any execution class in M5 |
+| **M4 completion**, each stage separately authorized (M4C-B2/B3 client and authorization, M4C-C executor, M4C-D live canary, M4D recovery) | any execution class in M5 |
 
 ## 5. Dependencies and priority recommendation
 
 Numbering is kept for continuity; it is not the recommended build order.
 
-1. **Finish M4** (M4C-C, M4C-D, M4D). It is already in progress and holds the only mutation path.
+1. **Complete M4, which holds the only mutation path, under its own approvals.** Status: M4A, M4B, M4C-A and M4C-B1 are merged. The M4C-C design is
+   complete, but its implementation has **not** been approved or started. M4C-B2 (client configuration) and M4C-B3 (real authorization) each need separate
+   authorization. M4C-D (live canary) and M4D (recovery and undo) are future work. Giving M4 this engineering priority does not give permission to begin
+   any of these stages, and this roadmap grants no authority to implement M4C or to access real Gmail.
 2. **M7 early:** every later milestone depends on a fresh index; design the plan-anchor interaction first.
 3. **M6A (aggregate analytics) and M5A-M5C (label hygiene and recommendations):** read-only, offline, quick wins on data that already exists.
 4. **M9A and M8A:** metadata-only first releases.
@@ -171,19 +189,27 @@ Numbering is kept for continuity; it is not the recommended build order.
 6. **M6B-M6C (API and UI)** once a first useful set of reports exists.
 7. **M11 last:** it depends on the index quality and on the untrusted-content defenses built in earlier milestones.
 
-Rough dependency graph: M2/M3/M4 -> M7 -> {M5, M6, M8A, M9A} -> {M9B, M10A} -> content decision -> {M8B-M8D, M10 content} -> M11.
+Rough dependency graph: M2/M3/M4 -> M7 -> {M5, M6, M8A, M9A} -> {M9B, M10A} -> content decision -> {M8B-M8D, M10 content} -> M11. M4 itself proceeds only through its separately approved stages.
 
 ## 6. Proposed GitHub tracking (NOT created)
 
-No GitHub Milestone or Issue has been created or changed. Existing: Milestones #1 "M3 - Rules & AI Classification" (closed) and #2 "M4 - Safe
-Cleanup" (open); Issues #1, #3, #4 (closed), #5, #6 (open). The earlier milestones M0-M2 have no GitHub Milestone (they predate the public repository).
-There is therefore no title or scope collision. Issue and pull-request numbers share one sequence in the public repository (the highest used is #10);
-older numbers quoted in these documents, for example "PR #11/#13/#14/#15" for M0-M2, refer to the private archive repository, as noted in ROADMAP.md.
+No GitHub Milestone or Issue has been created or changed by this document. At the time of writing the repository has Milestones #1 "M3 — Rules & AI
+Classification" (closed) and #2 "M4 — Safe Cleanup" (open), and Issues #1, #3, #4 (closed) and #5, #6 (open). The earlier milestones M0-M2 have no
+GitHub Milestone (they predate the public repository). There is no title or scope collision with the proposals below. Pull-request and issue numbers share
+one ever-growing sequence in the public repository, so this document does not name a "highest" or "next" number.
 
-Proposed milestones (titles only; created later, one at a time, with the owner's approval): *M5 - Intelligent Inbox Organization*; *M6 - Inbox
-Intelligence Dashboard*; *M7 - Incremental Sync & Smart Maintenance*; *M8 - Important Mail & Action Center*; *M9 - Subscription Intelligence*;
-*M10 - Attachment Intelligence*; *M11 - Ask Your Inbox*. Each milestone description repeats its goal, the recommendation-first rule, the Zero Additional
+**How pull requests are cited.** Public pull requests of this repository are written as PR #n and link to `https://github.com/Shlomi-Hazan/gmail-intelligence/pull/n`: [#2](https://github.com/Shlomi-Hazan/gmail-intelligence/pull/2) (M3), [#7](https://github.com/Shlomi-Hazan/gmail-intelligence/pull/7) (M4A),
+[#8](https://github.com/Shlomi-Hazan/gmail-intelligence/pull/8) (M4B), [#9](https://github.com/Shlomi-Hazan/gmail-intelligence/pull/9) (M4C-A), [#10](https://github.com/Shlomi-Hazan/gmail-intelligence/pull/10) (M4C-B1) and [#11](https://github.com/Shlomi-Hazan/gmail-intelligence/pull/11) (the roadmap expansion). The pull requests that [ROADMAP.md](ROADMAP.md)
+records for M0B, M0C, M1 and M2 belong to the original **private archive repository** and are written there as "private archive PR #11, #13, #14, #15";
+they are not public pull requests, and private archive PR #11 is unrelated to public PR #11.
+
+Proposed milestones (titles only; created later, one at a time, with the owner's approval): *M5 — Intelligent Inbox Organization*; *M6 — Inbox
+Intelligence Dashboard*; *M7 — Incremental Sync & Smart Maintenance*; *M8 — Important Mail & Action Center*; *M9 — Subscription Intelligence*;
+*M10 — Attachment Intelligence*; *M11 — Ask Your Inbox*. Each milestone description repeats its goal, the recommendation-first rule, the Zero Additional
 Cost criterion and the owner gates above.
+
+The seven milestones group **21 proposed Issues**, one per named increment except the deliberately deferred M5F: the plan names 22 increments (M5A-M5F,
+M6A-M6C, M7A-M7C, M8A-M8D, M9A-M9B, M10A-M10B, M11A-M11B) and the table has 21 rows (M5: 5, M6: 3, M7: 3, M8: 4, M9: 2, M10: 2, M11: 2).
 
 Proposed issues (each: description = the increment named; acceptance = the stated criterion plus "synthetic data only", "no new scope or Gmail write
 unless stated", "Zero Additional Cost verified"):
@@ -202,7 +228,9 @@ unless stated", "Zero Additional Cost verified"):
 | M7 | M7B Change/deletion detection and plan-anchor design | plans neither silently invalidated nor validated |
 | M7 | M7C Integrity checks and maintenance report | read-only; user-triggered |
 | M8 | M8A Metadata attention queue | explanation, uncertainty and source link per finding |
-| M8 | M8B-M8D Content-gated findings (deadlines/payments, follow-up, documents) | blocked until Q15 is approved |
+| M8 | M8B Deadlines and payments (content-gated) | blocked until Q15 is approved; findings carry source, explanation and uncertainty |
+| M8 | M8C Registrations, awaited replies and follow-up (content-gated) | blocked until Q15 is approved; recommendation only, no replies sent |
+| M8 | M8D Important documents (content-gated) | blocked until Q15 is approved; links to M10 only when it exists |
 | M9 | M9A Subscription grouping and frequency | recommendation-only; no network |
 | M9 | M9B List-Unsubscribe/List-Id metadata | header extension reviewed; hosts and flags only; nothing fetched |
 | M10 | M10A Attachment metadata index and search | no download path; duplicate candidates by metadata |
