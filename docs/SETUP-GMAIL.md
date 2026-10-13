@@ -46,6 +46,9 @@ Exit codes: 0 success; 1 operational failure (not configured, not logged in, aut
 ## 5. Disconnect
 `auth logout` deletes the local item only. To revoke Google's side, remove the app at https://myaccount.google.com/permissions. Delete the client file manually if you want it gone.
 
+## 5b. Write authorization (M4C-B; NOT set up yet)
+The archive feature needs a SEPARATE write authorization that does not exist yet. Do not create it before the live stage is approved. When it is: use a **separate Google Cloud project** (free; stop if any billing prompt appears), a separate Desktop client, `auth setup-write --import FILE`, then `auth login-write --expect-account EMAIL` (shows the risks of the broad permission and needs a typed confirmation). `auth status-write` is local only. `auth logout-write` removes only the local token; `auth revoke-write` revokes at Google. The read-only commands and their token are unchanged and never touch these.
+
 ## 6. What the live check reads (verified by the owner, see top)
 `auth login` will request only the read-only scope, show the authorized email and ask for confirmation. `gmail check` then makes exactly two read calls: `users.getProfile` (email, message/thread totals) and `users.labels.list` (only the label **count** is shown; names are not displayed). No message, subject, body or attachment is read.
 

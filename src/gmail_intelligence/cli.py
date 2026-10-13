@@ -223,6 +223,151 @@ def cmd_auth_logout(args):
     return 0
 
 
+# ---- separate WRITE authorization (M4C-B1). Every handler below is an explicit `auth *-write` command; nothing else reaches these modules.
+def _write_store():
+    from gmail_intelligence.keystore_write import WriteTokenStore
+    return WriteTokenStore()
+
+
+def cmd_auth_setup_write(args):
+    from gmail_intelligence import oauth, oauth_write
+
+    path = config.write_client_secret_path()
+    if not args.import_file:
+        print(f"""Write authorization setup (manual; free; never enable billing). Use a SEPARATE Google Cloud project and a SEPARATE Desktop client.
+ 1. In that separate project enable the Gmail API, set the audience to External/Testing with you as the only test user.
+ 2. Data access: add exactly one scope: {oauth_write.WRITE_SCOPE}
+ 3. Create an OAuth client of type 'Desktop app' and download its JSON file.
+ 4. Run: gmail-intelligence auth setup-write --import <downloaded-file>   (stored as {path}, permissions 600)
+ 5. Run: gmail-intelligence auth login-write --expect-account EMAIL
+A separate project helps keep the grants apart but is not a security guarantee by itself.""")
+        print("Write client file: " + ("present" if path.exists() else "not yet imported"))
+        return 0
+    src = Path(args.import_file).expanduser()
+    try:
+        data = oauth_write.load_write_client_config(src)
+        read_path = config.client_secret_path()
+        if read_path.exists() and oauth.load_client_config(read_path)["installed"]["client_id"] == data["installed"]["client_id"]:
+            return _fail("this is the read-only OAuth client; the write authorization needs a different client (ideally a separate project)")
+    except oauth.AuthError as exc:
+        return _fail(exc)
+    config.ensure_app_dir()
+    shutil.copyfile(src, path)
+    os.chmod(path, 0o600)
+    print(f"Write client file validated and stored at {path} (permissions 600). Delete the downloaded copy: {src}")
+    return 0
+
+
+def cmd_auth_login_write(args):
+    from gmail_intelligence import gmail_write, oauth, oauth_write
+    from gmail_intelligence.keystore import KeystoreError
+
+    path = config.write_client_secret_path()
+    try:
+        client = oauth_write.load_write_client_config(path)
+        store = _write_store()
+        if store.load() is not None:
+            return _fail("a write authorization is already stored; run `auth logout-write` (and `auth revoke-write`) first")
+    except (KeystoreError, oauth.AuthError) as exc:
+        return _fail(exc)
+    print(oauth_write.LOGIN_WARNING)
+    if input(f"To continue type exactly: {oauth_write.LOGIN_PHRASE}\n> ").strip() != oauth_write.LOGIN_PHRASE:
+        return _fail("declined; no authorization was requested")
+    try:
+        creds, granted = oauth_write.run_login_write(path, open_browser=not args.no_browser)
+        account = gmail_write.fetch_profile_email(creds)
+    except (oauth.AuthError, gmail_write.WriteTransportError) as exc:
+        return _fail(exc)
+    if account.strip().lower() != args.expect_account.strip().lower():
+        try:  # nothing is stored for the wrong account, so do not leave a live grant behind either
+            oauth_write.revoke_refresh_token(creds.refresh_token)
+            note = "the unwanted grant was revoked at Google"
+        except oauth.AuthError:
+            note = "could NOT revoke the unwanted grant; remove it at https://myaccount.google.com/permissions"
+        return _fail(f"the authorized account differs from --expect-account; nothing stored; {note}")
+    try:
+        store.save(oauth_write.write_blob(creds, account, granted, client))
+    except KeystoreError as exc:
+        return _fail(exc)
+    print("Write authorization stored in its own Keychain item. Nothing was archived or changed.")
+    return 0
+
+
+def cmd_auth_status_write(_args):
+    """Local only: reads the write Keychain item and the write client file. No refresh, no network, no prompt."""
+    import datetime
+
+    from gmail_intelligence import oauth, oauth_write
+    from gmail_intelligence.keystore import KeystoreError
+
+    ready = True
+    client = None
+    try:
+        client = oauth_write.load_write_client_config(config.write_client_secret_path())
+        print("[OK  ] write OAuth client file present")
+    except oauth.AuthError as exc:
+        ready = False
+        print(f"[FAIL] write OAuth client file: {exc}")
+    try:
+        blob = _write_store().load()
+    except KeystoreError as exc:
+        print(f"[FAIL] write token storage: {exc}")
+        return 1
+    if blob is None:
+        print("[INFO] no write authorization stored (this is the normal state)")
+        return 1
+    try:
+        oauth_write.check_blob(blob, client)
+        expiry = blob.get("expiry")
+        left = oauth_write.remaining_validity(datetime.datetime.fromisoformat(expiry)) if expiry else None
+        print(f"[OK  ] write authorization stored (scope: {oauth_write.WRITE_SCOPE}); access token valid for "
+              f"{int(left.total_seconds() // 60) if left is not None else '?'} more minute(s) (it is NOT refreshed here)")
+    except (oauth.AuthError, ValueError) as exc:
+        ready = False
+        print(f"[FAIL] write authorization: {exc}")
+    print("Local state only; not verified with Google. The account is verified against Google only at a separately approved live stage.")
+    return 0 if ready else 1
+
+
+def cmd_auth_logout_write(args):
+    from gmail_intelligence.keystore import KeystoreError
+
+    try:
+        store = _write_store()
+        if store.load() is None:
+            print("No stored write authorization; nothing to remove.")
+            return 0
+        if not args.yes and input("Remove the stored WRITE authorization from the Keychain? [y/N] ").strip().lower() != "y":
+            return _fail("cancelled")
+        store.delete()
+    except KeystoreError as exc:
+        return _fail(exc)
+    print("The local write token was removed. This does NOT revoke it at Google: run `auth revoke-write` while it is still stored,")
+    print("or remove the app at https://myaccount.google.com/permissions. The read-only authorization was not touched.")
+    return 0
+
+
+def cmd_auth_revoke_write(args):
+    from gmail_intelligence import oauth, oauth_write
+    from gmail_intelligence.keystore import KeystoreError
+
+    try:
+        store = _write_store()
+        blob = store.load()
+        if blob is None:
+            print("No stored write authorization; nothing to revoke.")
+            return 0
+        oauth_write.check_blob(blob)
+        if not args.yes and input(f"This contacts Google and revokes the write grant. Type exactly: {oauth_write.REVOKE_PHRASE}\n> ").strip() != oauth_write.REVOKE_PHRASE:
+            return _fail("cancelled")
+        oauth_write.revoke_refresh_token(blob.get("refresh_token"))
+        store.delete()
+    except (KeystoreError, oauth.AuthError) as exc:
+        return _fail(exc)
+    print("The write grant was revoked at Google and the local token was removed. The read-only authorization was not touched.")
+    return 0
+
+
 def _open_reader():
     """Load stored credentials (refreshing if needed) and build the read-only reader. Returns (reader, blob)."""
     from gmail_intelligence import gmail, oauth
@@ -809,8 +954,8 @@ def build_parser():
     sub.add_parser("version", help="print the version").set_defaults(func=cmd_version)
     sub.add_parser("doctor", help="check local development prerequisites (offline)").set_defaults(func=cmd_doctor)
 
-    auth = sub.add_parser("auth", help="manage the read-only Gmail connection")
-    asub = auth.add_subparsers(dest="auth_command", required=True, metavar="{setup,login,status,logout}")
+    auth = sub.add_parser("auth", help="manage the read-only Gmail connection (and the separate, explicit write authorization)")
+    asub = auth.add_subparsers(dest="auth_command", required=True, metavar="{setup,login,status,logout,setup-write,login-write,status-write,logout-write,revoke-write}")
     p = asub.add_parser("setup", help="show Google Cloud setup steps, or import the OAuth client file")
     p.add_argument("--import", dest="import_file", metavar="FILE", help="validate and store the downloaded client JSON")
     p.set_defaults(func=cmd_auth_setup)
@@ -822,6 +967,20 @@ def build_parser():
     p = asub.add_parser("logout", help="remove this app's local tokens")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     p.set_defaults(func=cmd_auth_logout)
+    p = asub.add_parser("setup-write", help="show setup steps for, or import, the SEPARATE write OAuth client file (no network)")
+    p.add_argument("--import", dest="import_file", metavar="FILE", help="validate and store the downloaded write client JSON")
+    p.set_defaults(func=cmd_auth_setup_write)
+    p = asub.add_parser("login-write", help="authorize the broad write permission in the browser (contacts Google; explicit confirmation)")
+    p.add_argument("--expect-account", metavar="EMAIL", required=True, help="fail (and store nothing) unless the authorized account matches")
+    p.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
+    p.set_defaults(func=cmd_auth_login_write)
+    asub.add_parser("status-write", help="show the local write-authorization state (no network, no refresh)").set_defaults(func=cmd_auth_status_write)
+    p = asub.add_parser("logout-write", help="remove the local write token only (does not revoke it at Google)")
+    p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    p.set_defaults(func=cmd_auth_logout_write)
+    p = asub.add_parser("revoke-write", help="revoke the write grant at Google, then remove the local token (contacts Google)")
+    p.add_argument("--yes", action="store_true", help="skip the typed confirmation")
+    p.set_defaults(func=cmd_auth_revoke_write)
 
     gm = sub.add_parser("gmail", help="read-only Gmail operations")
     gsub = gm.add_subparsers(dest="gmail_command", required=True, metavar="{check}")

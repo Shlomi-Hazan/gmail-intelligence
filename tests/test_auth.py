@@ -351,6 +351,8 @@ class GmailAdapterTests(Base):
         for path in (SRC / "gmail_intelligence").glob("*.py"):
             src = path.read_text()
             for scope in ("gmail.modify", "gmail.send", "gmail.settings", "mail.google.com", "gmail.compose"):
+                if scope == "gmail.modify" and path.name == "oauth_write.py":
+                    continue  # M4C-B1: the single module that defines the write scope (see test_write_boundary)
                 self.assertNotIn(scope, src, f"{path.name} mentions {scope}")
 
 

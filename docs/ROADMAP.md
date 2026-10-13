@@ -6,7 +6,7 @@ No dates are assigned. Everything below M0A is **future** and requires approval 
 - **M1 — Gmail OAuth & Read-Only Connection** (merged in PR #14; owner-reported live check succeeded)
 - **M2 — Mailbox Audit & Local Indexing** (merged in PR #15; owner-reported limited and full scans succeeded)
 - **M3 — Rules & AI Classification** (merged in PR #2; offline rules, local store and CLI verified; the optional local-AI boundary is tested with a fake backend only, real inference NOT VERIFIED - see [CLASSIFICATION.md](CLASSIFICATION.md))
-- **M4 — Safe Cleanup** (dry-run, approvals, rollback). Phases M4A candidate engine and protection rules (merged in PR #7), M4B plans/approvals/audit (merged in PR #8), M4C write authorization and executor (M4C-A local execution state implemented offline, in review; M4C-B/C/D pending), M4D recovery/undo/audit.
+- **M4 — Safe Cleanup** (dry-run, approvals, rollback). Phases M4A candidate engine and protection rules (merged in PR #7), M4B plans/approvals/audit (merged in PR #8), M4C write authorization and executor (M4C-A local execution state merged in PR #9; M4C-B1 offline write-auth and transport foundation in a Draft PR, no live setup; M4C-B2/B3 client configuration and authorization, M4C-C executor and M4C-D live canary pending and separately gated), M4D recovery/undo/audit.
 - **M5 — Labels & Filters Management**
 - **M6 — Local Dashboard**
 - **M7 — Incremental Sync & Maintenance**

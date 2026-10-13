@@ -1,0 +1,476 @@
+"""Offline tests for the SEPARATE write authorization (M4C-B1): OAuth, Keychain item and `auth *-write` commands.
+
+Fake credentials, fake OAuth flow/transport and a fake Keychain only. No Google account, browser, network, real Keychain or real index.
+"""
+import json
+import os
+import sys
+import unittest
+from datetime import timedelta
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+from google.auth.exceptions import RefreshError, TransportError  # noqa: E402
+from test_auth import A_TOK, ACCOUNT, Base, C_SEC, FakeBackend, FakeFlow, R_TOK, SENTINELS, client_config, utcnow  # noqa: E402
+
+from gmail_intelligence import cli, config, gmail_write, keystore, keystore_write, oauth, oauth_write  # noqa: E402
+
+WRITE_CLIENT_ID = "999-write.apps.googleusercontent.com"
+ACCOUNT_OTHER = "someone-else@example.invalid"
+
+
+def write_client_config(**over):
+    cfg = client_config()
+    cfg["installed"]["client_id"] = WRITE_CLIENT_ID
+    cfg["installed"].update(over)
+    return cfg
+
+
+class WCreds:
+    """Fake write credentials. refresh() is a recorded no-op unless a failure is scripted."""
+    def __init__(self, minutes=60, scopes=(oauth_write.WRITE_SCOPE,), refresh=R_TOK, client_id=WRITE_CLIENT_ID, raises=None):
+        self.token, self.refresh_token, self.client_id = A_TOK, refresh, client_id
+        self.expiry, self.scopes, self.raises, self.refreshed, self.requests = utcnow() + timedelta(minutes=minutes), list(scopes), raises, 0, []
+
+    @property
+    def valid(self):
+        return bool(self.token) and self.expiry > utcnow()
+
+    def refresh(self, request):
+        self.refreshed += 1
+        if self.raises:
+            raise self.raises
+        self.requests.append(request(oauth_write.TOKEN_URI, method="POST", body=b"x"))
+        self.token, self.expiry = A_TOK, utcnow() + timedelta(hours=1)
+
+
+class RecordingBackend(FakeBackend):
+    def __init__(self, fail=False):
+        super().__init__(fail)
+        self.touched = []
+
+    def set_password(self, service, user, value):
+        self.touched.append((service, user))
+        super().set_password(service, user, value)
+
+    def get_password(self, service, user):
+        self.touched.append((service, user))
+        return super().get_password(service, user)
+
+    def delete_password(self, service, user):
+        self.touched.append((service, user))
+        super().delete_password(service, user)
+
+
+class WBase(Base):
+    def setUp(self):
+        super().setUp()
+        self.backend = RecordingBackend()
+        self.store = keystore.TokenStore(self.backend)
+        self.wstore = keystore_write.WriteTokenStore(self.backend)
+        for target in (mock.patch.object(cli, "_store", lambda: self.store), mock.patch.object(cli, "_write_store", lambda: self.wstore)):
+            target.start()
+            self.addCleanup(target.stop)
+
+    def write_client_file(self, **over):
+        config.ensure_app_dir()
+        path = config.write_client_secret_path()
+        path.write_text(json.dumps(write_client_config(**over)))
+        os.chmod(path, 0o600)
+        return path
+
+    def write_blob(self, **over):
+        blob = oauth_write.write_blob(WCreds(), ACCOUNT, [oauth_write.WRITE_SCOPE], write_client_config())
+        blob.update(over)
+        self.wstore.save(blob) if not over else self.backend.items.__setitem__((keystore_write.SERVICE_WRITE, keystore_write.ITEM_WRITE), json.dumps(blob))
+        return blob
+
+
+class OAuthWriteTests(WBase):
+    def test_scope_is_defined_exactly_and_only_here(self):
+        self.assertEqual(oauth_write.WRITE_SCOPE, "https://www.googleapis.com/auth/gmail.modify")
+        self.assertEqual(oauth_write.EXPECTED_WRITE_SCOPES, {oauth_write.WRITE_SCOPE})
+        self.assertEqual(oauth.SCOPE, "https://www.googleapis.com/auth/gmail.readonly")  # the read-only path is unchanged
+        self.assertEqual(oauth.EXPECTED_SCOPES, {oauth.SCOPE})
+
+    def test_exact_scope_check_refuses_extra_missing_and_broader(self):
+        oauth_write.check_granted_write_scopes([oauth_write.WRITE_SCOPE])
+        for bad in ([], None, [oauth.SCOPE], [oauth_write.WRITE_SCOPE, oauth.SCOPE], [oauth_write.WRITE_SCOPE, "https://mail.google.com/"],
+                    [oauth_write.WRITE_SCOPE, "https://www.googleapis.com/auth/gmail.send"], ["https://mail.google.com/"]):
+            with self.assertRaisesRegex(oauth.AuthError, "unexpected OAuth scopes", msg=bad):
+                oauth_write.check_granted_write_scopes(bad)
+
+    def test_the_read_path_still_refuses_the_write_scope(self):
+        with self.assertRaises(oauth.AuthError):
+            oauth.check_granted_scopes([oauth_write.WRITE_SCOPE])
+        with self.assertRaises(oauth.AuthError):
+            oauth.blob_to_credentials({"scopes": [oauth_write.WRITE_SCOPE], "token": A_TOK, "refresh_token": R_TOK}, client_config())
+
+    def test_client_file_validation_pins_googles_token_endpoint(self):
+        path = self.write_client_file()
+        self.assertEqual(oauth_write.load_write_client_config(path)["installed"]["client_id"], WRITE_CLIENT_ID)
+        evil = self.write_client_file(token_uri="https://attacker.example.invalid/token")
+        with self.assertRaisesRegex(oauth.AuthError, "not Google's"):
+            oauth_write.load_write_client_config(evil)
+        with self.assertRaises(oauth.AuthError):
+            oauth_write.load_write_client_config(self.tmp + "/missing.json")
+
+    def test_login_requests_only_the_write_scope_without_accumulation(self):
+        path = self.write_client_file()
+        flow, seen = FakeFlow(creds=WCreds(), scopes=(oauth_write.WRITE_SCOPE,)), {}
+
+        def factory(cfg, scopes):
+            seen["scopes"] = scopes
+            return flow
+
+        creds, granted = oauth_write.run_login_write(path, flow_factory=factory, open_browser=False)
+        self.assertEqual((seen["scopes"], granted), ([oauth_write.WRITE_SCOPE], [oauth_write.WRITE_SCOPE]))
+        self.assertNotIn("include_granted_scopes", flow.kwargs)
+        self.assertEqual((flow.kwargs["host"], flow.kwargs["access_type"], flow.kwargs["prompt"]), ("127.0.0.1", "offline", "consent"))
+
+    def test_real_flow_object_uses_pkce_and_exactly_the_write_scope(self):
+        from google_auth_oauthlib.flow import InstalledAppFlow
+
+        flow = InstalledAppFlow.from_client_config(write_client_config(), scopes=[oauth_write.WRITE_SCOPE])
+        url, _ = flow.authorization_url(access_type="offline", prompt="consent")  # builds a URL only; nothing is opened or sent
+        self.assertIn("code_challenge_method=S256", url)
+        self.assertNotIn("include_granted_scopes", url)
+        self.assertRegex(url, r"scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.modify(&|$)")
+
+    def test_login_refuses_unexpected_scopes_client_mismatch_and_missing_refresh_token(self):
+        path = self.write_client_file()
+        cases = (("extra scope", FakeFlow(creds=WCreds(), scopes=(oauth_write.WRITE_SCOPE, oauth.SCOPE)), "unexpected OAuth scopes"),
+                 ("other scope", FakeFlow(creds=WCreds(), scopes=(oauth.SCOPE,)), "unexpected OAuth scopes"),
+                 ("other client", FakeFlow(creds=WCreds(client_id="1-other.apps.googleusercontent.com"), scopes=(oauth_write.WRITE_SCOPE,)), "different OAuth client"),
+                 ("no refresh token", FakeFlow(creds=WCreds(refresh=None), scopes=(oauth_write.WRITE_SCOPE,)), "refresh token"),
+                 ("scope change warning", FakeFlow(creds=WCreds(), raises=Warning("scope changed")), "different scopes"),
+                 ("cancelled", FakeFlow(creds=WCreds(), raises=type("E", (Exception,), {"error": "access_denied"})()), "cancelled"))
+        for label, flow, pattern in cases:
+            with self.assertRaisesRegex(oauth.AuthError, pattern, msg=label):
+                oauth_write.run_login_write(path, flow_factory=lambda c, s, f=flow: f, open_browser=False)
+
+    def test_blob_roundtrip_and_identity_checks(self):
+        client = write_client_config()
+        blob = oauth_write.write_blob(WCreds(), ACCOUNT, [oauth_write.WRITE_SCOPE], client)
+        creds = oauth_write.blob_to_write_credentials(blob, client)
+        self.assertEqual((creds.scopes, creds.token_uri, creds.client_id), ([oauth_write.WRITE_SCOPE], oauth_write.TOKEN_URI, WRITE_CLIENT_ID))
+        for bad, pattern in ((dict(blob, scopes=[oauth_write.WRITE_SCOPE, oauth.SCOPE]), "unexpected OAuth scopes"), (dict(blob, kind="read"), "valid write-authorization"),
+                             (dict(blob, schema=2), "valid write-authorization"), (dict(blob, refresh_token=None), "no refresh token"),
+                             (dict(blob, client_fp="0" * 64), "different OAuth client"), ("not a dict", "valid write-authorization")):
+            with self.assertRaisesRegex(oauth.AuthError, pattern):
+                oauth_write.blob_to_write_credentials(bad, client)
+        other = write_client_config(client_id="2-other.apps.googleusercontent.com")
+        with self.assertRaisesRegex(oauth.AuthError, "different OAuth client"):
+            oauth_write.blob_to_write_credentials(blob, other)
+
+    def test_ten_minutes_of_validity_are_required_and_nothing_refreshes(self):
+        for minutes, ok in ((60, True), (10.5, True), (9, False), (0, False), (-5, False)):
+            creds = WCreds(minutes=minutes)
+            if ok:
+                oauth_write.require_validity(creds)
+            else:
+                with self.assertRaisesRegex(oauth.AuthError, "10 minutes"):
+                    oauth_write.require_validity(creds)
+            self.assertEqual(creds.refreshed, 0)
+        creds = WCreds()
+        creds.expiry = None
+        with self.assertRaises(oauth.AuthError):
+            oauth_write.require_validity(creds)
+
+    def test_refresh_uses_only_a_pinned_oauth_request_and_stores_only_the_write_item(self):
+        client = write_client_config()
+        self.stored_blob()  # a read-only token exists and must not change
+        read_before = dict(self.backend.items)
+        blob = oauth_write.write_blob(WCreds(minutes=1), ACCOUNT, [oauth_write.WRITE_SCOPE], client)
+        sent = []
+        delegate = lambda url, **kw: sent.append((url, kw)) or "ok"  # noqa: E731
+        real = oauth_write.blob_to_write_credentials(blob, client)
+        real.refresh = lambda request: request(oauth_write.TOKEN_URI, method="POST", body=b"x") and None  # use the real request object
+        with mock.patch.object(oauth_write, "blob_to_write_credentials", return_value=real):
+            oauth_write.refresh_and_store(self.wstore, blob, client, request=delegate)
+        self.assertEqual(sent[0][0], oauth_write.TOKEN_URI)
+        self.assertEqual((sent[0][1]["method"], sent[0][1]["allow_redirects"]), ("POST", False))
+        self.assertEqual({k: v for k, v in self.backend.items.items() if k[0] != keystore_write.SERVICE_WRITE}, read_before)
+
+    def test_the_pinned_oauth_request_refuses_any_other_url_or_method(self):
+        pinned = oauth_write.PinnedOAuthRequest(oauth_write.TOKEN_URI, lambda *a, **k: "sent")
+        for url, method in (("https://gmail.googleapis.com/gmail/v1/users/me/profile", "POST"), (oauth_write.REVOKE_URI, "POST"),
+                            (oauth_write.TOKEN_URI + "?x=1", "POST"), (oauth_write.TOKEN_URI, "GET"), ("http://oauth2.googleapis.com/token", "POST")):
+            with self.assertRaises(oauth.AuthError, msg=(url, method)):
+                pinned(url, method=method)
+        self.assertEqual(pinned(oauth_write.TOKEN_URI, method="POST"), "sent")
+
+    def test_refresh_failures_are_clear_and_safe(self):
+        for exc, pattern in ((RefreshError("invalid_grant: Token has been expired or revoked " + R_TOK), "expired or revoked"),
+                             (RefreshError("boom " + R_TOK), "could not refresh"), (TransportError("down " + R_TOK), "network error")):
+            with self.assertRaisesRegex(oauth.AuthError, pattern) as ctx:
+                oauth_write.refresh_write_credentials(WCreds(raises=exc), request=lambda *a, **k: None)
+            for s in SENTINELS:
+                self.assertNotIn(s, str(ctx.exception))
+
+    def test_revocation_is_explicit_pinned_and_reports_failures_without_secrets(self):
+        sent = []
+
+        class Resp:
+            def __init__(self, status):
+                self.status = status
+
+        def request(status):
+            return lambda url, **kw: sent.append((url, kw)) or Resp(status)
+
+        self.assertTrue(oauth_write.revoke_refresh_token(R_TOK, request=request(200)))
+        self.assertTrue(oauth_write.revoke_refresh_token(R_TOK, request=request(400)))  # already invalid counts as revoked
+        self.assertEqual({u for u, _ in sent}, {oauth_write.REVOKE_URI})
+        self.assertEqual(sent[0][1]["body"], b"token=" + R_TOK.encode())
+        self.assertFalse(sent[0][1]["allow_redirects"])
+        for status in (500, 403, 302):
+            with self.assertRaisesRegex(oauth.AuthError, "not confirmed") as ctx:
+                oauth_write.revoke_refresh_token(R_TOK, request=request(status))
+            self.assertNotIn(R_TOK, str(ctx.exception))
+
+        def broken(*a, **k):
+            raise OSError("down " + R_TOK)
+        with self.assertRaises(oauth.AuthError) as ctx:
+            oauth_write.revoke_refresh_token(R_TOK, request=broken)
+        self.assertNotIn(R_TOK, str(ctx.exception))
+        with self.assertRaises(oauth.AuthError):
+            oauth_write.revoke_refresh_token("")
+
+
+class KeystoreWriteTests(WBase):
+    def test_distinct_service_and_item_and_no_fallback_in_either_direction(self):
+        self.assertEqual((keystore_write.SERVICE_WRITE, keystore_write.ITEM_WRITE), ("gmail-intelligence-write", "oauth-token:gmail.modify"))
+        self.assertNotEqual((keystore.SERVICE, keystore.ITEM), (keystore_write.SERVICE_WRITE, keystore_write.ITEM_WRITE))
+        self.stored_blob()  # read item only
+        self.assertIsNone(self.wstore.load())  # never falls back to the read-only item
+        self.assertEqual({k for k in self.backend.touched}, {(keystore.SERVICE, keystore.ITEM), (keystore_write.SERVICE_WRITE, keystore_write.ITEM_WRITE)})
+        self.backend.items.clear()
+        self.write_blob()
+        self.assertIsNone(self.store.load())  # and the read-only store never sees the write item
+
+    def test_roundtrip_delete_only_own_item_and_keep_the_read_item(self):
+        self.stored_blob()
+        self.backend.items[("other-app", "x")] = "keep"
+        self.assertFalse(keystore_write.WriteTokenStore(FakeBackend()).delete())
+        blob = self.write_blob()
+        self.assertEqual(self.wstore.load(), blob)
+        self.assertTrue(self.wstore.delete())
+        self.assertIsNone(self.wstore.load())
+        self.assertIsNotNone(self.store.load())
+        self.assertIn(("other-app", "x"), self.backend.items)
+
+    def test_refuses_to_store_an_invalid_record(self):
+        good = oauth_write.write_blob(WCreds(), ACCOUNT, [oauth_write.WRITE_SCOPE], write_client_config())
+        for bad in (dict(good, scopes=[oauth.SCOPE]), dict(good, scopes=[oauth_write.WRITE_SCOPE, oauth.SCOPE]), dict(good, kind="x"),
+                    dict(good, refresh_token=""), {"scopes": [oauth.SCOPE], "token": A_TOK, "refresh_token": R_TOK}):
+            with self.assertRaises(keystore.KeystoreError):
+                self.wstore.save(bad)
+        self.assertEqual(self.backend.items, {})
+
+    def test_backend_failure_corruption_and_non_macos_backend(self):
+        with self.assertRaises(keystore.KeystoreError) as ctx:
+            keystore_write.WriteTokenStore(FakeBackend(fail=True)).load()
+        self.assertNotIn(A_TOK, str(ctx.exception))
+        self.backend.items[(keystore_write.SERVICE_WRITE, keystore_write.ITEM_WRITE)] = "{broken"
+        with self.assertRaisesRegex(keystore.KeystoreError, "corrupt"):
+            self.wstore.load()
+        import keyring
+        from keyring.backends import fail
+        with mock.patch.object(keyring, "get_keyring", return_value=fail.Keyring()):
+            with self.assertRaisesRegex(keystore.KeystoreError, "no plaintext fallback"):
+                keystore_write.WriteTokenStore()
+
+
+class WriteCliTests(WBase):
+    def test_every_write_command_is_a_subcommand_of_auth_and_login_needs_expect_account(self):
+        self.assertEqual(self.run_cli("auth", "login-write")[0], 2)  # --expect-account is mandatory
+        self.assertEqual(self.run_cli("auth", "bogus-write")[0], 2)
+
+    def test_setup_write_prints_steps_and_imports_a_validated_separate_client(self):
+        code, out, _ = self.run_cli("auth", "setup-write")
+        self.assertEqual(code, 0)
+        self.assertIn("SEPARATE", out)
+        self.assertIn(oauth_write.WRITE_SCOPE, out)
+        src = Path(self.tmp) / "dl.json"
+        src.write_text(json.dumps(write_client_config()))
+        self.assertEqual(self.run_cli("auth", "setup-write", "--import", str(src))[0], 0)
+        self.assertEqual(oct(os.stat(config.write_client_secret_path()).st_mode & 0o777), "0o600")
+        self.assertFalse(config.client_secret_path().exists())  # the read-only client file is a different file and untouched
+
+    def test_setup_write_refuses_the_read_client_and_bad_files(self):
+        self.write_client()  # the read-only client
+        same = Path(self.tmp) / "same.json"
+        same.write_text(json.dumps(client_config()))
+        code, _, err = self.run_cli("auth", "setup-write", "--import", str(same))
+        self.assertEqual(code, 1)
+        self.assertIn("read-only OAuth client", err)
+        evil = Path(self.tmp) / "evil.json"
+        evil.write_text(json.dumps(write_client_config(token_uri="https://attacker.example.invalid/token")))
+        self.assertEqual(self.run_cli("auth", "setup-write", "--import", str(evil))[0], 1)
+        self.assertFalse(config.write_client_secret_path().exists())
+
+    def login(self, creds=None, account=ACCOUNT, stdin=oauth_write.LOGIN_PHRASE, expect=ACCOUNT, **patch):
+        self.write_client_file()
+        creds = creds or WCreds()
+        runner = patch.pop("runner", mock.Mock(return_value=(creds, [oauth_write.WRITE_SCOPE])))
+        revoke = patch.pop("revoke", mock.Mock(return_value=True))
+        with mock.patch.object(oauth_write, "run_login_write", runner), mock.patch.object(gmail_write, "fetch_profile_email", return_value=account), \
+                mock.patch.object(oauth_write, "revoke_refresh_token", revoke):
+            result = self.run_cli("auth", "login-write", "--expect-account", expect, "--no-browser", stdin=stdin)
+        return result, runner, revoke
+
+    def test_login_shows_the_broad_risk_requires_the_typed_phrase_and_stores_only_in_the_write_item(self):
+        (code, out, _), runner, revoke = self.login()
+        self.assertEqual(code, 0)
+        for text in ("much broader than archiving", "send mail", "application policy", "does not revoke", oauth_write.WRITE_SCOPE):
+            self.assertIn(text, out.replace("\n", " ") if text == "does not revoke" else out)
+        runner.assert_called_once()
+        revoke.assert_not_called()
+        blob = self.wstore.load()
+        self.assertEqual((blob["account"], blob["scopes"], blob["kind"]), (ACCOUNT, [oauth_write.WRITE_SCOPE], oauth_write.BLOB_KIND))
+        self.assertEqual({k for k in self.backend.touched} - {(keystore_write.SERVICE_WRITE, keystore_write.ITEM_WRITE)}, set())  # only the write item
+        self.assertIsNone(self.store.load())  # nothing in the read-only item
+
+    def test_login_without_the_exact_phrase_requests_nothing(self):
+        for stdin in ("", "y", "yes", "authorize gmail modify", oauth_write.LOGIN_PHRASE + " now"):
+            (code, _, err), runner, _ = self.login(stdin=stdin)
+            self.assertEqual(code, 1)
+            self.assertIn("declined", err)
+            runner.assert_not_called()  # no browser, no OAuth flow
+        self.assertIsNone(self.wstore.load())
+
+    def test_login_with_the_wrong_account_stores_nothing_and_revokes_the_unwanted_grant(self):
+        (code, _, err), _, revoke = self.login(account=ACCOUNT_OTHER)
+        self.assertEqual(code, 1)
+        self.assertIn("differs from --expect-account", err)
+        self.assertNotIn(ACCOUNT_OTHER, err)
+        revoke.assert_called_once()
+        self.assertIsNone(self.wstore.load())
+        (code, _, err), _, _ = self.login(account=ACCOUNT_OTHER, revoke=mock.Mock(side_effect=oauth.AuthError("x")))
+        self.assertIn("could NOT revoke", err)
+
+    def test_login_refuses_when_already_authorized_missing_client_and_storage_failure(self):
+        self.write_blob()
+        (code, _, err), runner, _ = self.login()
+        self.assertEqual(code, 1)
+        self.assertIn("already stored", err)
+        runner.assert_not_called()
+        self.wstore.delete()
+        config.write_client_secret_path().unlink()  # no write client file imported yet
+        self.assertEqual(self.run_cli("auth", "login-write", "--expect-account", ACCOUNT, stdin=oauth_write.LOGIN_PHRASE)[0], 1)
+        with mock.patch.object(cli, "_write_store", side_effect=keystore.KeystoreError("Keychain unavailable")):
+            self.write_client_file()
+            self.assertEqual(self.run_cli("auth", "login-write", "--expect-account", ACCOUNT, stdin=oauth_write.LOGIN_PHRASE)[0], 1)
+
+    def test_login_flow_errors_are_reported_without_secrets(self):
+        runner = mock.Mock(side_effect=oauth.AuthError("authorization was cancelled or denied in the browser"))
+        (code, _, err), _, _ = self.login(runner=runner)
+        self.assertEqual(code, 1)
+        self.assertIn("cancelled", err)
+        self.assertIsNone(self.wstore.load())
+
+    def test_status_write_is_local_only_never_refreshes_and_never_logs_in(self):
+        code, out, _ = self.run_cli("auth", "status-write")
+        self.assertEqual(code, 1)
+        self.assertIn("no write authorization stored", out)
+        self.write_client_file()
+        creds = WCreds(minutes=1)
+        blob = oauth_write.write_blob(creds, ACCOUNT, [oauth_write.WRITE_SCOPE], write_client_config())
+        self.wstore.save(blob)
+        with mock.patch.object(oauth_write, "run_login_write", side_effect=AssertionError("login")), \
+                mock.patch.object(oauth_write, "refresh_write_credentials", side_effect=AssertionError("refresh")), \
+                mock.patch.object(oauth_write, "revoke_refresh_token", side_effect=AssertionError("revoke")):
+            code, out, _ = self.run_cli("auth", "status-write")  # sockets are blocked by the base class: no network either
+        self.assertEqual(code, 0)
+        self.assertIn("NOT refreshed", out)
+        self.assertIn("not verified with Google", out)
+        self.assertNotIn(ACCOUNT, out)
+
+    def test_status_write_flags_a_different_client_and_a_wrong_scope(self):
+        self.write_client_file(client_id="2-other.apps.googleusercontent.com")
+        self.write_blob()
+        code, out, _ = self.run_cli("auth", "status-write")
+        self.assertEqual(code, 1)
+        self.assertIn("different OAuth client", out)
+        self.write_client_file()
+        self.write_blob(scopes=[oauth_write.WRITE_SCOPE, oauth.SCOPE])
+        self.assertEqual(self.run_cli("auth", "status-write")[0], 1)
+
+    def test_logout_write_removes_only_the_write_item_and_says_it_does_not_revoke(self):
+        self.stored_blob()
+        self.write_blob()
+        self.assertEqual(self.run_cli("auth", "logout-write", stdin="n")[0], 1)
+        self.assertIsNotNone(self.wstore.load())
+        with mock.patch.object(oauth_write, "revoke_refresh_token", side_effect=AssertionError("must stay local")):
+            code, out, _ = self.run_cli("auth", "logout-write", stdin="y")
+        self.assertEqual(code, 0)
+        self.assertIn("does NOT revoke", out)
+        self.assertIsNone(self.wstore.load())
+        self.assertIsNotNone(self.store.load())  # read-only authorization untouched
+        self.assertEqual(self.run_cli("auth", "logout-write", "--yes")[0], 0)
+
+    def test_the_read_only_logout_does_not_touch_the_write_item(self):
+        self.stored_blob()
+        self.write_blob()
+        self.assertEqual(self.run_cli("auth", "logout", "--yes")[0], 0)
+        self.assertIsNone(self.store.load())
+        self.assertIsNotNone(self.wstore.load())
+
+    def test_revoke_write_needs_the_phrase_revokes_remotely_then_removes_locally(self):
+        self.stored_blob()
+        self.write_blob()
+        calls = mock.Mock(return_value=True)
+        with mock.patch.object(oauth_write, "revoke_refresh_token", calls):
+            self.assertEqual(self.run_cli("auth", "revoke-write", stdin="revoke")[0], 1)
+            calls.assert_not_called()
+            self.assertIsNotNone(self.wstore.load())
+            code, out, _ = self.run_cli("auth", "revoke-write", stdin=oauth_write.REVOKE_PHRASE)
+        self.assertEqual(code, 0)
+        calls.assert_called_once_with(R_TOK)
+        self.assertIsNone(self.wstore.load())
+        self.assertIsNotNone(self.store.load())
+
+    def test_a_failed_revocation_keeps_the_local_token(self):
+        self.write_blob()
+        with mock.patch.object(oauth_write, "revoke_refresh_token", side_effect=oauth.AuthError("revocation was not confirmed (HTTP 500); the local token was kept")):
+            code, _, err = self.run_cli("auth", "revoke-write", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("kept", err)
+        self.assertIsNotNone(self.wstore.load())
+
+
+class NoCrossoverTests(WBase):
+    """Ordinary commands must never touch the write item, the write client file or an authorization flow."""
+
+    def test_read_commands_never_access_the_write_keychain_item_or_start_any_flow(self):
+        self.write_client()
+        self.stored_blob()
+        self.write_blob()
+        self.backend.touched.clear()
+        bombs = [mock.patch.object(oauth_write, n, side_effect=AssertionError(n)) for n in
+                 ("run_login_write", "refresh_write_credentials", "revoke_refresh_token", "blob_to_write_credentials")]
+        bombs += [mock.patch.object(cli, "_write_store", side_effect=AssertionError("write store")),
+                  mock.patch.object(keystore_write.WriteTokenStore, "__init__", side_effect=AssertionError("write store"))]
+        for b in bombs:
+            b.start()
+            self.addCleanup(b.stop)
+        from test_auth import FakeReader
+
+        from gmail_intelligence import gmail
+        with mock.patch.object(gmail, "build_reader", return_value=FakeReader()):
+            for argv in (("version",), ("doctor",), ("auth", "setup"), ("auth", "status"), ("gmail", "check"), ("auth", "logout", "--yes")):
+                self.run_cli(*argv)
+        self.assertNotIn(keystore_write.SERVICE_WRITE, {s for s, _ in self.backend.touched})
+        self.assertIsNotNone(self.wstore._backend.items.get((keystore_write.SERVICE_WRITE, keystore_write.ITEM_WRITE)))
+
+    def test_the_write_client_file_is_a_different_path_and_never_the_read_client(self):
+        self.assertNotEqual(config.write_client_secret_path(), config.client_secret_path())
+        self.assertEqual(config.write_client_secret_path().name, "client_secret_write.json")
+
+
+if __name__ == "__main__":
+    unittest.main()
