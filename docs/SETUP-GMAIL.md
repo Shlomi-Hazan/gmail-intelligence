@@ -49,6 +49,19 @@ Exit codes: 0 success; 1 operational failure (not configured, not logged in, aut
 ## 5b. Write authorization (M4C-B; NOT set up yet)
 The archive feature needs a SEPARATE write authorization that does not exist yet. Do not create it before the live stage is approved. When it is: use a **separate Google Cloud project** (free; stop if any billing prompt appears), a separate Desktop client, `auth setup-write --import FILE --confirm-separate-project` (the read-only client must already be set up; the flag is your attestation that the write client lives in a different project, because Google's revocation is project-wide), then `auth login-write --expect-account EMAIL` (shows the risks of the broad permission and needs a typed confirmation). `auth status-write` is local only. `auth logout-write` removes only the local token; `auth revoke-write` revokes at Google. The read-only commands and their token are unchanged and never touch these.
 
+## 5c. Manual Google Cloud verification checklist (for a future, separately approved M4C-B2 step)
+Nothing here is to be done yet. The tool's offline checks (recognized client-id format, different project numbers, a consistent optional `project_id`, and your `--confirm-separate-project` declaration) are preconditions only: they cannot see Google's side, and **your declaration is not sufficient evidence by itself**. Before any real authorization, verify by hand in the Google Cloud Console and in your Google Account that:
+1. The write OAuth client belongs to a **dedicated** Google Cloud project.
+2. The read-only project number and the write project number are **different** (compare the numbers shown in the Console, not just the client ids).
+3. The write project is **not shared with unrelated applications**, other clients or other people.
+4. The write OAuth configuration (consent screen, test user, Gmail API, the single scope) matches the intended account and application.
+5. The write credential file is a **separate file** from the read-only credential file (`client_secret_write.json` versus `client_secret.json`).
+6. You understand that **revoking the write authorization may affect all grants of the write project** (Google's revocation is project-wide), which is why the project must hold nothing else.
+7. **No billing account or paid resource** is enabled; stop if the Console asks for one, and do not enable any without explicit approval.
+8. You know where to inspect and revoke access manually: your Google Account > Security > Third-party access, for the write project's app.
+
+**Passing this checklist does not authorize `auth login-write`.** Real OAuth consent requires a separate, explicit approval.
+
 ## 6. What the live check reads (verified by the owner, see top)
 `auth login` will request only the read-only scope, show the authorized email and ask for confirmation. `gmail check` then makes exactly two read calls: `users.getProfile` (email, message/thread totals) and `users.labels.list` (only the label **count** is shown; names are not displayed). No message, subject, body or attachment is read.
 

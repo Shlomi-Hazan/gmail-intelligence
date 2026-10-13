@@ -815,6 +815,74 @@ class ProjectIsolationTests(WBase):
                     "100000000001-abcdefgh.apps.googleusercontent.com\n"):
             self.assertIsNone(pn(bad), repr(bad))
 
+    def test_the_project_number_must_be_canonical(self):
+        pn = oauth_write.project_number
+        self.assertEqual(pn("100000000001-readsynth01.apps.googleusercontent.com"), "100000000001")
+        self.assertEqual(pn("900000-readsynth01.apps.googleusercontent.com"), "900000")
+        for bad in ("0100000000001-readsynth01.apps.googleusercontent.com", "000000100000-readsynth01.apps.googleusercontent.com", "0-readsynth01.apps.googleusercontent.com",
+                    "0123456-readsynth01.apps.googleusercontent.com", "00-readsynth01.apps.googleusercontent.com"):
+            self.assertIsNone(pn(bad), bad)
+        read = client_config()
+        for variant in ("0100000000001-writesynth02.apps.googleusercontent.com", "00100000000001-writesynth02.apps.googleusercontent.com"):  # same number, non-canonical text
+            with self.assertRaisesRegex(oauth.AuthError, "recognized Google format"):
+                oauth_write.check_project_separation(write_client_config(client_id=variant), read)
+        with self.assertRaisesRegex(oauth.AuthError, "same Google Cloud project"):  # canonical, same project, different client
+            oauth_write.check_project_separation(write_client_config(client_id="100000000001-writesynth02.apps.googleusercontent.com"), read)
+        oauth_write.check_project_separation(write_client_config(), read)  # different project numbers: accepted as (non-authoritative) evidence
+
+    def test_the_optional_project_id_is_checked_for_consistency_only(self):
+        check = oauth_write.check_project_separation
+        read_plain, write_plain = client_config(), write_client_config()
+        # absent on both or on one side: never invented, nothing to compare
+        check(write_plain, read_plain)
+        check(write_client_config(project_id="write-project-1"), read_plain)
+        check(write_plain, read_client_config(project_id="read-project-1"))
+        # present on both and different: accepted (still not proof)
+        check(write_client_config(project_id="write-project-1"), read_client_config(project_id="read-project-1"))
+        # the same project id although the client ids encode different numbers: an explicit contradiction
+        with self.assertRaisesRegex(oauth.AuthError, "same Google Cloud project id") as ctx:
+            check(write_client_config(project_id="shared-project-1"), read_client_config(project_id="shared-project-1"))
+        self.assertNotIn("shared-project-1", str(ctx.exception))
+        # the same number AND different ids is still rejected by the number check
+        with self.assertRaisesRegex(oauth.AuthError, "same Google Cloud project"):
+            check(write_client_config(client_id=SAME_PROJECT_ID, project_id="write-project-1"), read_client_config(project_id="read-project-1"))
+        # supplied but malformed identity data fails closed on either side
+        for bad in (5, None, ["a"], {}, True, "", "abc", "A-Project-1", "1-project-name", "project-name-", "project_name_x", "project name x", "p" * 31, "projéct-name-1", "project-name-1\n"):
+            for cfg_w, cfg_r in ((write_client_config(project_id=bad), read_plain), (write_plain, read_client_config(project_id=bad))):
+                with self.assertRaisesRegex(oauth.AuthError, "malformed project id", msg=repr(bad)):
+                    check(cfg_w, cfg_r)
+
+    def test_a_project_id_change_after_setup_invalidates_the_attestation(self):
+        w, r, st = config.write_client_secret_path(), config.client_secret_path(), config.write_setup_path()
+        self.write_client_file(project_id="write-project-1")
+        oauth_write.verify_isolation(w, r, st)
+        record = json.loads(st.read_text())
+        self.assertNotIn("write-project-1", json.dumps(record))  # fingerprints only
+        w.write_text(json.dumps(write_client_config(project_id="other-project-2")))  # same client id, different declared project id
+        with self.assertRaisesRegex(oauth.AuthError, "changed since"):
+            oauth_write.verify_isolation(w, r, st)
+        w.write_text(json.dumps(write_client_config()))  # the field removed
+        with self.assertRaisesRegex(oauth.AuthError, "changed since"):
+            oauth_write.verify_isolation(w, r, st)
+        r.write_text(json.dumps(read_client_config(project_id="write-project-1")))  # the read client now claims the write project
+        w.write_text(json.dumps(write_client_config(project_id="write-project-1")))
+        with self.assertRaisesRegex(oauth.AuthError, "same Google Cloud project id"):
+            oauth_write.verify_isolation(w, r, st)
+
+    def test_setup_write_applies_the_project_id_check_and_never_leaks_it(self):
+        self.write_client()
+        config.client_secret_path().write_text(json.dumps(read_client_config(project_id="shared-project-1")))
+        src = Path(self.tmp) / "dl.json"
+        src.write_text(json.dumps(write_client_config(project_id="shared-project-1")))
+        code, out, err = self.run_cli("auth", "setup-write", "--import", str(src), "--confirm-separate-project")
+        self.assertEqual(code, 1)
+        self.assertIn("same Google Cloud project id", err)
+        self.assertNotIn("shared-project-1", out + err)
+        self.assertFalse(config.write_client_secret_path().exists())
+        self.assertFalse(config.write_setup_path().exists())
+        src.write_text(json.dumps(write_client_config(project_id="write-project-1")))
+        self.assertEqual(self.run_cli("auth", "setup-write", "--import", str(src), "--confirm-separate-project")[0], 0)
+
     def test_separation_policy_cases(self):
         read = client_config()
         check = oauth_write.check_project_separation

@@ -16,6 +16,8 @@ write client must belong to a SEPARATE Google Cloud project from the read-only c
 that could create or revoke a write grant: both client ids must be in the recognized format, must not be equal nor share a project number,
 and the owner's explicit attestation (recorded at `auth setup-write`, bound to fingerprints of both client files) must still match.
 A different project number is NECESSARY evidence of a separate project, not proof, and the attestation is the owner's word, not Google's.
+The optional `project_id` of the client files is only a consistency check (equal ids contradict "separate"; an absent one is never invented; a malformed one
+fails closed); neither equality nor inequality proves who owns or controls a project.
 """
 import hashlib
 import json
@@ -65,7 +67,8 @@ class LoginRejected(AuthError):
 
 
 _TOKEN_VALUE = r"[A-Za-z0-9._~+/=-]{8,4096}"
-_CLIENT_ID = r"([0-9]{6,20})-[a-z0-9]{8,64}\.apps\.googleusercontent\.com"
+_CLIENT_ID = r"([1-9][0-9]{5,19})-[a-z0-9]{8,64}\.apps\.googleusercontent\.com"  # canonical number: no leading zero, so equal numbers compare equal as text
+_PROJECT_ID = r"[a-z][a-z0-9-]{4,28}[a-z0-9]"  # Google Cloud project id: 6-30 chars, lower case, digits, hyphens
 
 
 def _token_or_none(value):
@@ -103,24 +106,41 @@ def _fp(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _declared_project_id(config):
+    """The optional `installed.project_id` of a client file: None when absent (never invented), the value when well formed, AuthError when supplied but malformed."""
+    inst = config["installed"]
+    if "project_id" not in inst:
+        return None
+    value = inst["project_id"]
+    if type(value) is not str or re.fullmatch(_PROJECT_ID, value, re.ASCII) is None:
+        raise AuthError("a client file declares a malformed project id, so project separation cannot be verified; refusing (fail closed)")
+    return value
+
+
 def check_project_separation(write_config, read_config):
     """Fail closed unless the two clients are recognizably in different projects. Never echoes an id or secret."""
     wid, rid = write_config["installed"]["client_id"], read_config["installed"]["client_id"]
     wn, rn = project_number(wid), project_number(rid)
     if wn is None or rn is None:
         raise AuthError("a client id is not in the recognized Google format, so project separation cannot be verified; refusing (fail closed)")
+    wp, rp = _declared_project_id(write_config), _declared_project_id(read_config)  # malformed supplied identity data fails closed
     if wid == rid:
         raise AuthError("the write authorization needs a different OAuth client than the read-only one")
     if wn == rn:
         raise AuthError("the write client belongs to the same Google Cloud project as the read-only client; revocation is project-wide at Google, "
                         "so create the write client in a SEPARATE project")
+    if wp is not None and rp is not None and wp == rp:  # both files claim the same project although the client ids encode different numbers
+        raise AuthError("both client files declare the same Google Cloud project id; revocation is project-wide at Google, so the write client "
+                        "must belong to a SEPARATE project")
 
 
 def isolation_record(write_config, read_config):
     """What the owner attested at setup, as fingerprints only (no client id, secret or project number is stored)."""
+    wp, rp = _declared_project_id(write_config), _declared_project_id(read_config)
     return {"schema": 1, "attested_separate_project": True, "write_client_fp": client_fingerprint(write_config),
             "write_project_fp": _fp(project_number(write_config["installed"]["client_id"])),
-            "read_client_fp": client_fingerprint(read_config), "read_project_fp": _fp(project_number(read_config["installed"]["client_id"]))}
+            "read_client_fp": client_fingerprint(read_config), "read_project_fp": _fp(project_number(read_config["installed"]["client_id"])),
+            "write_project_id_fp": _fp(wp) if wp is not None else None, "read_project_id_fp": _fp(rp) if rp is not None else None}
 
 
 def write_isolation_record(path, write_config, read_config):
