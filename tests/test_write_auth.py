@@ -20,8 +20,16 @@ from test_auth import A_TOK, ACCOUNT, Base, C_SEC, FakeBackend, FakeFlow, R_TOK,
 
 from gmail_intelligence import cli, config, gmail_write, keystore, keystore_write, oauth, oauth_write  # noqa: E402
 
-WRITE_CLIENT_ID = "999-write.apps.googleusercontent.com"
+WRITE_CLIENT_ID = "200000000002-writesynth02.apps.googleusercontent.com"
+OTHER_CLIENT_ID = "300000000003-othersynth03.apps.googleusercontent.com"
+SAME_PROJECT_ID = "100000000001-writesynth02.apps.googleusercontent.com"
 ACCOUNT_OTHER = "someone-else@example.invalid"
+
+
+def read_client_config(**over):
+    cfg = client_config()
+    cfg["installed"].update(over)
+    return cfg
 
 
 def write_client_config(**over):
@@ -81,11 +89,16 @@ class WBase(Base):
             target.start()
             self.addCleanup(target.stop)
 
-    def write_client_file(self, **over):
+    def write_client_file(self, attest=True, **over):
+        """Write the write-client file, make sure a read client exists and (by default) record the owner's separate-project attestation."""
         config.ensure_app_dir()
+        if not config.client_secret_path().exists():
+            self.write_client()
         path = config.write_client_secret_path()
         path.write_text(json.dumps(write_client_config(**over)))
         os.chmod(path, 0o600)
+        if attest:
+            oauth_write.write_isolation_record(config.write_setup_path(), oauth_write.load_write_client_config(path), oauth.load_client_config(config.client_secret_path()))
         return path
 
     def write_blob(self, **over):
@@ -118,7 +131,7 @@ class OAuthWriteTests(WBase):
     def test_client_file_validation_pins_googles_token_endpoint(self):
         path = self.write_client_file()
         self.assertEqual(oauth_write.load_write_client_config(path)["installed"]["client_id"], WRITE_CLIENT_ID)
-        evil = self.write_client_file(token_uri="https://attacker.example.invalid/token")
+        evil = self.write_client_file(attest=False, token_uri="https://attacker.example.invalid/token")
         with self.assertRaisesRegex(oauth.AuthError, "not Google's"):
             oauth_write.load_write_client_config(evil)
         with self.assertRaises(oauth.AuthError):
@@ -150,7 +163,7 @@ class OAuthWriteTests(WBase):
         path = self.write_client_file()
         cases = (("extra scope", FakeFlow(creds=WCreds(), scopes=(oauth_write.WRITE_SCOPE, oauth.SCOPE)), "unexpected OAuth scopes"),
                  ("other scope", FakeFlow(creds=WCreds(), scopes=(oauth.SCOPE,)), "unexpected OAuth scopes"),
-                 ("other client", FakeFlow(creds=WCreds(client_id="1-other.apps.googleusercontent.com"), scopes=(oauth_write.WRITE_SCOPE,)), "different OAuth client"),
+                 ("other client", FakeFlow(creds=WCreds(client_id="300000000003-othersynth03.apps.googleusercontent.com"), scopes=(oauth_write.WRITE_SCOPE,)), "different OAuth client"),
                  ("no refresh token", FakeFlow(creds=WCreds(refresh=None), scopes=(oauth_write.WRITE_SCOPE,)), "refresh token"),
                  ("scope change warning", FakeFlow(creds=WCreds(), raises=Warning("scope changed")), "different scopes"),
                  ("cancelled", FakeFlow(creds=WCreds(), raises=type("E", (Exception,), {"error": "access_denied"})()), "cancelled"))
@@ -168,7 +181,7 @@ class OAuthWriteTests(WBase):
                              (dict(blob, client_fp="0" * 64), "different OAuth client"), ("not a dict", "valid write-authorization")):
             with self.assertRaisesRegex(oauth.AuthError, pattern):
                 oauth_write.blob_to_write_credentials(bad, client)
-        other = write_client_config(client_id="2-other.apps.googleusercontent.com")
+        other = write_client_config(client_id="400000000004-othersynth03.apps.googleusercontent.com")
         with self.assertRaisesRegex(oauth.AuthError, "different OAuth client"):
             oauth_write.blob_to_write_credentials(blob, other)
 
@@ -262,7 +275,9 @@ class OAuthWriteTests(WBase):
 
         self.assertEqual(revoke(200), "REVOKED")
         self.assertEqual(revoke(200, b"{}"), "REVOKED")
-        self.assertEqual(revoke(400, b'{"error":"invalid_token","error_description":"Token expired or revoked"}'), "ALREADY_INVALID")
+        with self.assertRaisesRegex(oauth.AuthError, "not a documented confirmation") as ctx:  # suggestive, but NOT a confirmation: the local token is kept
+            revoke(400, b'{"error":"invalid_token","error_description":"Token expired or revoked"}')
+        self.assertIn("kept", str(ctx.exception))
         self.assertEqual({u for u, _ in sent}, {oauth_write.REVOKE_URI})
         self.assertEqual(sent[0][1]["body"], b"token=" + R_TOK.encode())
         self.assertFalse(sent[0][1]["allow_redirects"])
@@ -341,28 +356,63 @@ class WriteCliTests(WBase):
         self.assertEqual(self.run_cli("auth", "login-write")[0], 2)  # --expect-account is mandatory
         self.assertEqual(self.run_cli("auth", "bogus-write")[0], 2)
 
-    def test_setup_write_prints_steps_and_imports_a_validated_separate_client(self):
+    def test_setup_write_prints_steps_and_imports_a_validated_separate_client_with_an_attestation(self):
         code, out, _ = self.run_cli("auth", "setup-write")
         self.assertEqual(code, 0)
         self.assertIn("SEPARATE", out)
         self.assertIn(oauth_write.WRITE_SCOPE, out)
+        self.assertIn("--confirm-separate-project", out)
+        self.write_client()  # the read-only client must exist first
+        read_before = config.client_secret_path().read_bytes()
         src = Path(self.tmp) / "dl.json"
         src.write_text(json.dumps(write_client_config()))
-        self.assertEqual(self.run_cli("auth", "setup-write", "--import", str(src))[0], 0)
-        self.assertEqual(oct(os.stat(config.write_client_secret_path()).st_mode & 0o777), "0o600")
-        self.assertFalse(config.client_secret_path().exists())  # the read-only client file is a different file and untouched
-
-    def test_setup_write_refuses_the_read_client_and_bad_files(self):
-        self.write_client()  # the read-only client
-        same = Path(self.tmp) / "same.json"
-        same.write_text(json.dumps(client_config()))
-        code, _, err = self.run_cli("auth", "setup-write", "--import", str(same))
+        code, _, err = self.run_cli("auth", "setup-write", "--import", str(src))  # no attestation, no import
         self.assertEqual(code, 1)
-        self.assertIn("read-only OAuth client", err)
-        evil = Path(self.tmp) / "evil.json"
-        evil.write_text(json.dumps(write_client_config(token_uri="https://attacker.example.invalid/token")))
-        self.assertEqual(self.run_cli("auth", "setup-write", "--import", str(evil))[0], 1)
+        self.assertIn("--confirm-separate-project", err)
         self.assertFalse(config.write_client_secret_path().exists())
+        code, out, _ = self.run_cli("auth", "setup-write", "--import", str(src), "--confirm-separate-project")
+        self.assertEqual(code, 0)
+        self.assertEqual(oct(os.stat(config.write_client_secret_path()).st_mode & 0o777), "0o600")
+        self.assertEqual(oct(os.stat(config.write_setup_path()).st_mode & 0o777), "0o600")
+        self.assertEqual(config.client_secret_path().read_bytes(), read_before)  # the read-only client file is untouched
+        record = config.write_setup_path().read_text()
+        for private in (WRITE_CLIENT_ID, "200000000002", "100000000001", C_SEC):
+            self.assertNotIn(private, record + out)  # fingerprints only
+        oauth_write.verify_isolation(config.write_client_secret_path(), config.client_secret_path(), config.write_setup_path())
+
+    def test_setup_write_refuses_the_read_client_the_same_project_bad_formats_and_missing_read_client(self):
+        self.write_client()
+        read_before = config.client_secret_path().read_bytes()
+        cases = (("same client", write_client_config(client_id=client_config()["installed"]["client_id"]), "different OAuth client"),
+                 ("same project number", write_client_config(client_id=SAME_PROJECT_ID), "same Google Cloud project"),
+                 ("short number", write_client_config(client_id="123-abcdefgh.apps.googleusercontent.com"), "recognized Google format"),
+                 ("no number", write_client_config(client_id="abcdefghijkl.apps.googleusercontent.com"), "recognized Google format"),
+                 ("upper case", write_client_config(client_id="200000000002-WRITESYNTHETIC0000000000000.apps.googleusercontent.com"), "recognized Google format"),
+                 ("foreign suffix", write_client_config(client_id="200000000002-writesynth02.apps.example.invalid"), "does not look like a Google client id"),
+                 ("evil token endpoint", write_client_config(token_uri="https://attacker.example.invalid/token"), "not Google's"))
+        for label, cfg, pattern in cases:
+            src = Path(self.tmp) / "x.json"
+            src.write_text(json.dumps(cfg))
+            code, out, err = self.run_cli("auth", "setup-write", "--import", str(src), "--confirm-separate-project")
+            self.assertEqual(code, 1, label)
+            self.assertRegex(err, pattern, label)
+            for private in ("200000000002", "100000000001", C_SEC, "writesynth", "readsynth"):
+                self.assertNotIn(private, out + err, label)  # no client id fragment or secret in an error
+            self.assertFalse(config.write_client_secret_path().exists(), label)
+            self.assertFalse(config.write_setup_path().exists(), label)
+        self.assertEqual(config.client_secret_path().read_bytes(), read_before)
+
+    def test_setup_write_fails_closed_without_a_usable_read_client(self):
+        src = Path(self.tmp) / "dl.json"
+        src.write_text(json.dumps(write_client_config()))
+        for label, prepare in (("missing", lambda: None), ("malformed", lambda: (config.ensure_app_dir(), config.client_secret_path().write_text("{not json"))),
+                               ("unrecognized id", lambda: (config.ensure_app_dir(), config.client_secret_path().write_text(json.dumps(client_config()).replace("100000000001-readsynth01", "123-abc"))))):
+            prepare()
+            code, _, err = self.run_cli("auth", "setup-write", "--import", str(src), "--confirm-separate-project")
+            self.assertEqual(code, 1, label)
+            self.assertFalse(config.write_client_secret_path().exists(), label)
+            self.assertFalse(config.write_setup_path().exists(), label)
+
 
     def login(self, creds=None, account=ACCOUNT, stdin=oauth_write.LOGIN_PHRASE, expect=ACCOUNT, **patch):
         self.write_client_file()
@@ -438,7 +488,7 @@ class WriteCliTests(WBase):
         self.assert_discarded(result, revoke, R_TOK, message="different scopes")
 
     def test_a_foreign_client_or_missing_refresh_token_revokes_what_was_issued(self):
-        flow = FakeFlow(creds=WCreds(client_id="1-other.apps.googleusercontent.com"), scopes=(oauth_write.WRITE_SCOPE,))
+        flow = FakeFlow(creds=WCreds(client_id="300000000003-othersynth03.apps.googleusercontent.com"), scopes=(oauth_write.WRITE_SCOPE,))
         result, revoke = self.fake_flow_login(flow)
         self.assert_discarded(result, revoke, R_TOK, message="different OAuth client")
         self.tearDown_stores()
@@ -506,6 +556,7 @@ class WriteCliTests(WBase):
 
     def test_when_the_keychain_cannot_be_checked_revocation_is_not_attempted(self):
         issued = oauth_write.IssuedToken(R_TOK, A_TOK)
+        self.write_client_file()
 
         class Unreadable:
             def load(self):
@@ -514,7 +565,7 @@ class WriteCliTests(WBase):
             text = cli._discard_new_grant(Unreadable(), issued)
             self.assertIn("revocation was NOT attempted", text)
             self.assertIn("Google consent still stands", text)
-            self.assertIn("revocation was NOT attempted", cli._discard_new_grant(self.wstore, oauth_write.IssuedToken(None, None)))
+            self.assertIn("Google consent may still exist", cli._discard_new_grant(self.wstore, oauth_write.IssuedToken(None, None)))
         self.assertEqual(repr(issued), "<IssuedToken>")  # token material never reaches a repr
 
     def test_authorization_errors_before_a_grant_exists_attempt_no_revocation(self):
@@ -571,7 +622,7 @@ class WriteCliTests(WBase):
         self.assertNotIn(ACCOUNT, out)
 
     def test_status_write_flags_a_different_client_and_a_wrong_scope(self):
-        self.write_client_file(client_id="2-other.apps.googleusercontent.com")
+        self.write_client_file(client_id="400000000004-othersynth03.apps.googleusercontent.com")
         self.write_blob()
         code, out, _ = self.run_cli("auth", "status-write")
         self.assertEqual(code, 1)
@@ -601,6 +652,7 @@ class WriteCliTests(WBase):
         self.assertIsNotNone(self.wstore.load())
 
     def test_revoke_write_needs_the_phrase_revokes_remotely_then_removes_locally(self):
+        self.write_client_file()
         self.stored_blob()
         self.write_blob()
         calls = mock.Mock(return_value="REVOKED")
@@ -615,12 +667,272 @@ class WriteCliTests(WBase):
         self.assertIsNotNone(self.store.load())
 
     def test_a_failed_revocation_keeps_the_local_token(self):
+        self.write_client_file()
         self.write_blob()
         with mock.patch.object(oauth_write, "revoke_refresh_token", side_effect=oauth.AuthError("revocation was not confirmed (HTTP 500); the local token was kept")):
             code, _, err = self.run_cli("auth", "revoke-write", "--yes")
         self.assertEqual(code, 1)
         self.assertIn("kept", err)
         self.assertIsNotNone(self.wstore.load())
+
+    # ---- the REAL installed oauthlib / requests-oauthlib behaviour (fake HTTP session only; no socket is opened)
+    def real_flow(self, token_response, relax=False):
+        """A genuine google_auth_oauthlib flow whose token endpoint is answered by a fake requests session."""
+        import requests
+        from google_auth_oauthlib.flow import InstalledAppFlow
+
+        inner = InstalledAppFlow.from_client_config(write_client_config(), scopes=[oauth_write.WRITE_SCOPE])
+        inner.redirect_uri = "http://127.0.0.1:1/"
+        resp = requests.Response()
+        resp.status_code, resp._content = 200, json.dumps(token_response).encode()
+        resp.headers["Content-Type"] = "application/json"
+        resp.url = oauth_write.TOKEN_URI
+        resp.request = requests.Request("POST", oauth_write.TOKEN_URI).prepare()
+        test = self
+
+        class Flow:
+            oauth2session = inner.oauth2session
+
+            def run_local_server(self, **kwargs):
+                env = {"OAUTHLIB_RELAX_TOKEN_SCOPE": "1"} if relax else {}
+                with mock.patch.dict(os.environ, env), mock.patch.object(requests.Session, "request", return_value=resp):
+                    inner.fetch_token(code="synthetic-code")  # the REAL oauthlib parsing, the real Warning
+                test.assertEqual(self.oauth2session.token is not None, True)
+                return inner.credentials
+
+        return Flow(), inner
+
+    TOKEN = {"access_token": A_TOK, "refresh_token": R_TOK, "token_type": "Bearer", "expires_in": 3600}
+
+    def test_the_real_oauthlib_warning_carries_the_token_and_the_session_stays_empty(self):
+        flow, inner = self.real_flow(dict(self.TOKEN, scope=oauth_write.WRITE_SCOPE + " " + oauth.SCOPE))
+        with self.assertRaises(Warning) as caught:
+            flow.run_local_server()
+        self.assertIs(type(caught.exception), Warning)  # documents the installed library's behaviour that the cleanup relies on
+        self.assertFalse(dict(inner.oauth2session.token or {}))  # NOT where the credential handle is
+        self.assertEqual(caught.exception.token.get("refresh_token"), R_TOK)
+        path = self.write_client_file()
+        with self.assertRaises(oauth_write.LoginRejected) as ctx:
+            oauth_write.run_login_write(path, flow_factory=lambda c, s: flow, open_browser=False)
+        self.assertEqual((ctx.exception.issued.refresh_token, ctx.exception.issued.token), (R_TOK, A_TOK))
+        for text in (str(ctx.exception), repr(ctx.exception), repr(ctx.exception.issued), str(ctx.exception.__cause__)):
+            for secret in (R_TOK, A_TOK):
+                self.assertNotIn(secret, text)
+
+    def test_real_warning_through_the_cli_revokes_the_issued_grant_and_prints_nothing_secret(self):
+        flow, _ = self.real_flow(dict(self.TOKEN, scope=oauth_write.WRITE_SCOPE + " " + oauth.SCOPE))
+        (code, out, err), revoke = self.fake_flow_login(flow)
+        self.assert_discarded((code, out, err), revoke, R_TOK, message="different scopes")
+        self.assertNotIn("Scope has changed", out + err)  # the Warning text is never shown
+
+    def test_real_scope_rejection_without_a_warning_revokes_too(self):
+        flow, _ = self.real_flow(dict(self.TOKEN, scope=oauth_write.WRITE_SCOPE + " " + oauth.SCOPE), relax=True)
+        (code, out, err), revoke = self.fake_flow_login(flow)
+        self.assert_discarded((code, out, err), revoke, R_TOK, message="unexpected OAuth scopes")
+
+    def test_a_real_response_without_a_refresh_token_revokes_the_access_token(self):
+        flow, _ = self.real_flow({"access_token": A_TOK, "token_type": "Bearer", "expires_in": 3600, "scope": oauth_write.WRITE_SCOPE + " " + oauth.SCOPE})
+        (code, out, err), revoke = self.fake_flow_login(flow)
+        self.assert_discarded((code, out, err), revoke, A_TOK, message="different scopes")
+
+    def test_a_failed_revocation_after_a_real_warning_is_reported_honestly(self):
+        flow, _ = self.real_flow(dict(self.TOKEN, scope=oauth_write.WRITE_SCOPE + " " + oauth.SCOPE))
+        (code, out, err), revoke = self.fake_flow_login(flow, revoke=mock.Mock(side_effect=oauth.AuthError("revocation was not confirmed (HTTP 500)")))
+        self.assertEqual(code, 1)
+        self.assertIn("revocation FAILED", err)
+        self.assertIn("Google consent still stands", err)
+        self.assertNotIn("was revoked at Google", err)
+        self.assertIsNone(self.wstore.load())
+
+    def test_untrusted_or_malformed_warning_payloads_are_never_used_as_revocation_credentials(self):
+        class Impostor(Warning):  # a subclass is not oauthlib's own Warning
+            pass
+
+        def warning(cls=Warning, **attrs):
+            w = cls("Scope has changed " + R_TOK)
+            for k, v in attrs.items():
+                setattr(w, k, v)
+            return w
+        good = {"refresh_token": R_TOK, "access_token": A_TOK}
+        shape = dict(old_scope=[oauth_write.WRITE_SCOPE], new_scope=[oauth.SCOPE])
+        cases = (("subclass", warning(Impostor, token=good, **shape)), ("no oauthlib attributes", warning(token=good)), ("token not a mapping", warning(token="x" * 20, **shape)),
+                 ("token list", warning(token=[R_TOK], **shape)), ("non-string values", warning(token={"refresh_token": 5, "access_token": ["a"]}, **shape)),
+                 ("illegal characters", warning(token=dict(refresh_token="bad token value!", access_token="a b c d e f g h"), **shape)),
+                 ("too short", warning(token={"refresh_token": "abc", "access_token": "xy"}, **shape)), ("absent token", warning(**shape)),
+                 ("empty token", warning(token={}, **shape)), ("huge", warning(token={"refresh_token": "a" * 5000, "access_token": "b" * 5000}, **shape)))
+        path = self.write_client_file()
+        for label, exc in cases:
+            flow = FakeFlow(creds=WCreds(), raises=exc)
+            flow.oauth2session.token = {}
+            with self.assertRaises(oauth_write.LoginRejected, msg=label) as ctx:
+                oauth_write.run_login_write(path, flow_factory=lambda c, s, f=flow: f, open_browser=False)
+            self.assertEqual((ctx.exception.issued.refresh_token, ctx.exception.issued.token), (None, None), label)
+        # the session token is only a validated fallback
+        flow = FakeFlow(creds=WCreds(), raises=warning(token="junk", **shape))
+        flow.oauth2session.token = dict(refresh_token="bad value!", access_token=A_TOK)
+        with self.assertRaises(oauth_write.LoginRejected) as ctx:
+            oauth_write.run_login_write(path, flow_factory=lambda c, s: flow, open_browser=False)
+        self.assertEqual((ctx.exception.issued.refresh_token, ctx.exception.issued.token), (None, A_TOK))
+        # and an unusable payload ends in an honest "not attempted"
+        flow = FakeFlow(creds=WCreds(), raises=warning(token={}, **shape))
+        flow.oauth2session.token = {}
+        (code, out, err), revoke = self.fake_flow_login(flow)
+        self.assertEqual(code, 1)
+        self.assertIn("revocation was NOT attempted", err)
+        self.assertIn("Google consent may still exist", err)
+        revoke.assert_not_called()
+
+    def test_a_token_equal_to_the_stored_one_is_never_revoked_as_a_new_grant(self):
+        blob = self.write_blob()
+        self.write_client_file()
+        with mock.patch.object(oauth_write, "revoke_refresh_token", side_effect=AssertionError("revoked")):
+            text = cli._discard_new_grant(self.wstore, oauth_write.IssuedToken(blob["refresh_token"], A_TOK))
+        self.assertIn("revocation was NOT attempted", text)
+        self.assertIsNotNone(self.wstore.load())
+
+
+class ProjectIsolationTests(WBase):
+    """Revocation is project-wide at Google: write/revoke operations fail closed unless the write client is attested to be in a separate project."""
+    READ_ID = client_config()["installed"]["client_id"]
+
+    def broken_login_must_not_start(self):
+        with mock.patch.object(oauth_write, "run_login_write", side_effect=AssertionError("flow started")), \
+                mock.patch.object(oauth_write, "revoke_refresh_token", side_effect=AssertionError("revoked")):
+            code, out, err = self.run_cli("auth", "login-write", "--expect-account", ACCOUNT, stdin=oauth_write.LOGIN_PHRASE)
+        self.assertEqual(code, 1)
+        self.touched_by_login = list(self.backend.touched)  # captured before the assertions below read the Keychain themselves
+        self.assertIsNone(self.wstore.load())
+        return out + err
+
+    def test_project_number_parsing_is_strict(self):
+        pn = oauth_write.project_number
+        self.assertEqual(pn(self.READ_ID), "100000000001")
+        self.assertEqual(pn("123456-abcdefgh.apps.googleusercontent.com"), "123456")
+        for bad in ("123-abcdefgh.apps.googleusercontent.com", "12345678901234567890123-abcdefgh.apps.googleusercontent.com", "abc-abcdefgh.apps.googleusercontent.com",
+                    "100000000001-ABCDEFGH.apps.googleusercontent.com", "100000000001-abc.apps.googleusercontent.com", "100000000001abcdefgh.apps.googleusercontent.com",
+                    "100000000001-abcdefgh.apps.googleusercontent.com.evil.invalid", "x100000000001-abcdefgh.apps.googleusercontent.com", " 100000000001-abcdefgh.apps.googleusercontent.com",
+                    "100000000001-abcdef\u0661h.apps.googleusercontent.com", "\u0661\u0662\u0663\u0664\u0665\u0666-abcdefgh.apps.googleusercontent.com", "", None, 5, b"100000000001-abcdefgh.apps.googleusercontent.com",
+                    "100000000001-abcdefgh.apps.googleusercontent.com\n"):
+            self.assertIsNone(pn(bad), repr(bad))
+
+    def test_separation_policy_cases(self):
+        read = client_config()
+        check = oauth_write.check_project_separation
+        check(write_client_config(), read)  # different project numbers: passes (necessary evidence, not proof)
+        for label, cfg, pattern in (("identical", write_client_config(client_id=self.READ_ID), "different OAuth client"),
+                                    ("same number, different client", write_client_config(client_id=SAME_PROJECT_ID), "same Google Cloud project"),
+                                    ("unrecognized write id", write_client_config(client_id="123-abc.apps.googleusercontent.com"), "recognized Google format")):
+            with self.assertRaisesRegex(oauth.AuthError, pattern, msg=label) as ctx:
+                check(cfg, read)
+            self.assertNotIn("100000000001", str(ctx.exception))
+        with self.assertRaisesRegex(oauth.AuthError, "recognized Google format"):
+            check(write_client_config(), read_client_config(client_id="123-abc.apps.googleusercontent.com"))
+
+    def test_verification_fails_closed_for_every_missing_malformed_or_changed_input(self):
+        w, r, st = config.write_client_secret_path(), config.client_secret_path(), config.write_setup_path()
+        self.write_client_file()
+        oauth_write.verify_isolation(w, r, st)  # baseline: attested and consistent
+        original_read, original_write, original_record = r.read_bytes(), w.read_bytes(), st.read_bytes()
+
+        def restore():
+            r.write_bytes(original_read)
+            w.write_bytes(original_write)
+            st.write_bytes(original_record)
+
+        mutations = (
+            ("read client missing", lambda: r.unlink(), "read-only OAuth client file"),
+            ("read client malformed", lambda: r.write_text("{not json"), "read-only OAuth client file"),
+            ("read client unrecognized id", lambda: r.write_text(json.dumps(read_client_config(client_id="123-abc.apps.googleusercontent.com"))), "recognized Google format"),
+            ("read client replaced", lambda: r.write_text(json.dumps(read_client_config(client_id="500000000005-replsynth05.apps.googleusercontent.com"))), "changed since"),
+            ("read client now in the write project", lambda: r.write_text(json.dumps(read_client_config(client_id="200000000002-movedsynth07.apps.googleusercontent.com"))), "same Google Cloud project"),
+            ("write client missing", lambda: w.unlink(), "not found"),
+            ("write client malformed", lambda: w.write_text("[]"), "Desktop app"),
+            ("write client swapped after setup", lambda: w.write_text(json.dumps(write_client_config(client_id="600000000006-swapsynth06.apps.googleusercontent.com"))), "changed since"),
+            ("write client moved to the read project", lambda: w.write_text(json.dumps(write_client_config(client_id=SAME_PROJECT_ID))), "same Google Cloud project"),
+            ("write token endpoint changed", lambda: w.write_text(json.dumps(write_client_config(token_uri="https://attacker.example.invalid/token"))), "not Google's"),
+            ("attestation missing", lambda: st.unlink(), "never attested"),
+            ("attestation corrupt", lambda: st.write_text("{broken"), "never attested"),
+            ("attestation empty object", lambda: st.write_text("{}"), "changed since"),
+            ("attestation flag false", lambda: st.write_text(json.dumps(dict(json.loads(original_record), attested_separate_project=False))), "changed since"),
+            ("attestation for other fingerprints", lambda: st.write_text(json.dumps(dict(json.loads(original_record), write_client_fp="0" * 64))), "changed since"),
+        )
+        for label, mutate, pattern in mutations:
+            restore()
+            mutate()
+            with self.assertRaisesRegex(oauth.AuthError, pattern, msg=label) as ctx:
+                oauth_write.verify_isolation(w, r, st)
+            for private in ("100000000001", "200000000002", C_SEC, "synth0", "synth"):
+                self.assertNotIn(private, str(ctx.exception), label)
+        restore()
+        w.write_text(json.dumps(write_client_config(client_secret="ROTATED-SYNTH")))  # the attestation binds client IDENTITY: a rotated secret is not a new client
+        oauth_write.verify_isolation(w, r, st)
+        restore()
+        oauth_write.verify_isolation(w, r, st)
+
+    def test_login_fails_closed_before_any_flow_when_isolation_is_not_verified(self):
+        self.write_client_file()
+        for label, mutate in (("no read client", lambda: config.client_secret_path().unlink()),
+                              ("changed write client", lambda: config.write_client_secret_path().write_text(json.dumps(write_client_config(client_id=OTHER_CLIENT_ID)))),
+                              ("no attestation", lambda: config.write_setup_path().unlink())):
+            self.write_client_file()
+            mutate()
+            self.backend.touched.clear()
+            text = self.broken_login_must_not_start()
+            self.assertNotIn("100000000001", text)
+            self.assertNotIn(("gmail-intelligence-write", "oauth-token:gmail.modify"), self.touched_by_login, label)  # the write item is not even read
+
+    def test_attestation_missing_blocks_login_but_a_valid_setup_does_not(self):
+        self.write_client_file(attest=False)
+        self.broken_login_must_not_start()
+        self.write_client_file()
+        with mock.patch.object(oauth_write, "run_login_write", return_value=(WCreds(), [oauth_write.WRITE_SCOPE])), \
+                mock.patch.object(gmail_write, "fetch_profile_email", return_value=ACCOUNT):
+            code, _, _ = self.run_cli("auth", "login-write", "--expect-account", ACCOUNT, "--no-browser", stdin=oauth_write.LOGIN_PHRASE)
+        self.assertEqual(code, 0)
+        self.assertIsNotNone(self.wstore.load())
+
+    def test_revoke_write_and_cleanup_refuse_to_revoke_without_verified_separation(self):
+        blob = self.write_blob()
+        self.write_client_file()
+        config.write_setup_path().unlink()  # separation can no longer be verified
+        with mock.patch.object(oauth_write, "revoke_refresh_token", side_effect=AssertionError("revoked")):
+            code, _, err = self.run_cli("auth", "revoke-write", "--yes")
+            self.assertEqual(code, 1)
+            self.assertIn("never attested", err)
+            self.assertEqual(self.wstore.load(), blob)  # the local token stays
+            text = cli._discard_new_grant(self.wstore, oauth_write.IssuedToken(R_TOK, A_TOK))
+        self.assertIn("revocation was NOT attempted", text)
+        self.assertIn("could affect the read-only authorization", text)
+        self.assertIn("Google consent may still exist", text)
+
+    def test_status_write_reports_the_attestation_and_a_failure(self):
+        self.write_client_file()
+        self.write_blob()
+        code, out, _ = self.run_cli("auth", "status-write")
+        self.assertEqual(code, 0)
+        self.assertIn("attestation", out)
+        config.write_client_secret_path().write_text(json.dumps(write_client_config(client_id=SAME_PROJECT_ID)))
+        code, out, _ = self.run_cli("auth", "status-write")
+        self.assertEqual(code, 1)
+        self.assertIn("project separation", out)
+        self.assertNotIn("100000000001", out)
+
+    def test_logout_write_needs_no_isolation_because_it_never_contacts_google(self):
+        self.write_blob()
+        with mock.patch.object(oauth_write, "revoke_refresh_token", side_effect=AssertionError("revoked")):
+            self.assertEqual(self.run_cli("auth", "logout-write", "--yes")[0], 0)
+        self.assertIsNone(self.wstore.load())
+
+    def test_the_read_only_client_and_token_are_never_modified_by_any_write_operation(self):
+        self.write_client_file()
+        self.stored_blob()
+        read_file, read_items = config.client_secret_path().read_bytes(), {k: v for k, v in self.backend.items.items() if k[0] == keystore.SERVICE}
+        for argv in (("auth", "status-write"), ("auth", "setup-write"), ("auth", "logout-write", "--yes")):
+            self.run_cli(*argv)
+        with mock.patch.object(oauth_write, "run_login_write", side_effect=oauth.AuthError("denied")):
+            self.run_cli("auth", "login-write", "--expect-account", ACCOUNT, stdin=oauth_write.LOGIN_PHRASE)
+        self.assertEqual(config.client_secret_path().read_bytes(), read_file)
+        self.assertEqual({k: v for k, v in self.backend.items.items() if k[0] == keystore.SERVICE}, read_items)
 
 
 class NoCrossoverTests(WBase):

@@ -238,23 +238,32 @@ def cmd_auth_setup_write(args):
  1. In that separate project enable the Gmail API, set the audience to External/Testing with you as the only test user.
  2. Data access: add exactly one scope: {oauth_write.WRITE_SCOPE}
  3. Create an OAuth client of type 'Desktop app' and download its JSON file.
- 4. Run: gmail-intelligence auth setup-write --import <downloaded-file>   (stored as {path}, permissions 600)
+ 4. Run: gmail-intelligence auth setup-write --import <downloaded-file> --confirm-separate-project   (stored as {path}, permissions 600)
+    (the read-only client must already be set up; the two clients must belong to different projects, which is your attestation)
  5. Run: gmail-intelligence auth login-write --expect-account EMAIL
 A separate project helps keep the grants apart but is not a security guarantee by itself.""")
         print("Write client file: " + ("present" if path.exists() else "not yet imported"))
         return 0
+    if not args.confirm_separate_project:
+        return _fail("revocation at Google is project-wide, so the write client must live in a SEPARATE Google Cloud project; confirm that you created it "
+                     "there by passing --confirm-separate-project (this is your attestation, not something this tool can prove)")
     src = Path(args.import_file).expanduser()
     try:
         data = oauth_write.load_write_client_config(src)
-        read_path = config.client_secret_path()
-        if read_path.exists() and oauth.load_client_config(read_path)["installed"]["client_id"] == data["installed"]["client_id"]:
-            return _fail("this is the read-only OAuth client; the write authorization needs a different client (ideally a separate project)")
+        try:
+            read = oauth.load_client_config(config.client_secret_path())
+        except oauth.AuthError:
+            return _fail("the read-only OAuth client file is missing or invalid, so project separation cannot be verified; set up the read-only connection first")
+        oauth_write.check_project_separation(data, read)
     except oauth.AuthError as exc:
         return _fail(exc)
     config.ensure_app_dir()
     shutil.copyfile(src, path)
     os.chmod(path, 0o600)
-    print(f"Write client file validated and stored at {path} (permissions 600). Delete the downloaded copy: {src}")
+    oauth_write.write_isolation_record(config.write_setup_path(), data, read)
+    print(f"Write client file validated and stored at {path} (permissions 600); your separate-project attestation was recorded (fingerprints only).")
+    print(f"Delete the downloaded copy: {src}")
+    print("Different project numbers are necessary evidence of a separate project, not proof; keep it a project used for nothing else.")
     return 0
 
 
@@ -271,7 +280,12 @@ def _discard_new_grant(store, issued):
     manual = "remove the app at https://myaccount.google.com/permissions"
     token = getattr(issued, "refresh_token", None) or getattr(issued, "token", None)
     if not token:
-        return f"revocation was NOT attempted (no credential handle was available): Google consent still stands; {manual}"
+        return f"revocation was NOT attempted (no credential handle was available): Google consent may still exist; {manual}"
+    try:  # revocation is project-wide at Google: never attempt it unless the write client is verifiably in a separate project
+        oauth_write.verify_isolation(config.write_client_secret_path(), config.client_secret_path(), config.write_setup_path())
+    except oauth.AuthError:
+        return (f"revocation was NOT attempted (project separation could not be verified, and revoking could affect the read-only authorization): "
+                f"Google consent may still exist; {manual}")
     try:
         existing = store.load()
     except KeystoreError:
@@ -293,6 +307,7 @@ def cmd_auth_login_write(args):
     path = config.write_client_secret_path()
     try:
         client = oauth_write.load_write_client_config(path)
+        oauth_write.verify_isolation(path, config.client_secret_path(), config.write_setup_path())  # fail closed before anything can create a grant
         store = _write_store()
         if store.load() is not None:  # never start a second authorization while one is stored: the stored credential is never replaced
             return _fail("a write authorization is already stored; run `auth revoke-write` or `auth logout-write` first")
@@ -340,6 +355,12 @@ def cmd_auth_status_write(_args):
     except oauth.AuthError as exc:
         ready = False
         print(f"[FAIL] write OAuth client file: {exc}")
+    try:
+        oauth_write.verify_isolation(config.write_client_secret_path(), config.client_secret_path(), config.write_setup_path())
+        print("[OK  ] separate-project attestation matches both client files (the owner's attestation, not proof)")
+    except oauth.AuthError as exc:
+        ready = False
+        print(f"[FAIL] project separation: {exc}")
     try:
         blob = _write_store().load()
     except KeystoreError as exc:
@@ -390,14 +411,14 @@ def cmd_auth_revoke_write(args):
             print("No stored write authorization; nothing to revoke.")
             return 0
         oauth_write.check_blob(blob)
-        if not args.yes and input(f"This contacts Google and revokes the write grant. Type exactly: {oauth_write.REVOKE_PHRASE}\n> ").strip() != oauth_write.REVOKE_PHRASE:
+        oauth_write.verify_isolation(config.write_client_secret_path(), config.client_secret_path(), config.write_setup_path())  # revocation is project-wide
+        if not args.yes and input(f"This contacts Google and revokes the write grant (project-wide at Google). Type exactly: {oauth_write.REVOKE_PHRASE}\n> ").strip() != oauth_write.REVOKE_PHRASE:
             return _fail("cancelled")
-        outcome = oauth_write.revoke_refresh_token(blob.get("refresh_token"))
-        store.delete()  # only reached after Google confirmed (or reported the token already invalid); otherwise the local token stays
+        oauth_write.revoke_refresh_token(blob.get("refresh_token"))
+        store.delete()  # only reached after Google answered HTTP 200; otherwise the local token stays
     except (KeystoreError, oauth.AuthError) as exc:
         return _fail(exc)
-    print("Google reports the token was already invalid or revoked; the local token was removed." if outcome == "ALREADY_INVALID"
-          else "Google confirmed the revocation and the local token was removed.")
+    print("Google confirmed the revocation (HTTP 200) and the local token was removed.")
     print("The read-only authorization was not touched.")
     return 0
 
@@ -1003,6 +1024,7 @@ def build_parser():
     p.set_defaults(func=cmd_auth_logout)
     p = asub.add_parser("setup-write", help="show setup steps for, or import, the SEPARATE write OAuth client file (no network)")
     p.add_argument("--import", dest="import_file", metavar="FILE", help="validate and store the downloaded write client JSON")
+    p.add_argument("--confirm-separate-project", action="store_true", help="attest that the client was created in a SEPARATE Google Cloud project (required to import)")
     p.set_defaults(func=cmd_auth_setup_write)
     p = asub.add_parser("login-write", help="authorize the broad write permission in the browser (contacts Google; explicit confirmation)")
     p.add_argument("--expect-account", metavar="EMAIL", required=True, help="fail (and store nothing) unless the authorized account matches")

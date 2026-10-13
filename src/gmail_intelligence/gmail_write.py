@@ -12,8 +12,13 @@ Design:
     exception) is reported as UncertainOutcome, which the future executor must record as UNKNOWN and reconcile; it is never retried
     here and never turned into "not applied". Only a validated Gmail error document (matching status and JSON error object) is a
     definite rejection. Nothing here proves WHO changed a message.
-  * An adapter cannot archive anything until `verify_account()` has succeeded against the live profile; any identity or authorization
+  * Nothing can be MODIFIED until `verify_account()` has succeeded against the live profile: the gate is a flag on the private transport that
+    both `perform` and `_dispatch` check before a MESSAGE_MODIFY, so even the adapter's private helpers cannot bypass it (only code that
+    deliberately writes the flag can, which is a convention-level boundary like every underscore in Python). Any identity or authorization
     problem afterwards locks it out again.
+  * Responses must be completely and unambiguously framed: a body shorter than its Content-Length, a truncated chunked body, both
+    Content-Length and Transfer-Encoding, repeated or malformed Content-Length, a transfer or content coding other than chunked/identity, or a
+    non-bytes body is never accepted (UNCERTAIN for the mutation, a read error for reads).
 """
 import http.client
 import re
@@ -87,12 +92,49 @@ def _default_connection():
     return http.client.HTTPSConnection(policy.HOST, timeout=TIMEOUT, context=ssl.create_default_context())
 
 
+class _BadFraming(Exception):
+    pass
+
+
+def _check_framing(resp, data, status):
+    """Raise unless the response is completely and unambiguously framed. Called inside the dispatch try/except (so it classifies, never leaks)."""
+    if type(data) is not bytes or type(status) is not int:
+        raise _BadFraming()
+    headers = resp.getheaders()
+    if not isinstance(headers, list):
+        raise _BadFraming()
+    named = {}
+    for item in headers:
+        if not (isinstance(item, tuple) and len(item) == 2 and type(item[0]) is str and type(item[1]) is str):
+            raise _BadFraming()
+        named.setdefault(item[0].lower(), []).append(item[1].strip())
+    length, coding, content = named.get("content-length", []), named.get("transfer-encoding", []), named.get("content-encoding", [])
+    if len(length) > 1 or len(coding) > 1 or len(content) > 1 or (length and coding):
+        raise _BadFraming()  # repeated or contradictory framing
+    if coding and coding[0].lower() != "chunked":
+        raise _BadFraming()
+    if content and content[0].lower() != "identity":
+        raise _BadFraming()
+    if length and re.fullmatch(r"[0-9]{1,9}", length[0], re.ASCII) is None:
+        raise _BadFraming()
+    if len(data) > policy.MAX_RESPONSE:
+        return  # size is judged by the policy; a capped body is not "incomplete"
+    if length:
+        if resp.length != 0:
+            raise _BadFraming()  # fewer bytes than Content-Length announced
+    elif coding:
+        if not resp.isclosed():
+            raise _BadFraming()  # the chunked body did not reach its terminating chunk
+
+
 class _Transport:
     """Private. Holds the credentials and the connection factory; the only place that can reach the network."""
-    __slots__ = ("_creds", "_factory", "_sent")
+    __slots__ = ("_creds", "_factory", "_sent", "_allowed", "_bound")
 
     def __init__(self, creds, connection_factory=None):
         self._creds, self._factory, self._sent = creds, connection_factory or _default_connection, 0
+        self._bound = False  # a transport (its credentials and its verified state) belongs to exactly one adapter
+        self._allowed = False  # mutations stay locked until the adapter's verify_account() unlocks them
 
     def _authorization(self):
         token = getattr(self._creds, "token", None)
@@ -109,6 +151,8 @@ class _Transport:
         if body is not None:
             headers["content-type"] = "application/json"
         kind = policy.check_request(method, url, headers, body)  # before anything else; the credential header is never part of this check
+        if kind == "MESSAGE_MODIFY" and not self._allowed:
+            raise AccountNotVerified()
         if self._sent >= policy.MAX_REQUESTS:
             raise Denied("DENIED_BUDGET")
         headers["authorization"] = self._authorization()
@@ -117,6 +161,8 @@ class _Transport:
     def _dispatch(self, method, url, body, headers):
         kind = policy.check_request(method, url, headers, body, allow_authorization=True)  # the check that guards the wire itself (still pre-dispatch)
         mutation = kind == "MESSAGE_MODIFY"
+        if mutation and not self._allowed:
+            raise AccountNotVerified()  # also guards a direct call of _dispatch
         self._sent += 1
         conn = None
         # ---- from here on dispatch may have begun: creating the connection is NOT assumed to be harmless
@@ -126,6 +172,7 @@ class _Transport:
             resp = conn.getresponse()
             data = resp.read(policy.MAX_RESPONSE + 1)
             status = resp.status
+            _check_framing(resp, data, status)
         except (TimeoutError, ssl.SSLError, http.client.HTTPException, OSError) as exc:
             code = "TIMEOUT" if isinstance(exc, TimeoutError) else "NETWORK_ERROR"
             raise (UncertainOutcome(code) if mutation else ReadFailure(code)) from None
@@ -210,10 +257,22 @@ class ArchiveAdapter:
 
     `archive_message` is refused until `verify_account()` succeeded; a later identity/authorization problem locks it again.
     """
-    __slots__ = ("_t", "_expected", "_verified")
+    __slots__ = ("_t", "_expected")
 
     def __init__(self, transport, expected_account):
-        self._t, self._expected, self._verified = transport, expected_account, False
+        if transport._bound:
+            raise ValueError("this transport already belongs to another adapter")  # no cross-account reuse of credentials or verified state
+        transport._bound = True
+        self._t, self._expected = transport, expected_account
+        self._verified = False
+
+    @property
+    def _verified(self):
+        return self._t._allowed
+
+    @_verified.setter
+    def _verified(self, value):
+        self._t._allowed = bool(value)  # the single source of truth lives in the transport that dispatches mutations
 
     def __repr__(self):
         return "<ArchiveAdapter>"

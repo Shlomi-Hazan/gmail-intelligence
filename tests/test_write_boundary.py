@@ -84,6 +84,20 @@ class ImportBoundaryTests(unittest.TestCase):
         self.assertEqual({c for c in self.callers("_write_store")}, {("cli.py", n) for n in (
             "cmd_auth_login_write", "cmd_auth_status_write", "cmd_auth_logout_write", "cmd_auth_revoke_write")})
 
+    def test_project_isolation_is_checked_before_every_operation_that_can_create_or_revoke_a_grant(self):
+        self.assertEqual({c for c in self.callers("verify_isolation") if c[0] == "cli.py"},
+                         {("cli.py", n) for n in ("cmd_auth_login_write", "cmd_auth_revoke_write", "cmd_auth_status_write", "_discard_new_grant")})
+        self.assertEqual({c for c in self.callers("check_project_separation") if c[0] == "cli.py"}, {("cli.py", "cmd_auth_setup_write")})
+        self.assertEqual({c for c in self.callers("write_isolation_record") if c[0] == "cli.py"}, {("cli.py", "cmd_auth_setup_write")})
+        # every network-capable revocation call sits in a function that verified isolation first
+        for fn in ("cmd_auth_revoke_write", "_discard_new_grant"):
+            tree = ast.parse((SRC / "cli.py").read_text())
+            node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == fn)
+            calls = [(c.lineno, c.func.attr) for c in ast.walk(node) if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)]
+            verify = min(l for l, a in calls if a == "verify_isolation")
+            revoke = min(l for l, a in calls if a == "revoke_refresh_token")
+            self.assertLess(verify, revoke, fn)
+
     def test_write_modules_use_only_the_reviewed_imports(self):
         stdlib = set(sys.stdlib_module_names) | {"gmail_intelligence"}
         networking = {"urllib", "socket", "httplib2", "httpx", "subprocess", "googleapiclient"}

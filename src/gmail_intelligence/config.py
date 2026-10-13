@@ -42,6 +42,12 @@ def too_permissive(path):
 
 
 WRITE_CLIENT_FILE = "client_secret_write.json"
+WRITE_SETUP_FILE = "write_setup.json"
+
+
+def write_setup_path():
+    """Non-secret record (fingerprints only) of the owner's attestation that the write client lives in a SEPARATE Google Cloud project."""
+    return app_dir() / WRITE_SETUP_FILE
 
 
 def write_client_secret_path():

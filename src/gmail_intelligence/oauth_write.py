@@ -10,9 +10,17 @@ Isolation rules:
     through the Gmail request policy, and the Gmail transport never refreshes anything;
   * messages never contain tokens, codes or client secrets.
 Deleting the local Keychain item does NOT revoke the remote Google grant; revocation is a separate, explicit network call.
+
+Revocation is project-wide at Google (its documentation says revocation removes all scopes previously granted to the project), so the
+write client must belong to a SEPARATE Google Cloud project from the read-only client. That is enforced fail-closed before any operation
+that could create or revoke a write grant: both client ids must be in the recognized format, must not be equal nor share a project number,
+and the owner's explicit attestation (recorded at `auth setup-write`, bound to fingerprints of both client files) must still match.
+A different project number is NECESSARY evidence of a separate project, not proof, and the attestation is the owner's word, not Google's.
 """
 import hashlib
 import json
+import os
+import re
 from datetime import datetime, timedelta, timezone
 
 from gmail_intelligence.oauth import AuthError, load_client_config
@@ -56,6 +64,93 @@ class LoginRejected(AuthError):
         self.issued = issued
 
 
+_TOKEN_VALUE = r"[A-Za-z0-9._~+/=-]{8,4096}"
+_CLIENT_ID = r"([0-9]{6,20})-[a-z0-9]{8,64}\.apps\.googleusercontent\.com"
+
+
+def _token_or_none(value):
+    return value if type(value) is str and re.fullmatch(_TOKEN_VALUE, value, re.ASCII) else None
+
+
+def _issued_from_mapping(mapping):
+    """Validated token handle from an OAuth token mapping. Anything that is not a plain mapping of well-formed strings yields nothing."""
+    if not isinstance(mapping, dict):
+        return IssuedToken()
+    return IssuedToken(_token_or_none(mapping.get("refresh_token")), _token_or_none(mapping.get("access_token")))
+
+
+def _issued_from_scope_warning(exc, flow):
+    """Token handle for the grant behind oauthlib's scope-change Warning.
+
+    The installed oauthlib raises `Warning` (exact type) with the parsed token response on the exception (`token`, plus `old_scope`/`new_scope`)
+    BEFORE the session stores it, so `flow.oauth2session.token` is empty then. The exception attribute is used only for that exact shape and
+    only after validation; the session token is a validated fallback. Nothing from the exception is ever printed or logged.
+    """
+    if type(exc) is Warning and hasattr(exc, "old_scope") and hasattr(exc, "new_scope"):
+        issued = _issued_from_mapping(getattr(exc, "token", None))
+        if issued.refresh_token or issued.token:
+            return issued
+    return _issued_from_mapping(getattr(getattr(flow, "oauth2session", None), "token", None))
+
+
+def project_number(client_id):
+    """Project-number component of a Google OAuth client id, or None unless the id has exactly the recognized form NUMBER-RANDOM.apps.googleusercontent.com."""
+    m = re.fullmatch(_CLIENT_ID, client_id, re.ASCII) if type(client_id) is str else None
+    return m.group(1) if m else None
+
+
+def _fp(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def check_project_separation(write_config, read_config):
+    """Fail closed unless the two clients are recognizably in different projects. Never echoes an id or secret."""
+    wid, rid = write_config["installed"]["client_id"], read_config["installed"]["client_id"]
+    wn, rn = project_number(wid), project_number(rid)
+    if wn is None or rn is None:
+        raise AuthError("a client id is not in the recognized Google format, so project separation cannot be verified; refusing (fail closed)")
+    if wid == rid:
+        raise AuthError("the write authorization needs a different OAuth client than the read-only one")
+    if wn == rn:
+        raise AuthError("the write client belongs to the same Google Cloud project as the read-only client; revocation is project-wide at Google, "
+                        "so create the write client in a SEPARATE project")
+
+
+def isolation_record(write_config, read_config):
+    """What the owner attested at setup, as fingerprints only (no client id, secret or project number is stored)."""
+    return {"schema": 1, "attested_separate_project": True, "write_client_fp": client_fingerprint(write_config),
+            "write_project_fp": _fp(project_number(write_config["installed"]["client_id"])),
+            "read_client_fp": client_fingerprint(read_config), "read_project_fp": _fp(project_number(read_config["installed"]["client_id"]))}
+
+
+def write_isolation_record(path, write_config, read_config):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(isolation_record(write_config, read_config), fh, sort_keys=True)
+    os.chmod(path, 0o600)
+
+
+def verify_isolation(write_client_path, read_client_path, setup_path):
+    """Run before ANY operation that could create or revoke a write grant (login, revoke, rejected-login cleanup). Local files only.
+
+    Fails closed when the read-only client file is missing or unreadable, an id is unrecognized, the clients are equal or share a project number,
+    or the attestation recorded at `auth setup-write` is missing or no longer matches BOTH client files (changed since setup).
+    """
+    write = load_write_client_config(write_client_path)
+    try:
+        read = load_client_config(read_client_path)
+    except AuthError:
+        raise AuthError("the read-only OAuth client file is missing or invalid, so project separation cannot be verified; refusing (fail closed)") from None
+    check_project_separation(write, read)
+    try:
+        with open(setup_path, encoding="utf-8") as fh:
+            recorded = json.load(fh)
+    except (OSError, ValueError):
+        raise AuthError("project separation was never attested; run `auth setup-write --import FILE --confirm-separate-project`") from None
+    if recorded != isolation_record(write, read):
+        raise AuthError("a client file changed since `auth setup-write`; run it again to re-attest the separate project")
+
+
 def client_fingerprint(client_config):
     return hashlib.sha256(client_config["installed"]["client_id"].encode("utf-8")).hexdigest()
 
@@ -95,11 +190,8 @@ def run_login_write(client_path, flow_factory=None, open_browser=True, timeout_s
             access_type="offline", prompt="consent",  # no include_granted_scopes: never accumulate scopes
             authorization_prompt_message="If the browser does not open, visit:\n{url}\n",
             success_message="Authorization received. You can close this tab and return to the terminal.")
-    except Warning:  # oauthlib raises this AFTER the token was issued: salvage the handle so the unwanted grant can be revoked
-        tok = getattr(getattr(flow, "oauth2session", None), "token", None)
-        tok = tok if isinstance(tok, dict) else {}
-        raise LoginRejected("Google returned different scopes than requested; refusing credentials",
-                            IssuedToken(tok.get("refresh_token"), tok.get("access_token"))) from None
+    except Warning as warning:  # oauthlib raises this AFTER Google issued the token: recover the handle so the unwanted grant can be revoked
+        raise LoginRejected("Google returned different scopes than requested; refusing credentials", _issued_from_scope_warning(warning, flow)) from None
     except Exception as exc:
         code = getattr(exc, "error", None)
         if code == "access_denied":
@@ -111,7 +203,7 @@ def run_login_write(client_path, flow_factory=None, open_browser=True, timeout_s
     granted = token.get("scope") or getattr(creds, "granted_scopes", None) or creds.scopes
     if isinstance(granted, str):
         granted = granted.split()
-    issued = IssuedToken(getattr(creds, "refresh_token", None), getattr(creds, "token", None))
+    issued = IssuedToken(_token_or_none(getattr(creds, "refresh_token", None)), _token_or_none(getattr(creds, "token", None)))
     try:
         check_granted_write_scopes(granted)
     except AuthError as exc:
@@ -264,12 +356,13 @@ def _strict_object(data):
 
 
 def revoke_refresh_token(token, request=None):
-    """Revoke ONE token at Google (explicit commands only). Returns "REVOKED" or "ALREADY_INVALID"; anything else raises AuthError.
+    """Revoke ONE token at Google (explicit commands only). Returns "REVOKED" only for an HTTP 200; everything else raises AuthError.
 
-    Contract used (Google's documented revocation endpoint; NOT verified against Google here): HTTP 200 means revoked, and HTTP 400 whose JSON
-    body is exactly an `invalid_token` error means the token was already invalid or revoked. Every other status (including other 400
-    errors such as invalid_request / invalid_client, redirects, 5xx), any unreadable body and any transport failure is NOT a confirmation.
-    The caller must then keep the local credential.
+    Google's documentation says a successfully processed revocation answers HTTP 200 and that error conditions answer HTTP 400 "along with an
+    error code". It does not document which codes exist, so NO 400 is treated as a confirmation - not even an `invalid_token` body, which only
+    suggests the token may already be invalid or revoked (that suggestion is reported, but the local credential is kept). Redirects, other
+    statuses, unreadable bodies and transport failures are not confirmations either. Revocation is project-wide at Google (it removes all scopes
+    previously granted to the project), which is why a separate project is enforced.
     """
     if not isinstance(token, str) or not token:
         raise AuthError("no token to revoke")
@@ -290,6 +383,7 @@ def revoke_refresh_token(token, request=None):
     if type(status) is int and status == 400:
         body = _strict_object(data)
         if body is not None and body.get("error") == "invalid_token":
-            return "ALREADY_INVALID"
-        raise AuthError("revocation was rejected (HTTP 400, not an invalid-token answer); nothing is confirmed, the local token was kept")
+            raise AuthError("Google answered HTTP 400 with an invalid-token error: the token may already be invalid or revoked, but that is not a documented "
+                            "confirmation; the local token was kept (remove it locally with `auth logout-write` if you accept that)")
+        raise AuthError("revocation was rejected (HTTP 400); nothing is confirmed, the local token was kept")
     raise AuthError(f"revocation was not confirmed ({'HTTP ' + str(status) if type(status) is int else 'unreadable answer'}); the local token was kept")

@@ -48,11 +48,19 @@ class FakeConn:
         status, body = self.item
 
         class R:
+            length = 0  # a fully delivered, Content-Length framed body
+
             def __init__(s):
                 s.status = status
 
             def read(s, n=-1):
                 return body if n < 0 else body[:n]
+
+            def getheaders(s):
+                return [("Content-Length", str(len(body)))] if len(body) <= 999_999 else []
+
+            def isclosed(s):
+                return True
         return R()
 
     def close(self):
@@ -416,7 +424,7 @@ class TransportTests(Base):
         self.assertEqual(public, {"verify_account", "message_state", "thread_state", "archive_message"})
         a = adapter(Net())
         self.assertFalse(hasattr(a, "__dict__"))
-        self.assertEqual(gw.ArchiveAdapter.__slots__, ("_t", "_expected", "_verified"))
+        self.assertEqual(gw.ArchiveAdapter.__slots__, ("_t", "_expected"))
         for banned in ("service", "http", "creds", "credentials", "token", "request", "execute", "users", "messages", "modify", "trash", "send", "batch_modify", "transport"):
             self.assertFalse(hasattr(a, banned), banned)
         for bad_class in (gw.MessageState, gw.ArchiveResult):
@@ -466,7 +474,7 @@ class BrokenConn:
             raise self.exc
 
         class R:
-            status = 200
+            status, length = 200, 0
 
             def __init__(s, step, exc):
                 s.step, s.exc = step, exc
@@ -475,14 +483,22 @@ class BrokenConn:
                 if s.step == "read":
                     raise s.exc
                 return b"{}"
+
+            def getheaders(s):
+                return [("Content-Length", "2")]
         if self.step == "status":
             class Bad:
+                length = 0
+
                 @property
                 def status(s):
                     raise self.exc
 
                 def read(s, n=-1):
                     return b"{}"
+
+                def getheaders(s):
+                    return []
             return Bad()
         return R(self.step, self.exc)
 
@@ -611,6 +627,215 @@ class AccountGateTests(Base):
         a = adapter(Net(ok(emailAddress=" " + ACCOUNT.upper() + " ")), verified=False)
         a.verify_account()  # case and surrounding whitespace do not matter, nothing else does
 
+    def test_internal_paths_cannot_bypass_the_verification_gate(self):
+        url = MODIFY
+        for label, call in (("private _call", lambda a: a._call("POST", url, pol.MODIFY_BODY)), ("transport.perform", lambda a: a._t.perform("POST", url, pol.MODIFY_BODY)),
+                            ("transport._dispatch", lambda a: a._t._dispatch("POST", url, pol.MODIFY_BODY, {"authorization": "Bearer " + A_TOK, "accept": "application/json", "content-type": "application/json"}))):
+            net = Net(ok(id=MID, threadId=TID, labelIds=[]))
+            a = adapter(net, verified=False)
+            with self.assertRaises(gw.AccountNotVerified, msg=label):
+                call(a)
+            self.assertEqual((net.opened, net.log), (0, []), label)  # refused before any connection exists
+        # reads are not gated, and the allowlist still applies to everything
+        net = Net(ok(id=MID, threadId=TID, labelIds=[]))
+        a = adapter(net, verified=False)
+        self.assertEqual(a.message_state(MID).label_ids, ())
+        net = Net(ok(emailAddress=ACCOUNT), ok(id=MID, threadId=TID, labelIds=[]))
+        a = adapter(net, verified=False)
+        a.verify_account()
+        self.assertTrue(a._call("POST", MODIFY, pol.MODIFY_BODY))  # after verification the private path works - and is still allowlisted
+        for url2, body in ((f"{B}/messages/{MID}/trash", b"{}"), (MODIFY, b'{"addLabelIds":["TRASH"]}')):
+            with self.assertRaises(pol.Denied):
+                a._call("POST", url2, body)
+
+    def test_the_gate_state_lives_in_the_transport_and_a_transport_serves_one_adapter(self):
+        net = Net(ok(emailAddress=ACCOUNT), ok(id=MID, threadId=TID, labelIds=[]))
+        a = adapter(net, verified=False)
+        a.verify_account()
+        self.assertTrue(a._t._allowed)
+        with self.assertRaises(ValueError):  # a second adapter (another expected account) cannot ride on a verified transport
+            gw.ArchiveAdapter(a._t, ACCOUNT_OTHER)
+        b = adapter(Net(), verified=False, expected=ACCOUNT_OTHER)  # its own transport: starts locked
+        with self.assertRaises(gw.AccountNotVerified):
+            b.archive_message(MID)
+        a._verified = False
+        with self.assertRaises(gw.AccountNotVerified):
+            a._t.perform("POST", MODIFY, pol.MODIFY_BODY)
+
+
+class WireSock:
+    """Fake socket under the REAL http.client: records the bytes written and replays a canned response."""
+    def __init__(self, response=b"", fail_send=None):
+        import io
+
+        class Reader(io.BytesIO):
+            def close(self):  # the HTTPResponse closes its file object; keep the synthetic bytes inspectable and silent
+                pass
+        self.sent, self.closed, self.fail_send, self.resp = b"", False, fail_send, Reader(response)
+
+    def sendall(self, data):
+        if self.fail_send:
+            raise self.fail_send
+        self.sent += data
+
+    def makefile(self, mode="r", bufsize=None):
+        return self.resp
+
+    def close(self):
+        self.closed = True
+
+    def settimeout(self, value):
+        pass
+
+
+def wire(status_line, headers, body):
+    return status_line + b"\r\n" + b"".join(h + b"\r\n" for h in headers) + b"\r\n" + body
+
+
+def framed(body, *headers, status=b"HTTP/1.1 200 OK"):
+    return wire(status, [b"Content-Length: %d" % len(body), *headers], body)
+
+
+GOOD = json.dumps({"id": MID, "threadId": TID, "labelIds": ["Label_9"]}).encode()
+GOOD_STATE = json.dumps({"id": MID, "threadId": TID, "labelIds": ["INBOX"]}).encode()
+
+
+class HttpFramingTests(Base):
+    """The lowest-level reader, exercised with the real http.client over fake sockets."""
+
+    def run_case(self, raw, op):
+        sock = WireSock(raw)
+        box = {"opened": 0}
+
+        def factory():
+            box["opened"] += 1
+            c = http.client.HTTPSConnection(pol.HOST, timeout=30, context=ssl.create_default_context())
+            c.sock = sock
+            return c
+        a = adapter(Net())
+        a._t._factory = factory
+        try:
+            result = op(a)
+            error = None
+        except Exception as exc:  # noqa: BLE001
+            result, error = None, exc
+        self.assertEqual(box["opened"], 1, "exactly one connection, no retry")
+        self.assertTrue(sock.closed, "the connection is closed on every path")
+        self.assertLessEqual(sock.sent.count(b"POST "), 1)
+        return result, error
+
+    archive = staticmethod(lambda a: a.archive_message(MID))
+    read = staticmethod(lambda a: a.message_state(MID))
+
+    def test_well_framed_responses_are_accepted(self):
+        for label, raw in (("content-length", framed(GOOD)), ("chunked", wire(b"HTTP/1.1 200 OK", [b"Transfer-Encoding: chunked"], b"%x\r\n" % len(GOOD) + GOOD + b"\r\n0\r\n\r\n")),
+                           ("close-delimited", wire(b"HTTP/1.1 200 OK", [b"Connection: close"], GOOD)), ("identity coding", framed(GOOD, b"Content-Encoding: identity")),
+                           ("extra bytes after the announced length", framed(GOOD) + b"EXTRA")):
+            result, error = self.run_case(raw, self.archive)
+            self.assertIsNone(error, label)
+            self.assertEqual(result.label_ids, ("Label_9",), label)
+
+    def bad_framing(self):
+        long_body = json.dumps({"id": MID, "threadId": TID, "labelIds": []}).encode()
+        chunk = lambda b: b"%x\r\n" % len(b) + b + b"\r\n0\r\n\r\n"  # noqa: E731
+        return (("short body", wire(b"HTTP/1.1 200 OK", [b"Content-Length: %d" % (len(GOOD) + 400)], GOOD)),
+                ("empty body for a positive length", wire(b"HTTP/1.1 200 OK", [b"Content-Length: 60"], b"")),
+                ("truncated chunk", wire(b"HTTP/1.1 200 OK", [b"Transfer-Encoding: chunked"], b"%x\r\n" % len(GOOD) + GOOD[:10])),
+                ("missing terminating chunk", wire(b"HTTP/1.1 200 OK", [b"Transfer-Encoding: chunked"], b"%x\r\n" % len(GOOD) + GOOD + b"\r\n")),
+                ("bad chunk size", wire(b"HTTP/1.1 200 OK", [b"Transfer-Encoding: chunked"], b"zz\r\n" + GOOD + b"\r\n0\r\n\r\n")),
+                ("length and chunked together", wire(b"HTTP/1.1 200 OK", [b"Content-Length: %d" % len(GOOD), b"Transfer-Encoding: chunked"], chunk(GOOD))),
+                ("two identical lengths", wire(b"HTTP/1.1 200 OK", [b"Content-Length: %d" % len(GOOD), b"Content-Length: %d" % len(GOOD)], GOOD)),
+                ("two different lengths", wire(b"HTTP/1.1 200 OK", [b"Content-Length: 5", b"Content-Length: %d" % len(GOOD)], GOOD)),
+                ("non numeric length", wire(b"HTTP/1.1 200 OK", [b"Content-Length: abc"], GOOD)),
+                ("signed length", wire(b"HTTP/1.1 200 OK", [b"Content-Length: +%d" % len(GOOD)], GOOD)),
+                ("negative length", wire(b"HTTP/1.1 200 OK", [b"Content-Length: -1"], GOOD)),
+                ("gzip transfer coding", wire(b"HTTP/1.1 200 OK", [b"Transfer-Encoding: gzip"], GOOD)),
+                ("chunked plus gzip", wire(b"HTTP/1.1 200 OK", [b"Transfer-Encoding: chunked, gzip"], chunk(GOOD))),
+                ("two transfer codings", wire(b"HTTP/1.1 200 OK", [b"Transfer-Encoding: chunked", b"Transfer-Encoding: chunked"], chunk(GOOD))),
+                ("gzip content coding", framed(GOOD, b"Content-Encoding: gzip")),
+                ("two content codings", framed(GOOD, b"Content-Encoding: identity", b"Content-Encoding: identity")),
+                ("garbage status line", b"garbage\r\n\r\n"), ("empty answer", b""), ("html body", framed(b"<html>")),
+                ("redirect", wire(b"HTTP/1.1 307 Temporary Redirect", [b"Location: https://evil.invalid/", b"Content-Length: 0"], b"")),
+                ("oversized declared and delivered", wire(b"HTTP/1.1 200 OK", [b"Content-Length: %d" % (pol.MAX_RESPONSE + 50)], b"x" * (pol.MAX_RESPONSE + 50))),
+                ("oversized announced, short delivered", wire(b"HTTP/1.1 200 OK", [b"Content-Length: %d" % (pol.MAX_RESPONSE + 50)], b"x" * 10)),
+                ("valid json different id", framed(long_body.replace(MID.encode(), b"18c0ffee0000ffff"))))
+
+    def test_ambiguous_framing_of_the_mutation_response_is_uncertain_never_success(self):
+        for label, raw in self.bad_framing():
+            result, error = self.run_case(raw, self.archive)
+            self.assertIsNone(result, label)
+            self.assertIsInstance(error, gw.UncertainOutcome, label)
+            self.assertIn(error.code, set(cleanup_exec.OUTCOME_CODES["UNKNOWN"]), label)
+            for private in (A_TOK, MID, TID, "googleapis"):
+                self.assertNotIn(private, str(error) + repr(error), label)
+
+    def test_ambiguous_framing_of_a_read_is_a_safe_read_error(self):
+        for label, raw in self.bad_framing():
+            if label in ("valid json different id", "redirect", "oversized declared and delivered"):
+                continue  # id mismatch / policy refusals (Denied) are asserted separately below
+            raw = raw.replace(GOOD, GOOD_STATE) if GOOD in raw else raw
+            result, error = self.run_case(raw, self.read)
+            self.assertIsNone(result, label)
+            self.assertIsInstance(error, gw.ReadFailure, label)
+        result, error = self.run_case(wire(b"HTTP/1.1 302 Found", [b"Location: https://evil.invalid/", b"Content-Length: 0"], b""), self.read)
+        self.assertIsInstance(error, pol.Denied)
+        self.assertEqual(error.code, "DENIED_REDIRECT")
+
+    def test_a_well_framed_read_is_accepted_and_the_wire_request_is_exactly_one_get(self):
+        sock = WireSock(framed(GOOD_STATE))
+        a = adapter(Net())
+        a._t._factory = lambda: _preset(sock)
+        st = a.message_state(MID)
+        self.assertEqual(st.label_ids, ("INBOX",))
+        line = sock.sent.split(b"\r\n")[0]
+        self.assertEqual(line, b"GET /gmail/v1/users/me/messages/%s?format=minimal&fields=id,threadId,labelIds HTTP/1.1" % MID.encode())
+        self.assertNotIn(b"Transfer-Encoding", sock.sent)
+
+    def test_non_bytes_bodies_never_escape_as_raw_errors(self):
+        for body in (None, "str", [1], 5, bytearray(b"{}"), object()):
+            class Resp:
+                status, length = 200, 0
+
+                def read(self, n=-1, body=body):
+                    return body
+
+                def getheaders(self):
+                    return []
+
+                def isclosed(self):
+                    return True
+
+            class Conn:
+                def request(self, *a, **k):
+                    pass
+
+                def getresponse(self):
+                    return Resp()
+
+                def close(self):
+                    pass
+            for op, cls in ((self.archive, gw.UncertainOutcome), (self.read, gw.ReadFailure)):
+                a = adapter(Net())
+                a._t._factory = Conn
+                with self.assertRaises(cls, msg=type(body)):
+                    op(a)
+
+    def test_a_failure_while_transmitting_the_request_is_uncertain_for_the_mutation(self):
+        sock = WireSock(fail_send=BrokenPipeError())
+        a = adapter(Net())
+        a._t._factory = lambda: _preset(sock)
+        with self.assertRaises(gw.UncertainOutcome) as ctx:
+            a.archive_message(MID)
+        self.assertEqual(ctx.exception.code, "NETWORK_ERROR")
+        self.assertTrue(sock.closed)
+
+
+def _preset(sock):
+    c = http.client.HTTPSConnection(pol.HOST, timeout=30, context=ssl.create_default_context())
+    c.sock = sock
+    return c
+
+
 class OpenAdapterTests(WBase):
     def setUp(self):
         super().setUp()
@@ -633,7 +858,7 @@ class OpenAdapterTests(WBase):
         self.write_blob()
         with self.assertRaises(gw.AccountMismatch):
             gw.open_archive_adapter(ACCOUNT_OTHER, self.wstore, self.path)
-        other = self.write_client_file(client_id="2-other.apps.googleusercontent.com")
+        other = self.write_client_file(client_id="400000000004-othersynth03.apps.googleusercontent.com")
         with self.assertRaisesRegex(oauth.AuthError, "different OAuth client"):
             gw.open_archive_adapter(ACCOUNT, self.wstore, other)
         self.wstore.delete()

@@ -41,7 +41,7 @@ def utcnow():
 
 
 def client_config(kind="installed"):
-    return {kind: {"client_id": "123-abc.apps.googleusercontent.com", SECRET_KEY: C_SEC,
+    return {kind: {"client_id": "100000000001-readsynth01.apps.googleusercontent.com", SECRET_KEY: C_SEC,
                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                    "token_uri": "https://oauth2.googleapis.com/token"}}
 
