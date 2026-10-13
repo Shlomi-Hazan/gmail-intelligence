@@ -765,6 +765,41 @@ def cmd_cleanup_audit_log(args):
     return _plan_cmd(args, go)
 
 
+# ---- local execution records (M4C-A): dry run and read-only listings; NO Gmail, no reservation, no execution ----
+def cmd_cleanup_execute(args):
+    from gmail_intelligence import cleanup_exec, cleanup_exec_report
+    from gmail_intelligence import cleanup_plans as cp
+
+    def go(index, account):
+        if not args.dry_run:
+            return _fail("execution is not available in this version; only `--dry-run` exists (it writes nothing and consumes no approval)")
+        try:
+            print(cleanup_exec_report.dry_run_text(cleanup_exec.dry_run(index, account, args.plan_id)))
+        except cp.PlanError as exc:
+            return _fail(exc)
+        return 0
+    return _with_index(args, go)
+
+
+def cmd_cleanup_exec_list(args):
+    from gmail_intelligence import cleanup_exec, cleanup_exec_report
+    return _with_index(args, lambda i, a: print(cleanup_exec_report.list_text(cleanup_exec.list_executions(i, a))) or 0)
+
+
+def cmd_cleanup_exec_show(args):
+    from gmail_intelligence import cleanup_exec, cleanup_exec_report
+    from gmail_intelligence import cleanup_plans as cp
+
+    def go(index, account):
+        try:
+            ex = cleanup_exec.get_execution(index, account, args.exec_id)
+        except cp.PlanError as exc:
+            return _fail(exc)
+        print(cleanup_exec_report.show_text(index, account, ex, args.show_ids))
+        return 0
+    return _with_index(args, go)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="gmail-intelligence",
@@ -878,7 +913,7 @@ def build_parser():
     aisub = ai_p.add_subparsers(dest="ai_command", required=True, metavar="{status}")
     aisub.add_parser("status", help="show local-AI configuration; contacts nothing").set_defaults(func=cmd_classify_ai_status)
     cu = sub.add_parser("cleanup", help="safe-cleanup candidate preview and protection rules (M4A; local, read-only)")
-    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,protect,plan,approve,approval,audit}")
+    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,protect,plan,approve,approval,audit,execute,exec}")
     q = account_opt(cusub.add_parser("candidates", help="preview archive recommendations; changes NOTHING, contacts nothing"))
     q.add_argument("--review", action="store_true", help="show the informational REVIEW_REQUIRED view instead")
     q.add_argument("--limit", type=int, default=20, metavar="N", help="example rows to list (default 20; 0 = none)")
@@ -948,6 +983,17 @@ def build_parser():
     q.add_argument("--plan", metavar="PLAN_ID")
     q.add_argument("--limit", type=int, default=50, metavar="N")
     q.set_defaults(func=cmd_cleanup_audit_log)
+    q = account_opt(cusub.add_parser("execute", help="dry run only (M4C-A): shows what a future execution would check; writes nothing"))
+    q.add_argument("plan_id")
+    q.add_argument("--dry-run", action="store_true", help="required: execution itself does not exist in this version")
+    q.set_defaults(func=cmd_cleanup_execute)
+    ex = cusub.add_parser("exec", help="inspect local execution records (read-only)")
+    exsub = ex.add_subparsers(dest="exec_command", required=True, metavar="{list,show}")
+    account_opt(exsub.add_parser("list", help="list execution records")).set_defaults(func=cmd_cleanup_exec_list)
+    q = account_opt(exsub.add_parser("show", help="state, slices and item counts of one execution"))
+    q.add_argument("exec_id")
+    q.add_argument("--show-ids", action="store_true", help="also list message ids and item states")
+    q.set_defaults(func=cmd_cleanup_exec_show)
     return parser
 
 
