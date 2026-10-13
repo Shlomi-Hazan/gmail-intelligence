@@ -177,7 +177,7 @@ longer be cancelled, revised or expired.
 | Item | `PENDING` -> `INTENT` -> `APPLIED` / `NOT_APPLIED` / `UNKNOWN`; `PENDING` -> `SKIPPED_DRIFT` / `SKIPPED_GONE` / `NOT_APPLIED`; `UNKNOWN` -> `APPLIED` / `NOT_APPLIED` / `CONFLICT` (reconciliation only) |
 
 Terminal execution states and what they mean (all enforced by triggers, so a contradictory final state cannot be written):
-`EXECUTED` = no open, unsuccessful or unknown items and at least one **verified** `APPLIED` item; `PARTIAL` = some applied and some
+`EXECUTED` = no open, unsuccessful or unknown items and at least one `APPLIED` item, every `APPLIED` item having `evidence_checked`; `PARTIAL` = some applied and some
 `NOT_APPLIED`/`CONFLICT`, nothing open, nothing left to continue; `FAILED` = nothing applied (also when every target was skipped);
 `ABORTED` = the owner abandoned an execution that had not finished. A terminal `PARTIAL` can never be aborted, continued or
 re-labelled, and it does not occupy the account. `AWAITING_CONTINUATION` exists only while a later slice is still `PENDING`.
@@ -185,7 +185,7 @@ re-labelled, and it does not occupy the account. `AWAITING_CONTINUATION` exists 
 **Reason codes are a closed vocabulary** (validated before any state changes, also a database `CHECK`; free text, e-mail-like
 strings and exception messages are never stored): `NEVER_ATTEMPTED` (execution stopped/aborted before the message was touched),
 `REJECTED` (Gmail rejected the attempt; known and unmodified), `RECONCILED_UNMODIFIED` (observed equal to its state before the
-attempt; this does **not** prove that no write occurred), `RECONCILED_APPLIED`, `RECONCILED_CONFLICT`, `INTERRUPTED` and
+attempt; this does **not** prove that no write occurred), `RECONCILED_OBSERVED_ARCHIVED` (observed in the expected archived state; **not** attributed to this executor), `RECONCILED_CONFLICT`, `INTERRUPTED` and
 `AMBIGUOUS_RESULT`/`TIMEOUT`/`SERVER_ERROR`/`NETWORK_ERROR` (uncertain write), `OVERLAP_ALREADY_APPLIED`, and skip reasons
 (`LABELS_CHANGED`, `STATE_CHANGED`, `THREAD_CHANGED`, `NOT_IN_INBOX`, `NOT_FOUND`). `exec show` lists the counts per state and reason
 without message ids.
@@ -197,12 +197,44 @@ SHA-256 is stored. Callers cannot choose a token; renewals and every item transi
 refused if the local clock is more than 5 minutes earlier than the last recorded event. A local wall clock alone cannot guarantee real
 elapsed time against someone who deliberately manipulates it.
 
-**No unverifiable "success".** `APPLIED` requires structured `Evidence` of a live read whose labels equal the previous labels minus
-`INBOX`; callers cannot assert `verified`. `reconcile_item` derives the outcome from such evidence (observed archived state ->
-`APPLIED`, observed previous state -> `NOT_APPLIED`/`RECONCILED_UNMODIFIED`, anything else -> `CONFLICT`). The library checks the evidence
-for consistency with the recorded intent but cannot authenticate it: **local metadata alone cannot prove that a Gmail mutation
-occurred.** M4C-A has no Gmail client, so production code cannot produce real evidence; the future M4C-C adapter must satisfy this
-contract with a real read, and tests construct evidence explicitly.
+**No unverifiable "success"; four things stay distinct.** (1) *Evidence structure accepted*: the library validated the shape of a caller-supplied
+`Evidence` (kind `LABEL_OBSERVATION`, message id, labels, `observed_at`, `source`). (2) *Desired Gmail state observed*: the labels equal the previous labels
+minus `INBOX` (`APPLIED`, code `APPLIED`; or on reconciliation `RECONCILED_OBSERVED_ARCHIVED`); an observation equal to the previous labels gives
+`NOT_APPLIED`/`RECONCILED_UNMODIFIED` and anything else `CONFLICT`. (3) *Response from a trusted Gmail adapter*: **not established in M4C-A**. The only
+accepted `evidence_source` is `CALLER_SUPPLIED`; `TRUSTED_ADAPTER` is reserved in the schema for the future M4C-C read-only adapter and is rejected today, so a
+caller cannot claim it. (4) *Mutation attributed to our executor*: **never established**; another client or the owner may have archived the message, so
+`APPLIED` means "recorded with evidence-consistent archived state", not proof of who changed it. The column is named `evidence_checked` (not "verified") and is stored
+with `evidence_source` and `evidence_observed_at`. Callers cannot assert an outcome; `reconcile_item` derives it. **Local metadata alone cannot prove that a Gmail
+mutation occurred.** M4C-A has no Gmail client; tests construct evidence explicitly. Known limit: a message whose only label was `INBOX` has an empty expected
+label set, which the evidence contract cannot express (empty observations are rejected), so it can only stay `UNKNOWN` (fail closed) until a later adapter defines it.
+
+**Strict evidence chronology.** Intent, result and evidence times are stored with microsecond resolution as UTC in one fixed format
+(`YYYY-MM-DDTHH:MM:SS.ffffffZ`; a database `CHECK` enforces the format, so string order is chronological order). Evidence must satisfy
+`observed_at >= intent_at` with **no** tolerance (not even one microsecond earlier), and for an `UNKNOWN` item also `observed_at >=` the recorded UNKNOWN
+transition; the upper bound is the existing clock policy (at most 5 minutes after "now"). Evidence timestamps need an explicit zone (`Z` or `+-HH:MM`, normalised
+to UTC; naive, lower-case, free-form or out-of-range values are refused). Invalid evidence changes nothing (item, execution, approval and audit rows stay
+identical). A database trigger repeats the ordering check for direct SQL.
+
+**Evidence is immutable once accepted.** Triggers refuse any change that sets `evidence_checked` back to 0 or alters the stored source or observation time,
+and `APPLIED` cannot exist without checked evidence (table `CHECK`). Direct SQL by someone who can edit the file remains outside the guarantee (see M4B limits).
+
+**ARCHIVE needs `INBOX`.** `record_intent` refuses previous labels without `INBOX` before anything is stored, and the schema repeats it (a `CHECK` on
+`prev_label_ids` and the intent trigger). Other labels, including private user labels, are preserved exactly as recorded (sorted JSON array).
+
+**Cross-row invariant "EXECUTING has exactly one ACTIVE slice (and a lease)".** SQLite triggers fire per statement, so this cannot be enforced as a plain trigger without
+breaking the fixed items -> slices -> execution order. It is enforced where it can be: a trigger refuses `EXECUTING` without exactly one `ACTIVE` slice (so `start_slice`
+activates the slice first), a partial unique index allows one `ACTIVE` slice per execution, and the library verifies the whole invariant (`invariant_problems`) before
+every commit of `start_slice`, `end_slice`, `stop_execution`, `recover_interrupted`, `abort_execution` and before every executor operation, failing with
+`INVARIANT_BROKEN`. **Residual limitation:** direct SQL that deactivates the slice under a running execution is not blocked by the database; it is detected on
+the next library operation, which then refuses to proceed (recovery via `recover_interrupted` still works).
+
+**Fail-closed continuation.** An ordinary continuation to the next slice is allowed only if every `COMPLETED` slice contains at least one `APPLIED` item and the
+execution has no `NOT_APPLIED` (rejected), `CONFLICT`, `UNKNOWN` or `INTENT` item. Safe skips (`SKIPPED_DRIFT`, `SKIPPED_GONE`, overlap pre-skips) never block by
+themselves, but a slice made only of skips applied nothing and blocks. `end_slice` therefore finishes the execution instead of awaiting continuation when
+the rule is violated: remaining items become `NOT_APPLIED`/`NEVER_ATTEMPTED`, remaining slices `STOPPED`, and the state is `FAILED` (nothing applied) or `PARTIAL`
+(never `EXECUTED`). `confirm_slice` re-checks the rule (`CONTINUATION_BLOCKED`) and a trigger refuses `AWAITING_CONTINUATION` in these cases. This is a policy
+for the state machine; the live circuit breaker (thresholds, rates, auth problems) belongs to the future executor and is not built here. Continuing after such a stop
+needs a new plan, a new approval and a new execution.
 
 **Approval consumption and reservation (one short transaction).** `reserve_execution` verifies the plan (`verify_approved`),
 checks the execution confirmation, refuses if the account already has a non-final execution, refuses overlap with unresolved work

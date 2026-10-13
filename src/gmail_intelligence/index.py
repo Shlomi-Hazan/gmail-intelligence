@@ -136,10 +136,11 @@ BEGIN SELECT RAISE(ABORT, 'the audit log is append-only'); END;
 # freeze the target set, lock the plan once an execution exists, and refuse contradictory terminal states (for example EXECUTED while
 # items are still open, or an APPLIED item without verification and recovery metadata). Code writes related rows in a fixed safe
 # order: items first, then slices, then the execution. Triggers guard against bugs, not against someone who can write the file.
-EXEC_ITEM_CODES = ("NEVER_ATTEMPTED", "REJECTED", "RECONCILED_UNMODIFIED", "RECONCILED_APPLIED", "RECONCILED_CONFLICT", "INTERRUPTED",
+EXEC_ITEM_CODES = ("NEVER_ATTEMPTED", "REJECTED", "RECONCILED_UNMODIFIED", "RECONCILED_OBSERVED_ARCHIVED", "RECONCILED_CONFLICT", "INTERRUPTED",
                    "OVERLAP_ALREADY_APPLIED", "APPLIED", "TIMEOUT", "SERVER_ERROR", "NETWORK_ERROR", "AMBIGUOUS_RESULT",
                    "LABELS_CHANGED", "STATE_CHANGED", "THREAD_CHANGED", "NOT_IN_INBOX", "NOT_FOUND")
 _CODES_SQL = ",".join(f"'{c}'" for c in EXEC_ITEM_CODES)
+_TS_GLOB = "'[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'"
 _OPEN = "('PENDING','INTENT','UNKNOWN')"
 _TERMINAL = "('EXECUTED','PARTIAL','FAILED','ABORTED')"
 SCHEMA_V5 = f"""
@@ -166,9 +167,15 @@ CREATE TABLE cleanup_exec_slice (
 CREATE TABLE cleanup_exec_item (
   account TEXT NOT NULL, exec_id TEXT NOT NULL, message_id TEXT NOT NULL, seq INTEGER NOT NULL, slice_no INTEGER NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('PENDING','INTENT','APPLIED','SKIPPED_DRIFT','SKIPPED_GONE','NOT_APPLIED','UNKNOWN','CONFLICT')),
-  prev_label_ids TEXT, intent_at TEXT, result_at TEXT,
+  prev_label_ids TEXT CHECK (prev_label_ids IS NULL OR (substr(prev_label_ids, 1, 1) = '[' AND instr(prev_label_ids, '"INBOX"') > 0)),
+  intent_at TEXT CHECK (intent_at IS NULL OR intent_at GLOB {_TS_GLOB}),
+  result_at TEXT CHECK (result_at IS NULL OR result_at GLOB {_TS_GLOB}),
   error_code TEXT CHECK (error_code IS NULL OR error_code IN ({_CODES_SQL})),
-  verified INTEGER NOT NULL DEFAULT 0 CHECK (verified IN (0, 1)),
+  evidence_checked INTEGER NOT NULL DEFAULT 0 CHECK (evidence_checked IN (0, 1)),
+  evidence_source TEXT CHECK (evidence_source IS NULL OR evidence_source IN ('CALLER_SUPPLIED','TRUSTED_ADAPTER')),
+  evidence_observed_at TEXT CHECK (evidence_observed_at IS NULL OR evidence_observed_at GLOB {_TS_GLOB}),
+  CHECK (evidence_checked = 0 OR (state = 'APPLIED' AND evidence_source IS NOT NULL AND evidence_observed_at IS NOT NULL)),
+  CHECK (state <> 'APPLIED' OR evidence_checked = 1),
   PRIMARY KEY (account, exec_id, message_id),
   FOREIGN KEY (account, exec_id) REFERENCES cleanup_execution (account, exec_id),
   FOREIGN KEY (account, exec_id, slice_no) REFERENCES cleanup_exec_slice (account, exec_id, slice_no)) WITHOUT ROWID;
@@ -202,11 +209,16 @@ CREATE TRIGGER cleanup_exec_terminal_has_no_open_items BEFORE UPDATE OF state ON
 WHEN NEW.state IN {_TERMINAL} AND EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account = NEW.account AND i.exec_id = NEW.exec_id
   AND i.state IN {_OPEN})
 BEGIN SELECT RAISE(ABORT, 'a finished execution cannot contain pending, in-flight or unknown items'); END;
-CREATE TRIGGER cleanup_exec_executed_means_all_verified BEFORE UPDATE OF state ON cleanup_execution
+CREATE TRIGGER cleanup_exec_executed_means_all_evidence_checked BEFORE UPDATE OF state ON cleanup_execution
 WHEN NEW.state = 'EXECUTED' AND (
-     NOT EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account = NEW.account AND i.exec_id = NEW.exec_id AND i.state = 'APPLIED' AND i.verified = 1)
+     NOT EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account = NEW.account AND i.exec_id = NEW.exec_id AND i.state = 'APPLIED')
+  OR EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account = NEW.account AND i.exec_id = NEW.exec_id AND i.state = 'APPLIED' AND i.evidence_checked <> 1)
   OR EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account = NEW.account AND i.exec_id = NEW.exec_id AND i.state IN ('NOT_APPLIED','CONFLICT')))
-BEGIN SELECT RAISE(ABORT, 'EXECUTED needs at least one verified APPLIED item and no unsuccessful items'); END;
+BEGIN SELECT RAISE(ABORT, 'EXECUTED needs at least one APPLIED item, all with checked evidence, and no unsuccessful items'); END;
+CREATE TRIGGER cleanup_exec_running_needs_active_slice BEFORE UPDATE OF state ON cleanup_execution
+WHEN NEW.state = 'EXECUTING' AND OLD.state <> 'EXECUTING' AND
+     (SELECT COUNT(*) FROM cleanup_exec_slice s WHERE s.account = NEW.account AND s.exec_id = NEW.exec_id AND s.state = 'ACTIVE') <> 1
+BEGIN SELECT RAISE(ABORT, 'an execution may only start running with exactly one ACTIVE slice'); END;
 CREATE TRIGGER cleanup_exec_failed_means_nothing_applied BEFORE UPDATE OF state ON cleanup_execution
 WHEN NEW.state = 'FAILED' AND EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account = NEW.account AND i.exec_id = NEW.exec_id AND i.state = 'APPLIED')
 BEGIN SELECT RAISE(ABORT, 'FAILED means nothing was applied'); END;
@@ -220,6 +232,12 @@ WHEN NEW.state = 'AWAITING_CONTINUATION' AND (
      NOT EXISTS (SELECT 1 FROM cleanup_exec_slice s WHERE s.account = NEW.account AND s.exec_id = NEW.exec_id AND s.state = 'PENDING')
   OR EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account = NEW.account AND i.exec_id = NEW.exec_id AND i.state IN ('INTENT','UNKNOWN')))
 BEGIN SELECT RAISE(ABORT, 'AWAITING_CONTINUATION needs a pending slice and no in-flight or unknown items'); END;
+CREATE TRIGGER cleanup_exec_awaiting_needs_safe_slices BEFORE UPDATE OF state ON cleanup_execution
+WHEN NEW.state = 'AWAITING_CONTINUATION' AND (
+     EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account = NEW.account AND i.exec_id = NEW.exec_id AND i.state IN ('NOT_APPLIED','CONFLICT'))
+  OR EXISTS (SELECT 1 FROM cleanup_exec_slice s WHERE s.account = NEW.account AND s.exec_id = NEW.exec_id AND s.state = 'COMPLETED'
+      AND NOT EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account = s.account AND i.exec_id = s.exec_id AND i.slice_no = s.slice_no AND i.state = 'APPLIED')))
+BEGIN SELECT RAISE(ABORT, 'no continuation after a slice with no applied item or with rejected or conflicting items'); END;
 CREATE TRIGGER cleanup_exec_reconciliation_needs_unknown BEFORE UPDATE OF state ON cleanup_execution
 WHEN NEW.state = 'RECONCILIATION_REQUIRED' AND NOT EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account = NEW.account
   AND i.exec_id = NEW.exec_id AND i.state = 'UNKNOWN')
@@ -230,6 +248,11 @@ CREATE TRIGGER cleanup_exec_slice_insert_guard BEFORE INSERT ON cleanup_exec_sli
 WHEN NEW.state NOT IN ('PENDING','CONFIRMED')
   OR (SELECT state FROM cleanup_execution e WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id) IS NOT 'PREPARED'
 BEGIN SELECT RAISE(ABORT, 'slices can only be created while the execution is being reserved'); END;
+CREATE UNIQUE INDEX cleanup_exec_one_active_slice ON cleanup_exec_slice (account, exec_id) WHERE state = 'ACTIVE';
+CREATE TRIGGER cleanup_exec_slice_activate_before_running BEFORE UPDATE OF state ON cleanup_exec_slice
+WHEN NEW.state = 'ACTIVE' AND (SELECT state FROM cleanup_execution e WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id)
+     NOT IN ('PREPARED','AWAITING_CONTINUATION')
+BEGIN SELECT RAISE(ABORT, 'a slice is activated before the execution starts running'); END;
 CREATE TRIGGER cleanup_exec_slice_immutable BEFORE UPDATE ON cleanup_exec_slice
 WHEN NEW.account IS NOT OLD.account OR NEW.exec_id IS NOT OLD.exec_id OR NEW.slice_no IS NOT OLD.slice_no OR NEW.size IS NOT OLD.size
 BEGIN SELECT RAISE(ABORT, 'slice identity is immutable'); END;
@@ -249,7 +272,7 @@ BEGIN SELECT RAISE(ABORT, 'slices of a finished execution are frozen'); END;
 CREATE TRIGGER cleanup_exec_slice_no_delete BEFORE DELETE ON cleanup_exec_slice
 BEGIN SELECT RAISE(ABORT, 'slices are never deleted'); END;
 CREATE TRIGGER cleanup_exec_item_insert_guard BEFORE INSERT ON cleanup_exec_item
-WHEN NEW.state NOT IN ('PENDING','SKIPPED_DRIFT') OR NEW.verified <> 0
+WHEN NEW.state NOT IN ('PENDING','SKIPPED_DRIFT') OR NEW.evidence_checked <> 0
   OR (SELECT state FROM cleanup_execution e WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id) IS NOT 'PREPARED'
   OR NOT EXISTS (SELECT 1 FROM cleanup_execution e JOIN cleanup_item ci ON ci.account = e.account AND ci.plan_id = e.plan_id
       WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id AND ci.message_id = NEW.message_id)
@@ -274,14 +297,20 @@ BEGIN SELECT RAISE(ABORT, 'illegal execution item state transition'); END;
 CREATE TRIGGER cleanup_exec_item_intent_needs_metadata BEFORE UPDATE OF state ON cleanup_exec_item
 WHEN NEW.state = 'INTENT' AND (
      (SELECT state FROM cleanup_execution e WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id) IS NOT 'EXECUTING'
-  OR NEW.intent_at IS NULL OR NEW.prev_label_ids IS NULL OR substr(NEW.prev_label_ids, 1, 1) <> '[' OR length(NEW.prev_label_ids) < 3)
-BEGIN SELECT RAISE(ABORT, 'an intent needs the EXECUTING state, a time and the previous label ids'); END;
+  OR NEW.intent_at IS NULL OR NEW.prev_label_ids IS NULL OR substr(NEW.prev_label_ids, 1, 1) <> '[' OR instr(NEW.prev_label_ids, '"INBOX"') = 0)
+BEGIN SELECT RAISE(ABORT, 'an intent needs the EXECUTING state, a time and the previous label ids including INBOX'); END;
 CREATE TRIGGER cleanup_exec_item_applied_needs_proof BEFORE UPDATE OF state ON cleanup_exec_item
-WHEN NEW.state = 'APPLIED' AND (OLD.prev_label_ids IS NULL OR OLD.intent_at IS NULL OR NEW.verified <> 1 OR NEW.result_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'APPLIED needs preserved recovery metadata, a result time and verification'); END;
-CREATE TRIGGER cleanup_exec_item_verified_only_when_applied BEFORE UPDATE OF verified ON cleanup_exec_item
-WHEN NEW.verified = 1 AND NEW.state <> 'APPLIED'
-BEGIN SELECT RAISE(ABORT, 'only an APPLIED item can be verified'); END;
+WHEN NEW.state = 'APPLIED' AND (OLD.prev_label_ids IS NULL OR OLD.intent_at IS NULL OR NEW.evidence_checked <> 1 OR NEW.result_at IS NULL
+  OR NEW.evidence_source IS NULL OR NEW.evidence_observed_at IS NULL OR NEW.evidence_observed_at < OLD.intent_at
+  OR (OLD.state = 'UNKNOWN' AND NEW.evidence_observed_at < OLD.result_at))
+BEGIN SELECT RAISE(ABORT, 'APPLIED needs recovery metadata, a result time and evidence not earlier than the intent (or the unknown result)'); END;
+CREATE TRIGGER cleanup_exec_item_evidence_only_when_applied BEFORE UPDATE OF evidence_checked ON cleanup_exec_item
+WHEN NEW.evidence_checked = 1 AND NEW.state <> 'APPLIED'
+BEGIN SELECT RAISE(ABORT, 'only an APPLIED item can carry checked evidence'); END;
+CREATE TRIGGER cleanup_exec_item_evidence_never_downgraded BEFORE UPDATE ON cleanup_exec_item
+WHEN OLD.evidence_checked = 1 AND (NEW.evidence_checked IS NOT 1 OR NEW.evidence_source IS NOT OLD.evidence_source
+  OR NEW.evidence_observed_at IS NOT OLD.evidence_observed_at)
+BEGIN SELECT RAISE(ABORT, 'accepted evidence can never be downgraded or altered'); END;
 CREATE TRIGGER cleanup_exec_item_no_delete BEFORE DELETE ON cleanup_exec_item
 BEGIN SELECT RAISE(ABORT, 'execution items are never deleted'); END;
 CREATE TRIGGER cleanup_plan_locked_by_execution BEFORE UPDATE OF state ON cleanup_plan

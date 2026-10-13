@@ -14,7 +14,13 @@ Invariants (also enforced by schema triggers where practical):
   * Leases are random tokens generated here (never chosen by callers); only their SHA-256 is stored.
   * Every mutation applies one clock policy (`_check_clock`): it is refused if the local clock is earlier than the last recorded event.
   * Reason codes come from a closed vocabulary and are validated BEFORE any state changes; free text is never stored.
-  * APPLIED requires structured evidence of a live read (see `Evidence`). Local metadata alone cannot prove that Gmail changed.
+  * APPLIED requires structured, caller-supplied evidence (see `Evidence`) whose observed labels equal the expected archived state
+    and whose observation time is NOT EARLIER than the recorded intent (and, for reconciliation, than the UNKNOWN transition). The
+    library checks structure and consistency only: it cannot authenticate the evidence, cannot attribute the change to this
+    executor (another client could have archived the message), and local metadata alone cannot prove that Gmail changed.
+  * A slice that ended with no applied item, or with any rejected / unknown / conflicting item, never leads to an ordinary
+    continuation: the execution finishes (FAILED / PARTIAL) and the remaining targets are NEVER_ATTEMPTED (fail closed).
+  * Intent, result and evidence times are stored with microsecond resolution (UTC, fixed format) so ordering is exact.
   * Each step is a short SQLite transaction. SQLite and Gmail cannot commit atomically, so the intent is committed BEFORE any
     future Gmail call and the outcome AFTER it; the gap is exactly what reconciliation covers.
   * Related rows are written in a fixed order: items, then slices, then the execution (triggers refuse the reverse).
@@ -22,10 +28,11 @@ Invariants (also enforced by schema triggers where practical):
 """
 import hmac
 import json
+import re
 import secrets
 import sqlite3
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from gmail_intelligence import cleanup_audit as audit, cleanup_plans as cp
 from gmail_intelligence.cleanup_audit import sha256
@@ -51,7 +58,7 @@ CODE_MEANING = {
     "NEVER_ATTEMPTED": "never attempted: execution stopped or was aborted before this message was touched",
     "REJECTED": "attempt rejected by Gmail (known, unmodified)",
     "RECONCILED_UNMODIFIED": "observed equal to its state before the attempt (does not prove no write occurred)",
-    "RECONCILED_APPLIED": "observed in the expected archived state",
+    "RECONCILED_OBSERVED_ARCHIVED": "observed in the expected archived state (not attributed to this executor)",
     "RECONCILED_CONFLICT": "observed in a state that is neither before nor after",
     "INTERRUPTED": "process or lease lost while the outcome was open (uncertain write)",
     "AMBIGUOUS_RESULT": "result of the attempt is uncertain",
@@ -74,37 +81,77 @@ def _code(value, allowed):
     return v
 
 
-# ---------------------------------------------------------------- evidence contract (what the future live adapter must supply)
+# ---------------------------------------------------------------- evidence contract (what a future trusted adapter must supply)
+EVIDENCE_KINDS = ("LABEL_OBSERVATION",)
+# CALLER_SUPPLIED: structure accepted, nothing authenticated. TRUSTED_ADAPTER is reserved for the future M4C-C read-only adapter and is
+# NOT accepted yet: no code in M4C-A can produce an authenticated Gmail response.
+EVIDENCE_SOURCES = ("CALLER_SUPPLIED", "TRUSTED_ADAPTER")
+ACCEPTED_EVIDENCE_SOURCES = ("CALLER_SUPPLIED",)
+_TS = r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,6}))?(Z|[+-][0-9]{2}:[0-9]{2})"
+
+
+def _us(dt):
+    """Fixed-format UTC timestamp with microseconds (lexicographic order == chronological order)."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _parse_us(ts):
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+
+
+def _norm_ts(value):
+    """Strict ISO-8601 with an explicit zone (Z or +-HH:MM) -> aware UTC datetime. Naive, lower-case, free-form or out-of-range values raise ValueError."""
+    m = re.fullmatch(_TS, value, re.ASCII) if isinstance(value, str) else None
+    if not m:
+        raise ValueError("timestamp")
+    base, frac, zone = m.groups()
+    return datetime.strptime(f"{base}.{(frac or '').ljust(6, '0')}{zone}", "%Y-%m-%dT%H:%M:%S.%f%z").astimezone(timezone.utc)
+
+
 @dataclass(frozen=True)
 class Evidence:
-    """A structured observation of a message's label ids made by a LIVE READ of Gmail.
+    """A structured observation of one message's Gmail label ids.
 
-    This is the contract the future M4C-C adapter must satisfy. The library checks it against the recorded intent but CANNOT
-    authenticate it: local metadata alone can never prove that a Gmail mutation occurred. In M4C-A no code produces real evidence;
-    tests construct it explicitly.
+    What this does and does not establish (kept deliberately separate):
+      * structure accepted        - the library validated the shape and its consistency with the recorded intent;
+      * desired state observed    - the labels equal the previous labels minus INBOX;
+      * trusted Gmail response    - NOT established here: `source` is CALLER_SUPPLIED and nothing is authenticated; a future M4C-C
+                                    adapter would be the only producer of TRUSTED_ADAPTER evidence;
+      * attributed to the executor - NEVER established: another client or the owner may have archived the message.
     """
     kind: str
     message_id: str
     labels: tuple
     observed_at: str
-    source: str = "gmail-live-read"
+    source: str = "CALLER_SUPPLIED"
 
 
 def _check_evidence(ev, item, now):
-    ok = (isinstance(ev, Evidence) and ev.kind == "LIVE_READ" and ev.source == "gmail-live-read" and ev.message_id == item["message_id"]
-          and isinstance(ev.labels, (tuple, list)) and 0 < len(ev.labels) <= 100 and all(isinstance(x, str) and 0 < len(x) <= 64 for x in ev.labels)
-          and isinstance(ev.observed_at, str))
+    """Validate evidence against the item. Returns (sorted labels, observed UTC datetime). Writes nothing.
+
+    Chronology is STRICT: the observation may not predate the recorded intent (no tolerance), nor - for an UNKNOWN item - the recorded
+    UNKNOWN transition. Only the upper bound uses the shared clock tolerance, because "now" itself may lag a skewed clock.
+    """
+    ok = (isinstance(ev, Evidence) and ev.kind in EVIDENCE_KINDS and ev.source in ACCEPTED_EVIDENCE_SOURCES
+          and isinstance(ev.message_id, str) and ev.message_id == item["message_id"]
+          and isinstance(ev.labels, (tuple, list)) and 0 < len(ev.labels) <= 100
+          and all(isinstance(x, str) and 0 < len(x) <= 64 and x.isascii() for x in ev.labels))
+    seen = None
     if ok:
         try:
-            seen = _parse(ev.observed_at)
-        except ValueError:
+            seen = _norm_ts(ev.observed_at)
+            floors = [_parse_us(item["intent_at"])] + ([_parse_us(item["result_at"])] if item["state"] == "UNKNOWN" else [])
+        except (ValueError, TypeError):
             ok = False
         else:
-            ok = (item["intent_at"] is not None and seen >= _parse(item["intent_at"]) - cp.CLOCK_TOLERANCE
-                  and seen <= now + cp.CLOCK_TOLERANCE)
+            ok = all(seen >= f for f in floors) and seen <= now + cp.CLOCK_TOLERANCE
     if not ok:
-        raise ExecError("BAD_EVIDENCE", "the evidence is missing, malformed or inconsistent with the recorded intent")
-    return sorted(set(ev.labels))
+        raise ExecError("BAD_EVIDENCE", "the evidence is missing, malformed, or inconsistent with the recorded intent and its chronology")
+    return sorted(set(ev.labels)), seen
+
+
+def _evidence_cols(ev, seen):
+    return {"evidence_checked": 1, "evidence_source": ev.source, "evidence_observed_at": _us(seen)}
 
 
 def _expected_after(item):
@@ -337,6 +384,30 @@ def reserve_execution(index, account, plan_id, confirmation, now=None):
     return get_execution(index, account, exec_id)
 
 
+# ---------------------------------------------------------------- cross-row invariants (checked at transaction boundaries)
+def invariant_problems(index, account, exec_id):
+    """Cross-row invariants that single-row triggers cannot enforce without blocking the legitimate multi-statement transitions.
+
+    SQLite triggers fire per statement, so "EXECUTING implies exactly one ACTIVE slice" is only enforceable at the ENTRY (a trigger
+    refuses EXECUTING without an ACTIVE slice; start_slice activates the slice first). It cannot be enforced as the transaction
+    leaves EXECUTING without also blocking the fixed items -> slices -> execution order, so the library verifies it before every
+    commit and before every executor operation. Direct SQL that breaks it is therefore detected (fail closed), not prevented.
+    """
+    ex = get_execution(index, account, exec_id)
+    active = sum(1 for s in slices(index, account, exec_id) if s["state"] == "ACTIVE")
+    bad = []
+    if ex["state"] == "EXECUTING" and (active != 1 or ex["lease_token"] is None):
+        bad.append("EXECUTING_WITHOUT_ONE_ACTIVE_SLICE_AND_LEASE")
+    if ex["state"] != "EXECUTING" and (active or ex["lease_token"] is not None):
+        bad.append("ACTIVE_SLICE_OR_LEASE_OUTSIDE_EXECUTING")
+    return bad
+
+
+def _assert_invariants(index, account, exec_id):
+    if invariant_problems(index, account, exec_id):
+        raise ExecError("INVARIANT_BROKEN", "the execution's slice/lease state is inconsistent; refusing to continue (nothing was changed)")
+
+
 # ---------------------------------------------------------------- slices and leases
 def start_slice(index, account, exec_id, slice_no, now=None):
     """CONFIRMED slice -> ACTIVE and execution -> EXECUTING. Returns the NEW lease token (random, shown only to the caller).
@@ -356,13 +427,14 @@ def start_slice(index, account, exec_id, slice_no, now=None):
             raise ExecError("SLICE_NOT_CONFIRMED", "this slice has no fresh execution confirmation")
         if any(s["state"] != "COMPLETED" for s in slices(index, account, exec_id) if s["slice_no"] < slice_no):
             raise ExecError("PREVIOUS_SLICE_INCOMPLETE", "earlier slices must be COMPLETED first")
+        _set_slice(index, account, exec_id, ex["plan_id"], slice_no, "ACTIVE", "CONFIRMED", at, started_at=at)  # slice first: EXECUTING needs it
         try:
             index.conn.execute("UPDATE cleanup_execution SET state='EXECUTING', state_changed_at=?, lease_token=?, lease_expires_at=? "
                                "WHERE account=? AND exec_id=? AND state=?", (at, sha256(token), _iso(now + LEASE_TTL), account, exec_id, ex["state"]))
         except sqlite3.IntegrityError:
             raise ExecError("ACTIVE_EXECUTION_EXISTS", "another execution of this account is not finished (or the targets are not frozen)") from None
         _tr(index, account, ex["plan_id"], "EXECUTION_TRANSITION", at, exec=exec_id, **{"from": ex["state"], "to": "EXECUTING"})
-        _set_slice(index, account, exec_id, ex["plan_id"], slice_no, "ACTIVE", "CONFIRMED", at, started_at=at)
+        _assert_invariants(index, account, exec_id)
     return token
 
 
@@ -374,6 +446,7 @@ def _active(index, account, exec_id, token, now):
         raise ExecError("BAD_LEASE", "the lease token is malformed")
     if not _lease_ok(ex, token, now):
         raise ExecError("LEASE_LOST", "this process does not hold a live execution lease; stop")
+    _assert_invariants(index, account, exec_id)
     return ex
 
 
@@ -401,7 +474,7 @@ def record_skip(index, account, exec_id, token, message_id, kind, reason, now=No
         ex = _active(index, account, exec_id, token, now)
         it = _item(index, account, exec_id, message_id)
         _in_active_slice(index, account, exec_id, it)
-        _set_item(index, account, exec_id, ex["plan_id"], message_id, kind, "PENDING", _iso(now), code=code, result_at=_iso(now))
+        _set_item(index, account, exec_id, ex["plan_id"], message_id, kind, "PENDING", _iso(now), code=code, result_at=_us(now))
 
 
 def record_intent(index, account, exec_id, token, message_id, prev_label_ids, now=None):
@@ -419,13 +492,13 @@ def record_intent(index, account, exec_id, token, message_id, prev_label_ids, no
         it = _item(index, account, exec_id, message_id)
         _in_active_slice(index, account, exec_id, it)
         _set_item(index, account, exec_id, ex["plan_id"], message_id, "INTENT", "PENDING", _iso(now),
-                  prev_label_ids=json.dumps(sorted(set(labels))), intent_at=_iso(now))
+                  prev_label_ids=json.dumps(sorted(set(labels))), intent_at=_us(now))
 
 
 def record_outcome(index, account, exec_id, token, message_id, outcome, code=None, evidence=None, now=None):
     """INTENT -> APPLIED | NOT_APPLIED (known rejection) | UNKNOWN (ambiguous: needs reconciliation, never retried automatically).
 
-    APPLIED requires `Evidence` of a live read showing exactly the previous labels minus INBOX; anything else is not APPLIED.
+    APPLIED requires structured `Evidence` (strictly not earlier than the intent) showing exactly the previous labels minus INBOX; anything else is not APPLIED.
     """
     if outcome not in OUTCOME_CODES:
         raise ExecError("BAD_INPUT", "outcome must be APPLIED, NOT_APPLIED or UNKNOWN")
@@ -436,11 +509,11 @@ def record_outcome(index, account, exec_id, token, message_id, outcome, code=Non
         it = _item(index, account, exec_id, message_id)
         extra = {}
         if outcome == "APPLIED":
-            observed = _check_evidence(evidence, it, now)
+            observed, seen = _check_evidence(evidence, it, now)
             if it["prev_label_ids"] is None or observed != _expected_after(it)[0]:
                 raise ExecError("EVIDENCE_MISMATCH", "the observed labels are not the expected archived state; record UNKNOWN instead")
-            extra["verified"] = 1
-        _set_item(index, account, exec_id, ex["plan_id"], message_id, outcome, "INTENT", _iso(now), code=code, result_at=_iso(now), **extra)
+            extra = _evidence_cols(evidence, seen)
+        _set_item(index, account, exec_id, ex["plan_id"], message_id, outcome, "INTENT", _iso(now), code=code, result_at=_us(now), **extra)
 
 
 # ---------------------------------------------------------------- finishing, stopping, interruption
@@ -451,6 +524,23 @@ def _settle(index, account, exec_id):
     if not applied:
         return "FAILED"
     return "PARTIAL" if bad else "EXECUTED"
+
+
+def continuation_blockers(index, account, exec_id):
+    """Why an ordinary continuation must be refused (empty list = eligible).
+
+    Safe: SKIPPED_DRIFT / SKIPPED_GONE items (nothing was attempted), pre-skipped overlap, and APPLIED items.
+    Blocking: a COMPLETED slice with no APPLIED item (nothing worked; do not push on), or any NOT_APPLIED (rejected), CONFLICT,
+    UNKNOWN or INTENT item anywhere in the execution (a failure, a reconciliation conflict or an unresolved outcome).
+    """
+    c = item_counts(index, account, exec_id)
+    out = [name for name in ("NOT_APPLIED", "CONFLICT", "UNKNOWN", "INTENT") if c.get(name)]
+    for s in slices(index, account, exec_id):
+        if s["state"] == "COMPLETED" and not index._q("SELECT 1 FROM cleanup_exec_item WHERE account=? AND exec_id=? AND slice_no=? AND state='APPLIED'",
+                                                     account, exec_id, s["slice_no"]):
+            out.append("SLICE_WITHOUT_APPLIED_ITEM")
+            break
+    return out
 
 
 def end_slice(index, account, exec_id, slice_no, token, now=None):
@@ -465,18 +555,22 @@ def end_slice(index, account, exec_id, slice_no, token, now=None):
             raise ExecError("SLICE_INCOMPLETE", f"{open_n} item(s) of this slice are not final; stop the execution instead")
         _set_slice(index, account, exec_id, ex["plan_id"], slice_no, "COMPLETED", "ACTIVE", at, finished_at=at)
         more = index._q("SELECT COUNT(*) FROM cleanup_exec_slice WHERE account=? AND exec_id=? AND state='PENDING'", account, exec_id)[0][0]
-        _set_exec(index, account, exec_id, ex["plan_id"], "AWAITING_CONTINUATION" if more else _settle(index, account, exec_id), "EXECUTING", at,
-                  awaiting_continuation=1 if more else 0)
+        if more and continuation_blockers(index, account, exec_id):
+            _stop(index, account, ex, "UNSAFE_SLICE", now)  # fail closed: remaining targets NEVER_ATTEMPTED, FAILED / PARTIAL, no continuation
+        else:
+            _set_exec(index, account, exec_id, ex["plan_id"], "AWAITING_CONTINUATION" if more else _settle(index, account, exec_id), "EXECUTING", at,
+                      awaiting_continuation=1 if more else 0)
+        _assert_invariants(index, account, exec_id)
 
 
-def _stop(index, account, ex, reason, at):
+def _stop(index, account, ex, reason, now):
     """INTENT->UNKNOWN, unattempted PENDING->NEVER_ATTEMPTED, open slices STOPPED, then the right execution state (items, slices, execution)."""
-    plan_id, exec_id = ex["plan_id"], ex["exec_id"]
+    plan_id, exec_id, at = ex["plan_id"], ex["exec_id"], _iso(now)
     unknown_code = "INTERRUPTED" if reason == "INTERRUPTED" else "AMBIGUOUS_RESULT"
     for r in index._q("SELECT message_id FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='INTENT' ORDER BY seq", account, exec_id):
-        _set_item(index, account, exec_id, plan_id, r["message_id"], "UNKNOWN", "INTENT", at, code=unknown_code, result_at=at)
+        _set_item(index, account, exec_id, plan_id, r["message_id"], "UNKNOWN", "INTENT", at, code=unknown_code, result_at=_us(now))
     for r in index._q("SELECT message_id FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='PENDING' ORDER BY seq", account, exec_id):
-        _set_item(index, account, exec_id, plan_id, r["message_id"], "NOT_APPLIED", "PENDING", at, code="NEVER_ATTEMPTED", result_at=at)
+        _set_item(index, account, exec_id, plan_id, r["message_id"], "NOT_APPLIED", "PENDING", at, code="NEVER_ATTEMPTED", result_at=_us(now))
     for s in slices(index, account, exec_id):
         if s["state"] in ("PENDING", "CONFIRMED", "ACTIVE"):
             _set_slice(index, account, exec_id, plan_id, s["slice_no"], "STOPPED", s["state"], at, finished_at=at)
@@ -491,7 +585,8 @@ def stop_execution(index, account, exec_id, token, reason, now=None):
     now = _utc(now)
     with _txn(index):
         ex = _active(index, account, exec_id, token, now)
-        _stop(index, account, ex, reason, _iso(now))
+        _stop(index, account, ex, reason, now)
+        _assert_invariants(index, account, exec_id)
     return get_execution(index, account, exec_id)
 
 
@@ -506,7 +601,8 @@ def recover_interrupted(index, account, now=None):
         for exec_id in stale:
             ex = get_execution(index, account, exec_id)
             _tr(index, account, ex["plan_id"], "EXECUTION_INTERRUPTED", at, exec=exec_id)
-            _stop(index, account, ex, "INTERRUPTED", at)
+            _stop(index, account, ex, "INTERRUPTED", now)
+            _assert_invariants(index, account, exec_id)
     return stale
 
 
@@ -523,11 +619,12 @@ def abort_execution(index, account, exec_id, now=None):
         if ex["state"] not in ("PREPARED", "AWAITING_CONTINUATION"):
             raise ExecError("BAD_STATE", f"execution is {ex['state']}; only a PREPARED or AWAITING_CONTINUATION execution can be aborted")
         for r in index._q("SELECT message_id FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='PENDING' ORDER BY seq", account, exec_id):
-            _set_item(index, account, exec_id, ex["plan_id"], r["message_id"], "NOT_APPLIED", "PENDING", at, code="NEVER_ATTEMPTED", result_at=at)
+            _set_item(index, account, exec_id, ex["plan_id"], r["message_id"], "NOT_APPLIED", "PENDING", at, code="NEVER_ATTEMPTED", result_at=_us(now))
         for s in slices(index, account, exec_id):
             if s["state"] in ("PENDING", "CONFIRMED"):
                 _set_slice(index, account, exec_id, ex["plan_id"], s["slice_no"], "STOPPED", s["state"], at, finished_at=at)
         _set_exec(index, account, exec_id, ex["plan_id"], "ABORTED", ex["state"], at, reason="OWNER_ABORT")
+        _assert_invariants(index, account, exec_id)
     return get_execution(index, account, exec_id)
 
 
@@ -547,6 +644,9 @@ def confirm_slice(index, account, exec_id, slice_no, confirmation, now=None):
             prev = [s for s in slices(index, account, exec_id) if s["slice_no"] < slice_no]
             if sl["state"] != "PENDING" or any(s["state"] != "COMPLETED" for s in prev):
                 raise ExecError("SLICE_NOT_NEXT", "this slice cannot be confirmed now (earlier slices must be COMPLETED)")
+            blockers = continuation_blockers(index, account, exec_id)
+            if blockers:
+                raise ExecError("CONTINUATION_BLOCKED", "an earlier slice ended unsafely (" + ", ".join(blockers) + "); the execution cannot continue")
             if (confirmation or "").strip() != continuation_phrase(plan, slice_no, sl["size"]):
                 raise ExecError("BAD_CONFIRMATION", "continuation confirmation did not match; nothing was confirmed")
             remaining = [r["message_id"] for r in index._q("SELECT message_id FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='PENDING'", account, exec_id)]
@@ -568,9 +668,9 @@ def confirm_slice(index, account, exec_id, slice_no, confirmation, now=None):
 
 # ---------------------------------------------------------------- reconciliation of UNKNOWN items (from OBSERVED state only)
 def reconcile_item(index, account, exec_id, message_id, evidence, now=None):
-    """Resolve an UNKNOWN item from structured evidence of a LIVE READ. The caller cannot assert an outcome; the library derives it.
+    """Resolve an UNKNOWN item from structured, caller-supplied evidence. The caller cannot assert an outcome; the library derives it.
 
-    Observed == expected archived state -> APPLIED (verified); observed == the state before the attempt -> NOT_APPLIED
+    Observed == expected archived state -> APPLIED (RECONCILED_OBSERVED_ARCHIVED; evidence_checked, not attributed); observed == the state before the attempt -> NOT_APPLIED
     (RECONCILED_UNMODIFIED, which does not prove that no write occurred); anything else -> CONFLICT. No write is ever retried here.
     Not reachable from the CLI: M4C-A has no Gmail client to produce real evidence.
     """
@@ -584,15 +684,15 @@ def reconcile_item(index, account, exec_id, message_id, evidence, now=None):
         it = _item(index, account, exec_id, message_id)
         if it["state"] != "UNKNOWN":
             raise ExecError("BAD_ITEM_STATE", "only an UNKNOWN item can be reconciled")
-        observed = _check_evidence(evidence, it, now)
+        observed, seen = _check_evidence(evidence, it, now)
         after, before = _expected_after(it)
         if observed == after:
-            new, code, extra = "APPLIED", "RECONCILED_APPLIED", {"verified": 1}
+            new, code, extra = "APPLIED", "RECONCILED_OBSERVED_ARCHIVED", _evidence_cols(evidence, seen)
         elif observed == before:
             new, code, extra = "NOT_APPLIED", "RECONCILED_UNMODIFIED", {}
         else:
             new, code, extra = "CONFLICT", "RECONCILED_CONFLICT", {}
-        _set_item(index, account, exec_id, ex["plan_id"], message_id, new, "UNKNOWN", at, code=code, result_at=at, **extra)
+        _set_item(index, account, exec_id, ex["plan_id"], message_id, new, "UNKNOWN", at, code=code, result_at=_us(now), **extra)
         if not item_counts(index, account, exec_id).get("UNKNOWN", 0):
             _set_exec(index, account, exec_id, ex["plan_id"], _settle(index, account, exec_id), "RECONCILIATION_REQUIRED", at, reason="RECONCILED")
     return get_execution(index, account, exec_id)

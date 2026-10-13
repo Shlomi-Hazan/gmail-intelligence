@@ -41,8 +41,8 @@ class ExecBase(PlanBase):
     token = None
 
     def ev(self, mid, labels=("CATEGORY_PROMOTIONS",), when=None, **kw):
-        """Structured LIVE-READ evidence (test-only construction; production has no adapter that could produce it)."""
-        return ce.Evidence(kw.get("kind", "LIVE_READ"), kw.get("message_id", mid), tuple(labels), when or cp._iso(self.t), kw.get("source", "gmail-live-read"))
+        """Structured, caller-supplied evidence (test-only construction; production has no adapter that could produce authenticated evidence)."""
+        return ce.Evidence(kw.get("kind", "LABEL_OBSERVATION"), kw.get("message_id", mid), tuple(labels), when or cp._iso(self.t), kw.get("source", "CALLER_SUPPLIED"))
 
     def tick(self, seconds=10):
         self.t = self.t + timedelta(seconds=seconds)  # small steps keep the 5-minute execution lease alive across a test
@@ -731,8 +731,8 @@ class RecoveryTests(ExecBase):
         ce.reconcile_item(self.index, ACCT, ex["exec_id"], b, before(b), now=self.tick())  # observed pre-state -> NOT_APPLIED (unmodified)
         done = ce.reconcile_item(self.index, ACCT, ex["exec_id"], c, self.ev(c, ("SOMETHING_ELSE",)), now=self.tick())  # neither -> CONFLICT
         self.assertEqual(done["state"], "PARTIAL")
-        rows = {r["message_id"]: (r["state"], r["error_code"], r["verified"]) for r in self.index._q("SELECT * FROM cleanup_exec_item")}
-        self.assertEqual(rows[a], ("APPLIED", "RECONCILED_APPLIED", 1))
+        rows = {r["message_id"]: (r["state"], r["error_code"], r["evidence_checked"]) for r in self.index._q("SELECT * FROM cleanup_exec_item")}
+        self.assertEqual(rows[a], ("APPLIED", "RECONCILED_OBSERVED_ARCHIVED", 1))
         self.assertEqual(rows[b], ("NOT_APPLIED", "RECONCILED_UNMODIFIED", 0))
         self.assertEqual(rows[c], ("CONFLICT", "RECONCILED_CONFLICT", 0))
         with self.assertRaises(ce.ExecError):
@@ -927,7 +927,7 @@ class HardeningTests(ExecBase):
         ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
         before = self.audit_count()
         bad_codes = ["sender@example.test", "x" * 500, "line\nbreak", "\u05e9\u05dc\u05d5\u05dd", "", "DROP TABLE", "reject-ed", "NEVER_ATTEMPTED",
-                     "RECONCILED_APPLIED", 5, None.__class__, ["REJECTED"], str(RuntimeError("secret@example.test"))]
+                     "RECONCILED_OBSERVED_ARCHIVED", 5, None.__class__, ["REJECTED"], str(RuntimeError("secret@example.test"))]
         for bad in bad_codes:
             with self.assertRaises(ce.ExecError, msg=repr(bad)) as cm:
                 ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "NOT_APPLIED", code=bad, now=self.tick())
@@ -1067,18 +1067,18 @@ class HardeningTests(ExecBase):
         self.refused("UPDATE cleanup_exec_slice SET state='COMPLETED' WHERE exec_id=?", E)  # open items
         a, b, c = self.ids_of(E)
         self.refused("UPDATE cleanup_exec_item SET state='INTENT' WHERE message_id=?", a)  # no metadata
-        self.refused("UPDATE cleanup_exec_item SET state='INTENT', intent_at='t' WHERE message_id=?", a)
-        self.refused("UPDATE cleanup_exec_item SET state='INTENT', intent_at='t', prev_label_ids='not json' WHERE message_id=?", a)
-        self.refused("UPDATE cleanup_exec_item SET state='INTENT', intent_at='t', prev_label_ids='[]' WHERE message_id=?", a)
-        self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='INTENT', intent_at='t', prev_label_ids='[\"INBOX\"]' WHERE message_id=?", a))
+        self.refused("UPDATE cleanup_exec_item SET state='INTENT', intent_at='2026-01-01T00:00:00.000000Z' WHERE message_id=?", a)
+        self.refused("UPDATE cleanup_exec_item SET state='INTENT', intent_at='2026-01-01T00:00:00.000000Z', prev_label_ids='not json' WHERE message_id=?", a)
+        self.refused("UPDATE cleanup_exec_item SET state='INTENT', intent_at='2026-01-01T00:00:00.000000Z', prev_label_ids='[]' WHERE message_id=?", a)
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='INTENT', intent_at='2026-01-01T00:00:00.000000Z', prev_label_ids='[\"INBOX\"]' WHERE message_id=?", a))
         self.refused("UPDATE cleanup_exec_item SET prev_label_ids='[\"OTHER\"]' WHERE message_id=?", a)  # recovery metadata is immutable
         self.refused("UPDATE cleanup_exec_item SET prev_label_ids=NULL WHERE message_id=?", a)
         self.refused("UPDATE cleanup_exec_item SET intent_at='later' WHERE message_id=?", a)
         self.refused("UPDATE cleanup_exec_item SET state='APPLIED' WHERE message_id=?", a)  # no verification / result time
-        self.refused("UPDATE cleanup_exec_item SET state='APPLIED', verified=1 WHERE message_id=?", a)  # no result time
-        self.refused("UPDATE cleanup_exec_item SET verified=1 WHERE message_id=?", b)  # only APPLIED can be verified
-        self.refused("UPDATE cleanup_exec_item SET state='APPLIED', result_at='t', verified=1 WHERE message_id=?", b)  # b never had an intent
-        self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='APPLIED', result_at='t', verified=1 WHERE message_id=?", a))
+        self.refused("UPDATE cleanup_exec_item SET state='APPLIED', evidence_checked=1 WHERE message_id=?", a)  # no result time
+        self.refused("UPDATE cleanup_exec_item SET evidence_checked=1 WHERE message_id=?", b)  # only APPLIED can be verified
+        self.refused("UPDATE cleanup_exec_item SET state='APPLIED', result_at='2026-01-01T00:00:00.000000Z', evidence_checked=1 WHERE message_id=?", b)  # b never had an intent
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='APPLIED', result_at='2026-01-01T00:00:00.000000Z', evidence_checked=1, evidence_source='CALLER_SUPPLIED', evidence_observed_at='2026-01-01T00:00:01.000000Z' WHERE message_id=?", a))
         self.refused("UPDATE cleanup_execution SET state='EXECUTED' WHERE exec_id=?", E)  # b, c still open
         self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='NOT_APPLIED', error_code='NEVER_ATTEMPTED' WHERE message_id IN (?,?)", b, c))
         self.refused("UPDATE cleanup_execution SET state='EXECUTED' WHERE exec_id=?", E)  # contains unsuccessful items
@@ -1093,7 +1093,7 @@ class HardeningTests(ExecBase):
         ex = self.started(self.approved_plan(["m1", "m2"]))
         E = ex["exec_id"]
         a, b = self.ids_of(E)
-        self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='SKIPPED_GONE', error_code='NOT_FOUND', result_at='t' WHERE exec_id=?", E))
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_item SET state='SKIPPED_GONE', error_code='NOT_FOUND', result_at='2026-01-01T00:00:00.000000Z' WHERE exec_id=?", E))
         self.assertIsNone(self.sql("UPDATE cleanup_exec_slice SET state='COMPLETED' WHERE exec_id=?", E))
         self.refused("UPDATE cleanup_execution SET state='EXECUTED' WHERE exec_id=?", E)  # nothing applied: only FAILED is coherent
         self.assertIsNone(self.sql("UPDATE cleanup_execution SET state='FAILED' WHERE exec_id=?", E))
@@ -1155,7 +1155,7 @@ class HardeningTests(ExecBase):
         for mid in (a, b, c):
             ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX", "CATEGORY_PROMOTIONS", "Label_9"], now=self.tick())
         import inspect
-        self.assertNotIn("verified", inspect.signature(ce.record_outcome).parameters)  # callers cannot assert verification
+        self.assertNotIn("evidence_checked", inspect.signature(ce.record_outcome).parameters)  # callers cannot assert verification
         with self.assertRaises(ce.ExecError) as cm:
             ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", now=self.tick())
         self.assertEqual(cm.exception.code, "BAD_EVIDENCE")
@@ -1166,11 +1166,11 @@ class HardeningTests(ExecBase):
             self.assertEqual(cm.exception.code, expect)
         with self.assertRaises(ce.ExecError):
             ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(b, ("CATEGORY_PROMOTIONS", "Label_9")), now=self.tick())
-        self.assertEqual(self.index._q("SELECT COUNT(*) FROM cleanup_exec_item WHERE verified=1")[0][0], 0)
+        self.assertEqual(self.index._q("SELECT COUNT(*) FROM cleanup_exec_item WHERE evidence_checked=1")[0][0], 0)
         ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, ("Label_9", "CATEGORY_PROMOTIONS")), now=self.tick())
-        self.assertEqual(self.index._q("SELECT state, verified FROM cleanup_exec_item WHERE message_id=?", a)[0][:], ("APPLIED", 1))
+        self.assertEqual(self.index._q("SELECT state, evidence_checked FROM cleanup_exec_item WHERE message_id=?", a)[0][:], ("APPLIED", 1))
         ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, b, "UNKNOWN", code="NETWORK_ERROR", now=self.tick())
-        self.assertEqual(self.index._q("SELECT verified FROM cleanup_exec_item WHERE message_id=?", b)[0][0], 0)  # unknown is never verified
+        self.assertEqual(self.index._q("SELECT evidence_checked FROM cleanup_exec_item WHERE message_id=?", b)[0][0], 0)  # unknown is never verified
         ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "AMBIGUOUS_RESULT", now=self.tick())
         self.assertEqual(self.exec_state(ex["exec_id"]), "RECONCILIATION_REQUIRED")  # unknown work is not "executed"
 
@@ -1242,6 +1242,303 @@ class HardeningTests(ExecBase):
 
 
 
+class FinalMicroCorrectionTests(ExecBase):
+    """Strict evidence chronology, honest evidence terminology, evidence/INBOX/invariant hardening and fail-closed continuation."""
+    sql = HardeningTests.sql
+    refused = HardeningTests.refused
+
+    LABELS = ["INBOX", "CATEGORY_PROMOTIONS", "Label_9", "My Private Label"]
+    AFTER = ("CATEGORY_PROMOTIONS", "Label_9", "My Private Label")
+
+    def snapshot(self):
+        q = self.index._q
+        return ([tuple(r) for r in q("SELECT * FROM cleanup_exec_item ORDER BY message_id")], [tuple(r) for r in q("SELECT * FROM cleanup_execution")],
+                [tuple(r) for r in q("SELECT * FROM cleanup_approval")], q("SELECT COUNT(*) FROM cleanup_audit")[0][0])
+
+    def at_micro(self, micro=250000, seconds=10):
+        return self.tick(seconds) + timedelta(microseconds=micro)
+
+    def intent(self, ex, mid, when):
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, self.LABELS, now=when)
+
+    def iso(self, dt, frac=True):
+        return dt.strftime("%Y-%m-%dT%H:%M:%S") + (dt.strftime(".%f") if frac else "") + "Z"
+
+    # ---- P2: strict chronology
+    def test_evidence_may_not_predate_the_intent_not_even_by_a_microsecond(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a, b = self.ids_of(ex["exec_id"])
+        intent = self.at_micro()
+        self.intent(ex, a, intent)
+        now = intent + timedelta(seconds=20)
+        before = self.snapshot()
+        for label, when in (("4 minutes before", intent - timedelta(minutes=4)), ("1 second before", intent - timedelta(seconds=1)),
+                            ("1 microsecond before", intent - timedelta(microseconds=1))):
+            with self.assertRaises(ce.ExecError, msg=label) as cm:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, self.AFTER, when=self.iso(when)), now=now)
+            self.assertEqual(cm.exception.code, "BAD_EVIDENCE", label)
+            self.assertEqual(self.snapshot(), before, label)  # item, execution, approval and audit rows are untouched
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, self.AFTER, when=self.iso(intent)), now=now)  # exactly at
+        row = self.index._q("SELECT * FROM cleanup_exec_item WHERE message_id=?", a)[0]
+        self.assertEqual((row["state"], row["evidence_checked"], row["evidence_source"], row["evidence_observed_at"]),
+                         ("APPLIED", 1, "CALLER_SUPPLIED", self.iso(intent)))
+        intent_b = self.at_micro(500000)
+        self.intent(ex, b, intent_b)
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, b, "APPLIED", evidence=self.ev(b, self.AFTER, when=self.iso(intent_b + timedelta(microseconds=1))),
+                          now=intent_b + timedelta(seconds=20))  # after
+
+    def test_future_missing_malformed_and_zone_inconsistent_timestamps_are_refused(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a = self.ids_of(ex["exec_id"])[0]
+        intent = self.at_micro(0)
+        self.intent(ex, a, intent)
+        now = intent + timedelta(seconds=20)
+        before = self.snapshot()
+        base = self.iso(intent, frac=False)[:-1]
+        for bad in (self.iso(now + timedelta(minutes=6)), 12345, "yesterday", base, base + "z", base + "+0200", base + "Z+00:00", base + "+25:00",
+                    self.iso(intent)[:-1] + "1234567Z", "2027-13-01T00:00:00Z", base + " Z", "\u0661" + base[1:] + "Z"):
+            with self.assertRaises(ce.ExecError, msg=bad) as cm:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, self.AFTER, when=bad), now=now)
+            self.assertEqual(cm.exception.code, "BAD_EVIDENCE", bad)
+            self.assertEqual(self.snapshot(), before, bad)
+        for missing in (None, ""):  # (the ev() helper substitutes a default for falsy values, so build these directly)
+            with self.assertRaises(ce.ExecError) as cm:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=ce.Evidence("LABEL_OBSERVATION", a, self.AFTER, missing), now=now)
+            self.assertEqual(cm.exception.code, "BAD_EVIDENCE")
+        self.assertEqual(self.snapshot(), before)
+        # an explicit offset is normalised to UTC: the same instant is accepted, one microsecond earlier is not
+        same = (intent + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.%f") + "+02:00"
+        early = (intent - timedelta(microseconds=1) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.%f") + "+02:00"
+        with self.assertRaises(ce.ExecError):
+            ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, self.AFTER, when=early), now=now)
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, self.AFTER, when=same), now=now)
+        self.assertEqual(self.index._q("SELECT evidence_observed_at FROM cleanup_exec_item WHERE message_id=?", a)[0][0], self.iso(intent))
+        # a modestly future observation is still bounded only by the shared clock policy (5 minutes)
+        b = self.ids_of(ex["exec_id"])[1]
+        self.intent(ex, b, now)
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, b, "APPLIED", evidence=self.ev(b, self.AFTER, when=self.iso(now + timedelta(minutes=4))), now=now)
+
+    def test_reconciliation_evidence_may_not_predate_the_unknown_transition(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a, b = self.ids_of(ex["exec_id"])
+        i1 = self.at_micro()
+        self.intent(ex, a, i1)
+        u = i1 + timedelta(seconds=30)
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "UNKNOWN", code="TIMEOUT", now=u)
+        ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "AMBIGUOUS_RESULT", now=u + timedelta(seconds=1))
+        unknown_at = self.index._q("SELECT result_at FROM cleanup_exec_item WHERE message_id=?", a)[0][0]
+        self.assertEqual(unknown_at, self.iso(u))
+        now = u + timedelta(minutes=1)
+        before = self.snapshot()
+        for label, when in (("before the intent", i1 - timedelta(microseconds=1)), ("at the intent but before UNKNOWN", i1),
+                            ("1 microsecond before UNKNOWN", u - timedelta(microseconds=1))):
+            with self.assertRaises(ce.ExecError, msg=label) as cm:
+                ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, self.ev(a, self.AFTER, when=self.iso(when)), now=now)
+            self.assertEqual(cm.exception.code, "BAD_EVIDENCE", label)
+            self.assertEqual(self.snapshot(), before, label)
+        ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, self.ev(a, self.AFTER, when=self.iso(u)), now=now)  # exactly at UNKNOWN
+        self.assertEqual(self.index._q("SELECT state, error_code FROM cleanup_exec_item WHERE message_id=?", a)[0][:], ("APPLIED", "RECONCILED_OBSERVED_ARCHIVED"))
+
+    def test_sql_level_chronology_backstop(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a = self.ids_of(ex["exec_id"])[0]
+        intent = self.at_micro()
+        self.intent(ex, a, intent)
+        upd = "UPDATE cleanup_exec_item SET state='APPLIED', result_at=?, evidence_checked=1, evidence_source='CALLER_SUPPLIED', evidence_observed_at=? WHERE message_id=?"
+        self.refused(upd, self.iso(intent), self.iso(intent - timedelta(microseconds=1)), a)
+        self.refused(upd, self.iso(intent), "2026-01-01T00:00:00Z", a)  # not the fixed microsecond format
+        self.assertIsNone(self.sql(upd, self.iso(intent), self.iso(intent), a))
+
+    # ---- P3: honest terminology and trust boundary
+    def test_terminology_columns_codes_and_untrusted_sources(self):
+        cols = [r[1] for r in self.index._q("PRAGMA table_info(cleanup_exec_item)")]
+        self.assertIn("evidence_checked", cols)
+        self.assertNotIn("verified", cols)
+        self.assertIn("RECONCILED_OBSERVED_ARCHIVED", idx.EXEC_ITEM_CODES)
+        self.assertNotIn("RECONCILED_APPLIED", idx.EXEC_ITEM_CODES)
+        self.assertNotIn("RECONCILED_APPLIED", ce.CODE_MEANING)
+        self.assertIn("not attributed", ce.CODE_MEANING["RECONCILED_OBSERVED_ARCHIVED"])
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a = self.ids_of(ex["exec_id"])[0]
+        intent = self.at_micro()
+        self.intent(ex, a, intent)
+        now = intent + timedelta(seconds=5)
+        before = self.snapshot()
+        for src in ("TRUSTED_ADAPTER", "gmail-live-read", "local-guess", None):  # a caller cannot claim to be the trusted Gmail adapter
+            with self.assertRaises(ce.ExecError, msg=src) as cm:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, self.AFTER, when=self.iso(intent), source=src), now=now)
+            self.assertEqual(cm.exception.code, "BAD_EVIDENCE")
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(ce.ACCEPTED_EVIDENCE_SOURCES, ("CALLER_SUPPLIED",))
+        self.assertNotIn("attributed", " ".join(cols))
+
+    # ---- S1: accepted evidence cannot be downgraded
+    def test_accepted_evidence_cannot_be_downgraded_or_altered_by_direct_sql(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a = self.ids_of(ex["exec_id"])[0]
+        intent = self.at_micro()
+        self.intent(ex, a, intent)
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, self.AFTER, when=self.iso(intent)), now=intent + timedelta(seconds=5))
+        before = self.snapshot()
+        for stmt, params in (("UPDATE cleanup_exec_item SET evidence_checked=0 WHERE message_id=?", (a,)),
+                             ("UPDATE cleanup_exec_item SET evidence_source=NULL WHERE message_id=?", (a,)),
+                             ("UPDATE cleanup_exec_item SET evidence_source='TRUSTED_ADAPTER' WHERE message_id=?", (a,)),
+                             ("UPDATE cleanup_exec_item SET evidence_observed_at=NULL WHERE message_id=?", (a,)),
+                             ("UPDATE cleanup_exec_item SET evidence_observed_at='2030-01-01T00:00:00.000000Z' WHERE message_id=?", (a,)),
+                             ("UPDATE cleanup_exec_item SET state='UNKNOWN' WHERE message_id=?", (a,)),
+                             ("UPDATE cleanup_exec_item SET state='NOT_APPLIED', evidence_checked=0 WHERE message_id=?", (a,)),
+                             ("UPDATE cleanup_exec_item SET evidence_checked=0, evidence_source=NULL, evidence_observed_at=NULL, state='PENDING' WHERE message_id=?", (a,))):
+            self.refused(stmt, *params)
+            self.assertEqual(self.snapshot(), before, stmt)  # a refused statement rolls back completely
+        self.refused("UPDATE cleanup_exec_item SET evidence_checked=1 WHERE message_id<>?", a)  # nor can evidence appear on non-APPLIED items
+
+    def test_executed_requires_every_applied_item_to_have_checked_evidence(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        for mid in self.ids_of(ex["exec_id"]):
+            self.intent(ex, mid, self.at_micro())
+        # 'APPLIED' without evidence_checked cannot even be written (table CHECK and trigger)
+        self.refused("UPDATE cleanup_exec_item SET state='APPLIED', result_at='2030-01-01T00:00:00.000000Z' WHERE exec_id=?", ex["exec_id"])
+
+    # ---- S3: ARCHIVE recovery metadata must include INBOX
+    def test_archive_intent_must_include_inbox_in_library_and_sql_and_preserves_other_labels_exactly(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a, b = self.ids_of(ex["exec_id"])
+        before = self.snapshot()
+        for labels in (["CATEGORY_PROMOTIONS"], ["Label_9", "My Private Label"], ["inbox"], ["INBOX2"], ["XINBOX"], [], None, "INBOX", ["Label\"INBOX\""]):
+            with self.assertRaises(ce.ExecError, msg=labels) as cm:
+                ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, labels, now=self.tick())
+            self.assertEqual(cm.exception.code, "BAD_INPUT")
+            self.assertEqual(self.snapshot(), before)
+        for bad in ('["CATEGORY_PROMOTIONS"]', '["INBOXX"]', '["inbox"]', '["a\\"INBOX\\"]', '[]', 'INBOX', '{"INBOX":1}'):
+            self.refused("UPDATE cleanup_exec_item SET state='INTENT', intent_at='2026-01-01T00:00:00.000000Z', prev_label_ids=? WHERE message_id=?", bad, a)
+            self.refused("UPDATE cleanup_exec_item SET prev_label_ids=? WHERE message_id=?", bad, b)  # table CHECK even before an intent
+        self.assertEqual(self.snapshot(), before)
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, ["Label_9", "INBOX", "My Private Label", "CATEGORY_PROMOTIONS", "Label_9"], now=self.tick())
+        stored = self.index._q("SELECT prev_label_ids FROM cleanup_exec_item WHERE message_id=?", a)[0][0]
+        self.assertEqual(stored, json.dumps(sorted({"INBOX", "Label_9", "My Private Label", "CATEGORY_PROMOTIONS"})))
+        self.assertEqual(set(json.loads(stored)) - {"INBOX"}, {"Label_9", "My Private Label", "CATEGORY_PROMOTIONS"})  # unrelated labels preserved exactly
+        self.refused("UPDATE cleanup_exec_item SET prev_label_ids='[\"INBOX\"]' WHERE message_id=?", a)  # still immutable
+
+    # ---- S2: EXECUTING needs exactly one ACTIVE slice
+    def test_executing_invariant_normal_interrupted_recovered_and_corrupted(self):
+        ex = self.reserve(self.approved_plan(["m1", "m2"]))
+        E = ex["exec_id"]
+        self.assertEqual(ce.invariant_problems(self.index, ACCT, E), [])
+        self.refused("UPDATE cleanup_execution SET state='EXECUTING' WHERE exec_id=?", E)  # no ACTIVE slice yet: refused at the entry
+        self.token = ce.start_slice(self.index, ACCT, E, 1, now=self.tick())  # slice goes ACTIVE first, then the execution
+        self.assertEqual(ce.invariant_problems(self.index, ACCT, E), [])
+        self.assertEqual([s["state"] for s in ce.slices(self.index, ACCT, E)], ["ACTIVE"])
+        a = self.ids_of(E)[0]
+        # direct-SQL corruption: the ACTIVE slice disappears under a running execution (cannot be blocked per statement, must be detected)
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_slice SET state='STOPPED' WHERE exec_id=?", E))
+        self.assertEqual(ce.invariant_problems(self.index, ACCT, E), ["EXECUTING_WITHOUT_ONE_ACTIVE_SLICE_AND_LEASE"])
+        before = self.snapshot()
+        with self.assertRaises(ce.ExecError) as cm:
+            ce.record_intent(self.index, ACCT, E, self.token, a, self.LABELS, now=self.tick())
+        self.assertEqual(cm.exception.code, "INVARIANT_BROKEN")
+        self.assertEqual(self.snapshot(), before)
+        recovered = ce.recover_interrupted(self.index, ACCT, self.t + timedelta(minutes=30))  # an expired lease still recovers it, fail closed
+        self.assertEqual(recovered, [E])
+        self.assertEqual(self.exec_state(E), "FAILED")
+        self.assertEqual(ce.invariant_problems(self.index, ACCT, E), [])
+
+    def test_interruption_with_a_normal_active_slice_recovers_cleanly(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a = self.ids_of(ex["exec_id"])[0]
+        self.intent(ex, a, self.at_micro())
+        self.assertEqual(ce.recover_interrupted(self.index, ACCT, self.t + timedelta(minutes=30)), [ex["exec_id"]])
+        self.assertEqual(self.exec_state(ex["exec_id"]), "RECONCILIATION_REQUIRED")
+        self.assertEqual(ce.invariant_problems(self.index, ACCT, ex["exec_id"]), [])
+
+    def test_a_second_active_slice_or_early_activation_is_refused(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        self.refused("UPDATE cleanup_exec_slice SET state='ACTIVE' WHERE exec_id=?", ex["exec_id"])  # already ACTIVE: not a transition
+        self.refused("UPDATE cleanup_execution SET state='AWAITING_CONTINUATION' WHERE exec_id=?", ex["exec_id"])
+
+    # ---- C1: fail-closed continuation
+    def big(self):
+        self.index.purge(ACCT)
+        self.seed([msg(i, sender=f"s{i}@shop.example.test") for i in range(1, 141)])
+        plan = self.approved_plan([f"m{i}" for i in range(1, 131)])
+        ex = self.reserve(plan)
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
+        return plan, ex
+
+    def work(self, ex, plan_outcomes):
+        """plan_outcomes: list of 'A' applied, 'R' rejected, 'D' skipped (drift), 'G' skipped (gone), 'U' unknown, one per slice-1 item."""
+        for mid, o in zip(self.ids_of(ex["exec_id"], 1), plan_outcomes):
+            ce.renew_lease(self.index, ACCT, ex["exec_id"], self.token, now=self.tick())
+            if o in "DG":
+                ce.record_skip(self.index, ACCT, ex["exec_id"], self.token, mid, "SKIPPED_DRIFT" if o == "D" else "SKIPPED_GONE", "LABELS_CHANGED" if o == "D" else "NOT_FOUND", now=self.tick())
+                continue
+            ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, mid, ["INBOX", "CATEGORY_PROMOTIONS"], now=self.tick())
+            if o == "A":
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, mid, "APPLIED", evidence=self.ev(mid), now=self.tick())
+            elif o == "R":
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, mid, "NOT_APPLIED", now=self.tick())
+            else:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, mid, "UNKNOWN", code="TIMEOUT", now=self.tick())
+
+    def finish_and_check_blocked(self, ex, plan, expect_state):
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        self.assertEqual(self.exec_state(ex["exec_id"]), expect_state)
+        self.assertEqual([s["state"] for s in ce.slices(self.index, ACCT, ex["exec_id"])], ["COMPLETED", "STOPPED", "STOPPED"])
+        c = ce.code_counts(self.index, ACCT, ex["exec_id"])
+        self.assertEqual(c.get(("NOT_APPLIED", "NEVER_ATTEMPTED")), 105)  # the 105 remaining targets were never touched
+        with self.assertRaises(ce.ExecError) as cm:
+            ce.confirm_slice(self.index, ACCT, ex["exec_id"], 2, ce.continuation_phrase(plan, 2, 100), now=self.tick())
+        self.assertEqual(cm.exception.code, "BAD_STATE")
+        with self.assertRaises(ce.ExecError):
+            ce.start_slice(self.index, ACCT, ex["exec_id"], 2, now=self.tick())
+        self.assertEqual(ce.invariant_problems(self.index, ACCT, ex["exec_id"]), [])
+        self.assertNotEqual(self.exec_state(ex["exec_id"]), "EXECUTED")  # failure is never turned into apparent success
+
+    def test_a_canary_with_zero_applications_never_continues(self):
+        plan, ex = self.big()
+        self.work(ex, "R" * 25)
+        self.finish_and_check_blocked(ex, plan, "FAILED")
+
+    def test_a_canary_of_only_safe_skips_still_applied_nothing_so_it_never_continues(self):
+        plan, ex = self.big()
+        self.work(ex, "DG" * 12 + "D")
+        self.finish_and_check_blocked(ex, plan, "FAILED")
+
+    def test_one_rejected_mutation_stops_an_otherwise_successful_canary(self):
+        plan, ex = self.big()
+        self.work(ex, "A" * 24 + "R")
+        self.finish_and_check_blocked(ex, plan, "PARTIAL")
+
+    def test_unknown_outcomes_and_reconciliation_conflicts_never_continue(self):
+        plan, ex = self.big()
+        self.work(ex, "A" * 24 + "U")
+        with self.assertRaises(ce.ExecError):  # an UNKNOWN item keeps the slice open
+            ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "AMBIGUOUS_RESULT", now=self.tick())
+        self.assertEqual(self.exec_state(ex["exec_id"]), "RECONCILIATION_REQUIRED")
+        unknown = self.ids_of(ex["exec_id"], 1, "UNKNOWN")[0]
+        done = ce.reconcile_item(self.index, ACCT, ex["exec_id"], unknown, self.ev(unknown, ("SOMETHING_ELSE",)), now=self.tick())
+        self.assertEqual(done["state"], "PARTIAL")
+        with self.assertRaises(ce.ExecError):
+            ce.confirm_slice(self.index, ACCT, ex["exec_id"], 2, ce.continuation_phrase(plan, 2, 100), now=self.tick())
+
+    def test_a_canary_with_applications_and_only_safe_skips_may_continue(self):
+        plan, ex = self.big()
+        self.work(ex, "A" * 20 + "DDDGG")
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        self.assertEqual(self.exec_state(ex["exec_id"]), "AWAITING_CONTINUATION")
+        self.assertEqual(ce.continuation_blockers(self.index, ACCT, ex["exec_id"]), [])
+        ce.confirm_slice(self.index, ACCT, ex["exec_id"], 2, ce.continuation_phrase(plan, 2, 100), now=self.tick())
+        self.assertEqual([s["state"] for s in ce.slices(self.index, ACCT, ex["exec_id"])], ["COMPLETED", "CONFIRMED", "PENDING"])
+
+    def test_sql_level_refuses_awaiting_continuation_after_an_unsafe_slice(self):
+        plan, ex = self.big()
+        self.work(ex, "R" * 25)
+        self.assertIsNone(self.sql("UPDATE cleanup_exec_slice SET state='COMPLETED' WHERE exec_id=? AND slice_no=1", ex["exec_id"]))
+        self.refused("UPDATE cleanup_execution SET state='AWAITING_CONTINUATION' WHERE exec_id=?", ex["exec_id"])
+        plan2 = None  # noqa: F841
+
+
+
 class SourceGuards(unittest.TestCase):
     MODULES = ("cleanup_exec.py", "cleanup_exec_report.py")
 
@@ -1260,7 +1557,7 @@ class SourceGuards(unittest.TestCase):
                     if top == "gmail_intelligence":
                         self.assertIn(m.split(".")[1] if "." in m else None, allowed_local | {None}, (name, m))
                     else:
-                        self.assertIn(top, {"json", "secrets", "sqlite3", "datetime", "hmac", "dataclasses"}, (name, m))
+                        self.assertIn(top, {"json", "secrets", "sqlite3", "datetime", "hmac", "dataclasses", "re"}, (name, m))
             for banned in ("googleapiclient", "google.", "keystore", "oauth", "urllib", "socket", "subprocess", "requests", "ai_http", "scanner",
                            "gmail_write", "batchModify", ".trash(", ".send(", "untrash", "messages().modify", "gmail.modify", "mail.google.com"):
                 self.assertNotIn(banned, text, (name, banned))
