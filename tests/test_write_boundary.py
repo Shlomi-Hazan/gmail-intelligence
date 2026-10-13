@@ -78,7 +78,8 @@ class ImportBoundaryTests(unittest.TestCase):
         self.assertEqual({c for c in self.callers("fetch_profile_email") if c[0] == "cli.py"}, {("cli.py", "cmd_auth_login_write")})
 
     def test_revocation_and_the_write_store_have_explicit_callers_only(self):
-        self.assertEqual({c for c in self.callers("revoke_refresh_token") if c[0] == "cli.py"}, {("cli.py", "cmd_auth_login_write"), ("cli.py", "cmd_auth_revoke_write")})
+        self.assertEqual({c for c in self.callers("revoke_refresh_token") if c[0] == "cli.py"}, {("cli.py", "_discard_new_grant"), ("cli.py", "cmd_auth_revoke_write")})
+        self.assertEqual({c for c in self.callers("_discard_new_grant")}, {("cli.py", "cmd_auth_login_write")})  # only a rejected login may discard a fresh grant
         self.assertEqual({c for c in self.callers("WriteTokenStore") if c[0] == "cli.py"}, {("cli.py", "_write_store")})
         self.assertEqual({c for c in self.callers("_write_store")}, {("cli.py", n) for n in (
             "cmd_auth_login_write", "cmd_auth_status_write", "cmd_auth_logout_write", "cmd_auth_revoke_write")})

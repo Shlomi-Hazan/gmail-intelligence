@@ -1,10 +1,12 @@
 """Pure request policy for the write transport (M4C-B1): which Gmail requests may ever be sent. Stdlib only, no I/O, no network.
 
 An ALLOWLIST of exactly four request families (for one account, `users/me`):
-  GET  /gmail/v1/users/me/profile
-  GET  /gmail/v1/users/me/messages/{id}            (format minimal|metadata)
-  GET  /gmail/v1/users/me/threads/{id}             (format minimal; read-only sibling inspection)
-  POST /gmail/v1/users/me/messages/{id}/modify     (body exactly: remove the INBOX label)
+  GET  /gmail/v1/users/me/profile?fields=emailAddress
+  GET  /gmail/v1/users/me/messages/{id}            (one of two fixed projections: labels only, or labels plus the From header)
+  GET  /gmail/v1/users/me/threads/{id}             (labels of the messages only; read-only sibling inspection)
+  POST /gmail/v1/users/me/messages/{id}/modify     (body exactly: remove the INBOX label; fixed response projection)
+Every GET and the POST MUST carry one of the allowlisted `fields` projections, so a direct call cannot return snippets, subject lines,
+bodies or other content. Argument types are exact (`str`, `bytes`, `dict`): subclasses and mutable buffers are refused.
 Everything else is denied BEFORE any network dispatch: other endpoints, hosts, ports, methods, encodings, query parameters, headers,
 bodies, batch and upload endpoints. Errors carry a fixed code and message only - never the URL, ids, headers, body or tokens.
 """
@@ -24,9 +26,11 @@ _ROUTES = (("PROFILE", "GET", r"/gmail/v1/users/me/profile"),
            ("MESSAGE_GET", "GET", rf"/gmail/v1/users/me/messages/{_ID}"),
            ("THREAD_GET", "GET", rf"/gmail/v1/users/me/threads/{_ID}"),
            ("MESSAGE_MODIFY", "POST", rf"/gmail/v1/users/me/messages/{_ID}/modify"))
-_FIELDS = {"MESSAGE_GET": ("id,threadId,labelIds", "id,threadId,internalDate,labelIds,sizeEstimate,payload/headers"),
+_FIELDS = {"PROFILE": ("emailAddress",),
+           "MESSAGE_GET": ("id,threadId,labelIds", "id,threadId,internalDate,labelIds,sizeEstimate,payload/headers"),
            "THREAD_GET": ("id,messages/id,messages/labelIds",),
            "MESSAGE_MODIFY": ("id,threadId,labelIds",)}
+_HEADER_FIELDS = "id,threadId,internalDate,labelIds,sizeEstimate,payload/headers"  # the only projection that includes a header (From only)
 _SAFE_QUERY = r"[A-Za-z0-9,/]+"
 _HEADERS = {"accept", "user-agent", "content-type", "authorization"}
 _MESSAGES = {
@@ -52,13 +56,13 @@ class Denied(Exception):
 
 def valid_id(value):
     """Gmail message/thread ids are lowercase hex; anything else is refused (no encoding, no path tricks)."""
-    if not isinstance(value, str) or re.fullmatch(_ID, value, re.ASCII) is None:
+    if type(value) is not str or re.fullmatch(_ID, value, re.ASCII) is None:
         raise Denied("DENIED_PATH")
     return value
 
 
 def _split(url):
-    if not isinstance(url, str) or not url.isascii() or len(url) > MAX_URL:
+    if type(url) is not str or not url.isascii() or len(url) > MAX_URL:
         raise Denied("DENIED_PATH")
     if any(ord(c) <= 32 or ord(c) == 127 or c in "%#\\@+;" for c in url):
         raise Denied("DENIED_PATH")  # percent-encoding, fragments, userinfo, backslashes, parameters, whitespace: all ambiguous
@@ -85,15 +89,16 @@ def _parse_query(query):
 
 
 def _check_query(kind, params):
-    allowed = {"PROFILE": set(), "MESSAGE_GET": {"format", "metadataHeaders", "fields"}, "THREAD_GET": {"format", "fields"},
+    allowed = {"PROFILE": {"fields"}, "MESSAGE_GET": {"format", "metadataHeaders", "fields"}, "THREAD_GET": {"format", "fields"},
                "MESSAGE_MODIFY": {"fields"}}[kind]
     if set(params) - allowed:  # also refuses access_token / key / alt / prettyPrint and every other parameter
         raise Denied("DENIED_QUERY")
-    if "fields" in params and params["fields"] not in _FIELDS.get(kind, ()):
+    if params.get("fields") not in _FIELDS[kind]:  # a projection is MANDATORY on every request (a missing one is None, which is never listed)
         raise Denied("DENIED_QUERY")
     if kind == "MESSAGE_GET":
-        fmt = params.get("format")
-        if fmt not in ("minimal", "metadata") or ("metadataHeaders" in params and (fmt != "metadata" or params["metadataHeaders"] != "From")):
+        with_header = params["fields"] == _HEADER_FIELDS  # the From header may only be requested together with its fixed projection
+        if params.get("format") != ("metadata" if with_header else "minimal") or ("metadataHeaders" in params) != with_header \
+                or (with_header and params["metadataHeaders"] != "From"):
             raise Denied("DENIED_QUERY")
     if kind == "THREAD_GET" and params.get("format") != "minimal":
         raise Denied("DENIED_QUERY")
@@ -102,11 +107,11 @@ def _check_query(kind, params):
 def _check_headers(headers, kind, allow_authorization):
     if headers is None:
         headers = {}
-    if not isinstance(headers, dict):
+    if type(headers) is not dict:
         raise Denied("DENIED_HEADER")
     seen = set()
     for key, value in headers.items():
-        if not isinstance(key, str) or not isinstance(value, str) or not key.isascii() or not value.isascii():
+        if type(key) is not str or type(value) is not str or not key.isascii() or not value.isascii():
             raise Denied("DENIED_HEADER")
         name = key.lower()
         if name in seen or name not in _HEADERS or len(value) > 3000 or any(ord(c) < 32 or ord(c) == 127 for c in value):
@@ -131,7 +136,7 @@ def check_request(method, url, headers=None, body=None, *, allow_authorization=F
     for name, verb, pattern in _ROUTES:
         if re.fullmatch(pattern, path, re.ASCII):
             kind = name
-            if not isinstance(method, str) or method != verb:
+            if type(method) is not str or method != verb:
                 raise Denied("DENIED_METHOD")
             break
     if kind is None:
@@ -139,19 +144,20 @@ def check_request(method, url, headers=None, body=None, *, allow_authorization=F
     _check_query(kind, _parse_query(query))
     _check_headers(headers, kind, allow_authorization)
     if kind == "MESSAGE_MODIFY":
-        raw = body.encode("ascii", "strict") if isinstance(body, str) and body.isascii() else body
-        if raw != MODIFY_BODY:
-            raise Denied("DENIED_BODY")  # no addLabelIds, no other labels, no extra fields, no escaped or re-ordered variants
-    elif body not in (None, b"", ""):
+        if type(body) is not bytes or body != MODIFY_BODY:  # exact immutable bytes: no bytearray/subclass/str, no extra fields, labels or escapes
+            raise Denied("DENIED_BODY")
+    elif body is not None and not (type(body) is bytes and body == b""):
         raise Denied("DENIED_BODY")
     return kind
 
 
 def check_response(status, length=0):
     """Redirects are never followed or trusted; oversized responses are refused."""
-    if isinstance(status, int) and 300 <= status < 400:
+    if type(status) is not int:
+        raise Denied("DENIED_BODY")  # an unreadable status line is never trusted
+    if 300 <= status < 400:
         raise Denied("DENIED_REDIRECT")
-    if length > MAX_RESPONSE:
+    if type(length) is not int or length > MAX_RESPONSE:
         raise Denied("DENIED_SIZE")
 
 

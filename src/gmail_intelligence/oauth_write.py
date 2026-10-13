@@ -34,6 +34,28 @@ LOGIN_WARNING = (
     "Revoke the access when you are done (`auth revoke-write`); deleting the local token alone does not revoke it at Google.")
 
 
+class IssuedToken:
+    """The token material of a grant that Google just issued, kept ONLY so a rejected login can revoke it. Never printed or stored."""
+    __slots__ = ("refresh_token", "token")
+
+    def __init__(self, refresh_token=None, token=None):
+        self.refresh_token, self.token = refresh_token, token
+
+    def __repr__(self):
+        return "<IssuedToken>"
+
+
+class LoginRejected(AuthError):
+    """Authorization completed at Google but this tool refuses the result. `issued` identifies the new grant so the caller can revoke it.
+
+    The message is safe to print; `issued` is not (it holds token material).
+    """
+
+    def __init__(self, message, issued):
+        super().__init__(message)
+        self.issued = issued
+
+
 def client_fingerprint(client_config):
     return hashlib.sha256(client_config["installed"]["client_id"].encode("utf-8")).hexdigest()
 
@@ -73,8 +95,11 @@ def run_login_write(client_path, flow_factory=None, open_browser=True, timeout_s
             access_type="offline", prompt="consent",  # no include_granted_scopes: never accumulate scopes
             authorization_prompt_message="If the browser does not open, visit:\n{url}\n",
             success_message="Authorization received. You can close this tab and return to the terminal.")
-    except Warning:
-        raise AuthError("Google returned different scopes than requested; refusing credentials") from None
+    except Warning:  # oauthlib raises this AFTER the token was issued: salvage the handle so the unwanted grant can be revoked
+        tok = getattr(getattr(flow, "oauth2session", None), "token", None)
+        tok = tok if isinstance(tok, dict) else {}
+        raise LoginRejected("Google returned different scopes than requested; refusing credentials",
+                            IssuedToken(tok.get("refresh_token"), tok.get("access_token"))) from None
     except Exception as exc:
         code = getattr(exc, "error", None)
         if code == "access_denied":
@@ -86,13 +111,16 @@ def run_login_write(client_path, flow_factory=None, open_browser=True, timeout_s
     granted = token.get("scope") or getattr(creds, "granted_scopes", None) or creds.scopes
     if isinstance(granted, str):
         granted = granted.split()
-    check_granted_write_scopes(granted)
+    issued = IssuedToken(getattr(creds, "refresh_token", None), getattr(creds, "token", None))
+    try:
+        check_granted_write_scopes(granted)
+    except AuthError as exc:
+        raise LoginRejected(str(exc), issued) from None
     client_id = getattr(creds, "client_id", None)
     if client_id is not None and client_id != config["installed"]["client_id"]:
-        raise AuthError("credentials were issued to a different OAuth client; refusing them")
+        raise LoginRejected("credentials were issued to a different OAuth client; refusing them", issued)
     if not creds.refresh_token:
-        raise AuthError("Google did not return a refresh token; revoke the app's access at "
-                        "https://myaccount.google.com/permissions and run `auth login-write` again")
+        raise LoginRejected("Google did not return a refresh token; the write authorization cannot be kept", issued)
     return creds, list(granted)
 
 
@@ -175,6 +203,7 @@ def refresh_write_credentials(creds, request=None):
         request = PinnedOAuthRequest(TOKEN_URI, request)
     try:
         creds.refresh(request)
+        check_refresh_result(creds)
     except RefreshError as exc:
         text = str(exc)
         if "invalid_grant" in text or "revoked" in text.lower() or "expired" in text.lower():
@@ -185,8 +214,25 @@ def refresh_write_credentials(creds, request=None):
     return True
 
 
+def check_refresh_result(creds):
+    """A refresh must report exactly the write scope and yield a usable token. Fail closed (and store nothing) otherwise.
+
+    The scope list is required, not optional: if Google ever omits it the refresh is refused and this check must be revisited at a
+    separately approved live stage. M4C-C must call the refresh explicitly (never from status or read commands).
+    """
+    granted = getattr(creds, "granted_scopes", None)
+    if not granted:
+        raise AuthError("the refresh response did not report the granted scopes; refusing it")
+    check_granted_write_scopes(granted)
+    if not getattr(creds, "token", None) or getattr(creds, "expiry", None) is None or not getattr(creds, "refresh_token", None):
+        raise AuthError("the refresh response is incomplete; refusing it")
+
+
 def refresh_and_store(store, blob, client_config, request=None):
-    """Refresh and persist ONLY into the separate write item. Returns the new (credentials, blob)."""
+    """Refresh and persist ONLY into the separate write item. Returns the new (credentials, blob).
+
+    The stored record is replaced only after the refresh result passed `check_refresh_result`; on any failure it stays untouched.
+    """
     creds = blob_to_write_credentials(blob, client_config)
     refresh_write_credentials(creds, request)
     new = write_blob(creds, blob.get("account"), blob["scopes"], client_config)
@@ -198,27 +244,52 @@ def _form_encode(value):
     return "".join(c if (c.isascii() and (c.isalnum() or c in "-._~")) else "%%%02X" % ord(c) for c in value)
 
 
-def revoke_refresh_token(refresh_token, request=None):
-    """Revoke ONE refresh token at Google (explicit `auth revoke-write` only). Returns True when revoked or already invalid.
+def _strict_object(data):
+    """JSON object parse for an OAuth error body: bounded, UTF-8, no duplicate keys. None when it is anything else."""
+    if not isinstance(data, (bytes, bytearray)) or len(data) > 4096:
+        return None
 
-    Only this token's grant is affected. A rejected/unknown token (HTTP 400) counts as already invalid; anything else is an error.
+    def pairs(items):
+        out = {}
+        for k, v in items:
+            if k in out:
+                raise ValueError("duplicate key")
+            out[k] = v
+        return out
+    try:
+        value = json.loads(bytes(data).decode("utf-8"), object_pairs_hook=pairs)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def revoke_refresh_token(token, request=None):
+    """Revoke ONE token at Google (explicit commands only). Returns "REVOKED" or "ALREADY_INVALID"; anything else raises AuthError.
+
+    Contract used (Google's documented revocation endpoint; NOT verified against Google here): HTTP 200 means revoked, and HTTP 400 whose JSON
+    body is exactly an `invalid_token` error means the token was already invalid or revoked. Every other status (including other 400
+    errors such as invalid_request / invalid_client, redirects, 5xx), any unreadable body and any transport failure is NOT a confirmation.
+    The caller must then keep the local credential.
     """
-    if not isinstance(refresh_token, str) or not refresh_token:
-        raise AuthError("no refresh token to revoke")
+    if not isinstance(token, str) or not token:
+        raise AuthError("no token to revoke")
     if request is None:
         request = default_oauth_request(REVOKE_URI)
     elif not isinstance(request, PinnedOAuthRequest):
         request = PinnedOAuthRequest(REVOKE_URI, request)
     try:
-        resp = request(REVOKE_URI, method="POST", body=("token=" + _form_encode(refresh_token)).encode("ascii"),
+        resp = request(REVOKE_URI, method="POST", body=("token=" + _form_encode(token)).encode("ascii"),
                        headers={"content-type": "application/x-www-form-urlencoded"})
     except AuthError:
         raise
     except Exception as exc:
-        raise AuthError(f"revocation request failed ({type(exc).__name__})") from None
-    status = getattr(resp, "status", None)
-    if status == 200:
-        return True
-    if status == 400:
-        return True
-    raise AuthError(f"revocation was not confirmed (HTTP {status}); the local token was kept")
+        raise AuthError(f"revocation request failed ({type(exc).__name__}); nothing is confirmed, the local token was kept") from None
+    status, data = getattr(resp, "status", None), getattr(resp, "data", b"")
+    if type(status) is int and status == 200 and (not data or _strict_object(data) is not None):
+        return "REVOKED"
+    if type(status) is int and status == 400:
+        body = _strict_object(data)
+        if body is not None and body.get("error") == "invalid_token":
+            return "ALREADY_INVALID"
+        raise AuthError("revocation was rejected (HTTP 400, not an invalid-token answer); nothing is confirmed, the local token was kept")
+    raise AuthError(f"revocation was not confirmed ({'HTTP ' + str(status) if type(status) is int else 'unreadable answer'}); the local token was kept")

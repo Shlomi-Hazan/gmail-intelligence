@@ -23,7 +23,12 @@ from gmail_intelligence import cleanup_exec, gmail_write as gw, gmail_write_poli
 
 MID, TID = "18c0ffee00112233", "18c0ffee00112299"
 B = pol.BASE + "/gmail/v1/users/me"
-MODIFY = f"{B}/messages/{MID}/modify"
+MODIFY_PATH = f"{B}/messages/{MID}/modify"
+MODIFY = MODIFY_PATH + "?fields=id,threadId,labelIds"
+PROFILE = f"{B}/profile?fields=emailAddress"
+MSG_MIN = "?format=minimal&fields=id,threadId,labelIds"
+MSG_HDR = "?format=metadata&metadataHeaders=From&fields=id,threadId,internalDate,labelIds,sizeEstimate,payload/headers"
+THR_MIN = "?format=minimal&fields=id,messages/id,messages/labelIds"
 PRIVATE = (A_TOK, R_TOK, MID, TID, ACCOUNT, "Bearer")
 
 
@@ -68,18 +73,28 @@ def ok(**obj):
     return 200, json.dumps(obj).encode()
 
 
-def adapter(net, creds=None, expected=ACCOUNT):
-    return gw.ArchiveAdapter(gw._Transport(creds or WCreds(), net), expected)
+def gerr(status, reason=None):
+    """A well-formed Gmail error document (the only kind of answer that counts as a definite rejection)."""
+    err = {"code": status, "message": "synthetic"}
+    if reason:
+        err["errors"] = [{"reason": reason}]
+    return status, json.dumps({"error": err}).encode()
+
+
+def adapter(net, creds=None, expected=ACCOUNT, verified=True):
+    a = gw.ArchiveAdapter(gw._Transport(creds or WCreds(), net), expected)
+    a._verified = verified  # tests that are not about verification start from the verified state
+    return a
 
 
 class PolicyAllowlistTests(unittest.TestCase):
     def test_exactly_four_request_families_are_allowed(self):
-        self.assertEqual(pol.check_request("GET", f"{B}/profile"), "PROFILE")
-        self.assertEqual(pol.check_request("GET", f"{B}/messages/{MID}?format=minimal"), "MESSAGE_GET")
-        self.assertEqual(pol.check_request("GET", f"{B}/messages/{MID}?format=metadata&metadataHeaders=From&fields=id,threadId,internalDate,labelIds,sizeEstimate,payload/headers"), "MESSAGE_GET")
-        self.assertEqual(pol.check_request("GET", f"{B}/threads/{TID}?format=minimal&fields=id,messages/id,messages/labelIds"), "THREAD_GET")
+        self.assertEqual(pol.check_request("GET", PROFILE), "PROFILE")
+        self.assertEqual(pol.check_request("GET", f"{B}/messages/{MID}{MSG_MIN}"), "MESSAGE_GET")
+        self.assertEqual(pol.check_request("GET", f"{B}/messages/{MID}{MSG_HDR}"), "MESSAGE_GET")
+        self.assertEqual(pol.check_request("GET", f"{B}/threads/{TID}{THR_MIN}"), "THREAD_GET")
         self.assertEqual(pol.check_request("POST", MODIFY, {"content-type": "application/json"}, pol.MODIFY_BODY), "MESSAGE_MODIFY")
-        self.assertEqual(pol.check_request("POST", MODIFY + "?fields=id,threadId,labelIds", {"Content-Type": "application/json", "Accept": "application/json"}, pol.MODIFY_BODY.decode()), "MESSAGE_MODIFY")
+        self.assertEqual(pol.check_request("POST", MODIFY, {"Content-Type": "application/json", "Accept": "application/json"}, pol.MODIFY_BODY), "MESSAGE_MODIFY")
         self.assertEqual(sorted(k for k, _, _ in pol._ROUTES), sorted(pol.KINDS))
         self.assertEqual(len(pol._ROUTES), 4)
 
@@ -97,7 +112,7 @@ class PolicyAllowlistTests(unittest.TestCase):
                     pol.check_request(method, url, None, pol.MODIFY_BODY if method == "POST" else None)
 
     def test_hosts_schemes_ports_and_userinfo_are_exact(self):
-        tail = "/gmail/v1/users/me/profile"
+        tail = "/gmail/v1/users/me/profile?fields=emailAddress"
         for url in ("http://gmail.googleapis.com" + tail, "HTTPS://gmail.googleapis.com" + tail, "https://GMAIL.googleapis.com" + tail,
                     "https://gmail.googleapis.com:443" + tail, "https://gmail.googleapis.com:8443" + tail, "https://gmail.googleapis.com." + tail,
                     "https://www.googleapis.com" + tail, "https://gmail.googleapis.com.evil.example.invalid" + tail, "https://evil.example.invalid" + tail,
@@ -125,19 +140,48 @@ class PolicyAllowlistTests(unittest.TestCase):
                   "?format=minimal&q=in:inbox", "?userId=other&format=minimal", "?format=minimal&$.xgafv=2"):
             with self.assertRaises(pol.Denied, msg=q):
                 pol.check_request("GET", base + q)
-        with self.assertRaises(pol.Denied):
-            pol.check_request("GET", f"{B}/profile?fields=emailAddress")
-        for q in ("", "?format=metadata", "?format=full", "?format=minimal&metadataHeaders=From"):
+        for q in ("?format=minimal", "?format=metadata", "?format=metadata&metadataHeaders=From", "?fields=id,threadId,labelIds", "?format=metadata&fields=id,threadId,labelIds",
+                  "?format=minimal&fields=id,threadId,internalDate,labelIds,sizeEstimate,payload/headers", "?format=minimal&metadataHeaders=From&fields=id,threadId,labelIds",
+                  "?format=metadata&fields=id,threadId,internalDate,labelIds,sizeEstimate,payload/headers", "?format=metadata&metadataHeaders=Subject&fields=id,threadId,internalDate,labelIds,sizeEstimate,payload/headers",
+                  "?format=metadata&metadataHeaders=From&fields=id,threadId,labelIds"):
+            with self.assertRaises(pol.Denied, msg=q):  # every GET needs one of the two fixed projections, paired with its own format/header settings
+                pol.check_request("GET", base + q)
+        for url in (f"{B}/profile", f"{B}/profile?fields=emailAddress,messagesTotal", f"{B}/profile?fields=*", f"{B}/profile?fields=historyId", f"{B}/profile?format=minimal",
+                    f"{B}/profile?fields=emailAddress&fields=emailAddress"):
+            with self.assertRaises(pol.Denied, msg=url):
+                pol.check_request("GET", url)
+        for q in ("", "?format=metadata", "?format=full", "?format=minimal&metadataHeaders=From", "?format=minimal", "?fields=id,messages/id,messages/labelIds",
+                  "?format=minimal&fields=id,messages/id,messages/labelIds,messages/snippet", "?format=minimal&fields=id,messages/snippet"):
             with self.assertRaises(pol.Denied, msg=q):
                 pol.check_request("GET", f"{B}/threads/{TID}{q}")
-        for q in ("?access_token=x", "?fields=id", "?alt=json", "?format=minimal"):
+        for q in ("", "?access_token=x", "?fields=id", "?alt=json", "?format=minimal", "?fields=id,threadId,labelIds,snippet", "?fields=id,threadId,labelIds&fields=id"):
             with self.assertRaises(pol.Denied, msg=q):
-                pol.check_request("POST", MODIFY + q, {"content-type": "application/json"}, pol.MODIFY_BODY)
+                pol.check_request("POST", MODIFY_PATH + q, {"content-type": "application/json"}, pol.MODIFY_BODY)
+
+    def test_exact_immutable_argument_types_are_required(self):
+        class S(str):
+            pass
+
+        class By(bytes):
+            pass
+        h = {"content-type": "application/json"}
+        for body in (bytearray(pol.MODIFY_BODY), By(pol.MODIFY_BODY), pol.MODIFY_BODY.decode(), memoryview(pol.MODIFY_BODY), list(pol.MODIFY_BODY)):
+            with self.assertRaises(pol.Denied, msg=type(body)):
+                pol.check_request("POST", MODIFY, h, body)
+        for call in (lambda: pol.check_request("POST", S(MODIFY), h, pol.MODIFY_BODY), lambda: pol.check_request(S("POST"), MODIFY, h, pol.MODIFY_BODY),
+                     lambda: pol.check_request("GET", S(PROFILE)), lambda: pol.check_request("GET", PROFILE, {S("accept"): "application/json"}),
+                     lambda: pol.check_request("GET", PROFILE, {"accept": S("application/json")}), lambda: pol.check_request("GET", PROFILE, {}.items()),
+                     lambda: pol.check_request("GET", PROFILE, None, bytearray(b"")), lambda: pol.check_request("GET", PROFILE, None, By(b"")),
+                     lambda: pol.valid_id(S(MID)), lambda: pol.check_response(True, 0), lambda: pol.check_response(200, "5")):
+            with self.assertRaises(pol.Denied):
+                call()
+        self.assertEqual(pol.check_request("POST", MODIFY, h, bytes(pol.MODIFY_BODY)), "MESSAGE_MODIFY")  # all permitted forms still pass
+        self.assertEqual(pol.check_request("GET", PROFILE, None, b""), "PROFILE")
 
     def test_method_confusion_is_denied(self):
-        for method, url, body in (("POST", f"{B}/profile", None), ("POST", f"{B}/messages/{MID}", None), ("GET", MODIFY, None), ("PUT", MODIFY, pol.MODIFY_BODY),
-                                  ("DELETE", f"{B}/messages/{MID}", None), ("PATCH", MODIFY, pol.MODIFY_BODY), ("HEAD", f"{B}/profile", None), ("get", f"{B}/profile", None),
-                                  ("post", MODIFY, pol.MODIFY_BODY), ("GET ", f"{B}/profile", None), ("OPTIONS", f"{B}/profile", None), (None, f"{B}/profile", None), (b"GET", f"{B}/profile", None)):
+        for method, url, body in (("POST", PROFILE, None), ("POST", f"{B}/messages/{MID}{MSG_MIN}", None), ("GET", MODIFY, None), ("PUT", MODIFY, pol.MODIFY_BODY),
+                                  ("DELETE", f"{B}/messages/{MID}{MSG_MIN}", None), ("PATCH", MODIFY, pol.MODIFY_BODY), ("HEAD", PROFILE, None), ("get", PROFILE, None),
+                                  ("post", MODIFY, pol.MODIFY_BODY), ("GET ", PROFILE, None), ("OPTIONS", PROFILE, None), (None, PROFILE, None), (b"GET", PROFILE, None)):
             with self.assertRaises(pol.Denied, msg=method):
                 pol.check_request(method, url, {"content-type": "application/json"} if body else None, body)
 
@@ -152,13 +196,13 @@ class PolicyAllowlistTests(unittest.TestCase):
         with self.assertRaises(pol.Denied):  # the mutation must declare its content type
             pol.check_request("POST", MODIFY, {}, pol.MODIFY_BODY)
         with self.assertRaises(pol.Denied):  # a read must not
-            pol.check_request("GET", f"{B}/profile", {"content-type": "application/json"})
+            pol.check_request("GET", PROFILE, {"content-type": "application/json"})
         with self.assertRaises(pol.Denied):  # a caller can never supply the credential header
-            pol.check_request("GET", f"{B}/profile", {"authorization": "Bearer SYNTH-ACCESS-1"})
-        pol.check_request("GET", f"{B}/profile", {"authorization": "Bearer SYNTH-ACCESS-1"}, allow_authorization=True)  # only the transport may
+            pol.check_request("GET", PROFILE, {"authorization": "Bearer SYNTH-ACCESS-1"})
+        pol.check_request("GET", PROFILE, {"authorization": "Bearer SYNTH-ACCESS-1"}, allow_authorization=True)  # only the transport may
         for token in ("Basic abc", "Bearer ", "Bearer a b", "bearer SYNTH-ACCESS-1", "Bearer short", "Bearer x\r\nHost: y"):
             with self.assertRaises(pol.Denied, msg=token):
-                pol.check_request("GET", f"{B}/profile", {"authorization": token}, allow_authorization=True)
+                pol.check_request("GET", PROFILE, {"authorization": token}, allow_authorization=True)
 
     def test_the_only_mutation_is_removing_inbox_from_one_message(self):
         h = {"content-type": "application/json"}
@@ -173,7 +217,7 @@ class PolicyAllowlistTests(unittest.TestCase):
                 pol.check_request("POST", MODIFY, h, body)
         for body in (b"x", "x", {}, b"{}"):
             with self.assertRaises(pol.Denied):  # reads never carry a body
-                pol.check_request("GET", f"{B}/profile", None, body)
+                pol.check_request("GET", PROFILE, None, body)
 
     def test_responses_redirects_and_size(self):
         pol.check_response(200, 10)
@@ -188,8 +232,8 @@ class PolicyAllowlistTests(unittest.TestCase):
     def test_denials_never_echo_the_request(self):
         marker = "PATH-MARKER-SYNTH"
         for call in (lambda: pol.check_request("GET", f"{B}/messages/{marker}"), lambda: pol.check_request("GET", f"https://{marker}.example.invalid/x"),
-                     lambda: pol.check_request(marker, f"{B}/profile"), lambda: pol.check_request("POST", MODIFY, {"content-type": "application/json"}, marker.encode()),
-                     lambda: pol.check_request("GET", f"{B}/profile?{marker}=1"), lambda: pol.check_request("GET", f"{B}/profile", {marker: "x"})):
+                     lambda: pol.check_request(marker, PROFILE), lambda: pol.check_request("POST", MODIFY, {"content-type": "application/json"}, marker.encode()),
+                     lambda: pol.check_request("GET", f"{B}/profile?{marker}=1"), lambda: pol.check_request("GET", PROFILE, {marker: "x"})):
             with self.assertRaises(pol.Denied) as ctx:
                 call()
             self.assertNotIn(marker, str(ctx.exception) + repr(ctx.exception) + ctx.exception.code)
@@ -231,13 +275,13 @@ class TransportTests(Base):
     def test_reads_use_only_allowed_get_requests(self):
         net = Net(ok(emailAddress=ACCOUNT), ok(id=MID, threadId=TID, labelIds=["INBOX", "Label_9"]), ok(id=TID, messages=[{"id": MID, "labelIds": ["INBOX"]}, {"id": "18c0ffee0000aaaa"}]))
         a = adapter(net)
-        self.assertEqual(a.profile_email(), ACCOUNT)
+        self.assertEqual(a._profile_email(), ACCOUNT)
         st = a.message_state(MID)
         self.assertEqual((st.thread_id, st.label_ids), (TID, ("INBOX", "Label_9")))
         self.assertEqual(a.thread_state(TID), ((MID, ("INBOX",)), ("18c0ffee0000aaaa", ())))
         self.assertEqual([r["method"] for r in net.log], ["GET", "GET", "GET"])
         self.assertTrue(all(r["body"] is None for r in net.log))
-        self.assertEqual([r["target"] for r in net.log], ["/gmail/v1/users/me/profile", f"/gmail/v1/users/me/messages/{MID}?format=minimal&fields=id,threadId,labelIds",
+        self.assertEqual([r["target"] for r in net.log], ["/gmail/v1/users/me/profile?fields=emailAddress", f"/gmail/v1/users/me/messages/{MID}?format=minimal&fields=id,threadId,labelIds",
                                                            f"/gmail/v1/users/me/threads/{TID}?format=minimal&fields=id,messages/id,messages/labelIds"])
 
     def test_forbidden_requests_are_denied_before_any_connection_is_opened(self):
@@ -245,7 +289,7 @@ class TransportTests(Base):
         t = gw._Transport(WCreds(), net)
         for method, url, body in (("POST", f"{B}/messages/{MID}/trash", b"{}"), ("POST", f"{B}/messages/batchModify", b"{}"), ("POST", f"{B}/messages/send", b"{}"),
                                   ("POST", f"{B}/drafts", b"{}"), ("POST", f"{B}/threads/{TID}/modify", pol.MODIFY_BODY), ("POST", f"{B}/messages/{MID}/untrash", None),
-                                  ("POST", f"{B}/messages/batchDelete", b"{}"), ("POST", f"{B}/messages/insert", b"{}"), ("DELETE", f"{B}/messages/{MID}", None),
+                                  ("POST", f"{B}/messages/batchDelete", b"{}"), ("POST", f"{B}/messages/insert", b"{}"), ("DELETE", f"{B}/messages/{MID}{MSG_MIN}", None),
                                   ("POST", MODIFY, b'{"addLabelIds":["TRASH"],"removeLabelIds":["INBOX"]}'), ("POST", MODIFY, b'{"removeLabelIds":["UNREAD"]}'),
                                   ("GET", f"{B}/messages/{MID}?format=full", None), ("GET", f"{B}/messages/{MID}/attachments/{MID}", None),
                                   ("POST", pol.BASE + "/batch/gmail/v1", b"--b"), ("GET", "https://evil.example.invalid/gmail/v1/users/me/profile", None)):
@@ -262,19 +306,19 @@ class TransportTests(Base):
             with self.assertRaises(pol.Denied):
                 t._dispatch(method, url, body, dict(headers, **({"content-type": "application/json"} if body else {})))
         with self.assertRaises(pol.Denied):  # even a valid request with a smuggled override header
-            t._dispatch("GET", f"{B}/profile", None, dict(headers, **{"x-http-method-override": "DELETE"}))
+            t._dispatch("GET", PROFILE, None, dict(headers, **{"x-http-method-override": "DELETE"}))
         self.assertEqual((net.opened, net.log), (0, []))
 
     def test_redirects_are_never_followed_and_nothing_is_resent(self):
-        net = Net((307, b""), ok(id=MID, threadId=TID, labelIds=[]))
-        with self.assertRaises(pol.Denied) as ctx:
-            adapter(net).archive_message(MID)
-        self.assertEqual(ctx.exception.code, "DENIED_REDIRECT")
-        self.assertEqual(len(net.log), 1)  # the scripted success was never requested
         net = Net((302, b""), ok(emailAddress=ACCOUNT))
-        with self.assertRaises(pol.Denied):
-            adapter(net).profile_email()
-        self.assertEqual(len(net.log), 1)
+        with self.assertRaises(pol.Denied) as ctx:  # a read: refused, never followed
+            adapter(net)._profile_email()
+        self.assertEqual((ctx.exception.code, len(net.log)), ("DENIED_REDIRECT", 1))
+        for status in (301, 302, 303, 307, 308):  # the MUTATION was sent: a redirect says nothing about whether it happened
+            net = Net((status, b""), ok(id=MID, threadId=TID, labelIds=[]))
+            with self.assertRaises(gw.UncertainOutcome) as ctx:
+                adapter(net).archive_message(MID)
+            self.assertEqual((ctx.exception.code, len(net.log), net.opened), ("AMBIGUOUS_RESULT", 1, 1), status)  # the scripted success was never requested
 
     def test_no_automatic_retry_of_a_mutation_and_every_failure_has_a_closed_code(self):
         unknown = set(cleanup_exec.OUTCOME_CODES["UNKNOWN"])
@@ -290,46 +334,58 @@ class TransportTests(Base):
             self.assertEqual(net.opened, net.closed)
 
     def test_definite_rejections_are_not_uncertain(self):
-        cases = ((400, gw.RequestRejected, "REJECTED"), (401, gw.WriteAuthError, "AUTH_PROBLEM"), (403, gw.WriteAuthError, "AUTH_PROBLEM"), (404, gw.MessageNotFound, "NOT_FOUND"),
-                 (429, gw.RateLimited, "RATE_LIMITED"))
-        for status, cls, code in cases:
-            with self.assertRaises(cls, msg=status) as ctx:
-                adapter(Net((status, b"{}"))).archive_message(MID)
-            self.assertEqual(ctx.exception.code, code)
+        cases = ((gerr(400), gw.RequestRejected, "REJECTED"), (gerr(401), gw.WriteAuthError, "AUTH_PROBLEM"), (gerr(403), gw.WriteAuthError, "AUTH_PROBLEM"),
+                 (gerr(404), gw.MessageNotFound, "NOT_FOUND"), (gerr(429), gw.RateLimited, "RATE_LIMITED"), (gerr(403, "rateLimitExceeded"), gw.RateLimited, "RATE_LIMITED"),
+                 (gerr(403, "userRateLimitExceeded"), gw.RateLimited, "RATE_LIMITED"))
+        for item, cls, code in cases:
+            net = Net(item, ok(id=MID, threadId=TID, labelIds=[]))
+            with self.assertRaises(cls, msg=item) as ctx:
+                adapter(net).archive_message(MID)
+            self.assertEqual((ctx.exception.code, len(net.log)), (code, 1))
             self.assertNotIsInstance(ctx.exception, gw.UncertainOutcome)
-        body = json.dumps({"error": {"errors": [{"reason": "rateLimitExceeded"}]}}).encode()
-        with self.assertRaises(gw.RateLimited):
-            adapter(Net((403, body))).archive_message(MID)
         self.assertIn("REJECTED", cleanup_exec.OUTCOME_CODES["NOT_APPLIED"])
+
+    def test_an_unvalidated_error_answer_to_the_mutation_is_uncertain_not_a_rejection(self):
+        wrong_code = json.dumps({"error": {"code": 500, "message": "x"}}).encode()
+        for item in ((400, b"{}"), (404, b"<html>portal</html>"), (403, b""), (401, b"not json"), (429, b"[]"), (404, wrong_code), (400, b'{"error":"invalid_request"}'),
+                     (403, json.dumps({"error": {"code": 403}}).encode()), (409, b"{}"), (410, gerr(410)[1]), (204, b""), (100, b"")):
+            net = Net(item, ok(id=MID, threadId=TID, labelIds=[]))
+            with self.assertRaises(gw.UncertainOutcome, msg=item) as ctx:
+                adapter(net).archive_message(MID)
+            self.assertEqual((ctx.exception.code, len(net.log)), ("AMBIGUOUS_RESULT", 1))
 
     def test_reads_fail_with_read_errors_not_outcome_codes(self):
         with self.assertRaises(gw.ReadFailure) as ctx:
-            adapter(Net((500, b"{}"))).profile_email()
+            adapter(Net((500, b"{}")))._profile_email()
         self.assertEqual(ctx.exception.code, "SERVER_ERROR")
-        with self.assertRaises(gw.UncertainOutcome):  # a network failure is always the transport's uncertainty; callers of reads may just retry reads
-            adapter(Net(OSError("x"))).profile_email()
+        for exc, code in ((OSError("x"), "NETWORK_ERROR"), (TimeoutError("t"), "TIMEOUT"), (ValueError("v"), "READ_FAILED")):
+            with self.assertRaises(gw.ReadFailure) as ctx:  # reads never claim an uncertain MUTATION; they may simply be repeated
+                adapter(Net(exc))._profile_email()
+            self.assertEqual(ctx.exception.code, code)
         with self.assertRaises(gw.MessageNotFound):
-            adapter(Net((404, b"{}"))).message_state(MID)
+            adapter(Net(gerr(404))).message_state(MID)
+        with self.assertRaises(gw.ReadFailure):  # a 404 that is not a Gmail error document is not trusted either
+            adapter(Net((404, b"<html>"))).message_state(MID)
 
     def test_an_expired_token_stops_the_call_with_no_refresh_and_no_connection(self):
         net = Net()
         creds = WCreds(minutes=-5)
         creds.refresh = mock.Mock(side_effect=AssertionError("the transport must never refresh"))
-        for call in (lambda a: a.profile_email(), lambda a: a.message_state(MID), lambda a: a.archive_message(MID)):
+        for call in (lambda a: a._profile_email(), lambda a: a.message_state(MID), lambda a: a.archive_message(MID)):
             with self.assertRaises(gw.WriteAuthError):
                 call(adapter(net, creds))
         self.assertEqual((net.opened, creds.refresh.call_count), (0, 0))
 
     def test_oversized_responses_and_the_request_budget_are_enforced(self):
         with self.assertRaises(pol.Denied) as ctx:
-            adapter(Net((200, b"x" * (pol.MAX_RESPONSE + 5)))).profile_email()
+            adapter(Net((200, b"x" * (pol.MAX_RESPONSE + 5))))._profile_email()
         self.assertEqual(ctx.exception.code, "DENIED_SIZE")
         net = Net(ok(emailAddress=ACCOUNT), ok(emailAddress=ACCOUNT))
         with mock.patch.object(pol, "MAX_REQUESTS", 1):
             a = adapter(net)
-            a.profile_email()
+            a._profile_email()
             with self.assertRaises(pol.Denied) as ctx:
-                a.profile_email()
+                a._profile_email()
         self.assertEqual((ctx.exception.code, len(net.log)), ("DENIED_BUDGET", 1))
 
     def test_ids_must_be_lowercase_hex_before_any_request(self):
@@ -357,10 +413,10 @@ class TransportTests(Base):
 
     def test_the_adapter_exposes_no_http_client_token_credentials_or_generic_service(self):
         public = {n for n in dir(gw.ArchiveAdapter) if not n.startswith("_")}
-        self.assertEqual(public, {"profile_email", "verify_account", "message_state", "thread_state", "archive_message"})
+        self.assertEqual(public, {"verify_account", "message_state", "thread_state", "archive_message"})
         a = adapter(Net())
         self.assertFalse(hasattr(a, "__dict__"))
-        self.assertEqual(gw.ArchiveAdapter.__slots__, ("_t", "_expected"))
+        self.assertEqual(gw.ArchiveAdapter.__slots__, ("_t", "_expected", "_verified"))
         for banned in ("service", "http", "creds", "credentials", "token", "request", "execute", "users", "messages", "modify", "trash", "send", "batch_modify", "transport"):
             self.assertFalse(hasattr(a, banned), banned)
         for bad_class in (gw.MessageState, gw.ArchiveResult):
@@ -392,8 +448,168 @@ class TransportTests(Base):
 
     def test_no_test_in_this_module_uses_the_default_connection(self):
         with mock.patch.object(gw, "_default_connection", side_effect=AssertionError("real connection")):
-            self.assertEqual(adapter(Net(ok(emailAddress=ACCOUNT))).profile_email(), ACCOUNT)
+            self.assertEqual(adapter(Net(ok(emailAddress=ACCOUNT)))._profile_email(), ACCOUNT)
 
+
+class BrokenConn:
+    """Connection that fails at a chosen step; records which steps were reached."""
+    def __init__(self, net, step, exc):
+        self.net, self.step, self.exc = net, step, exc
+
+    def request(self, method, target, body=None, headers=None):
+        self.net.log.append({"method": method, "target": target})
+        if self.step == "request":
+            raise self.exc
+
+    def getresponse(self):
+        if self.step == "getresponse":
+            raise self.exc
+
+        class R:
+            status = 200
+
+            def __init__(s, step, exc):
+                s.step, s.exc = step, exc
+
+            def read(s, n=-1):
+                if s.step == "read":
+                    raise s.exc
+                return b"{}"
+        if self.step == "status":
+            class Bad:
+                @property
+                def status(s):
+                    raise self.exc
+
+                def read(s, n=-1):
+                    return b"{}"
+            return Bad()
+        return R(self.step, self.exc)
+
+    def close(self):
+        self.net.closed += 1
+
+
+class BreakNet(Net):
+    def __init__(self, step, exc):
+        super().__init__()
+        self.step, self.exc = step, exc
+
+    def __call__(self):
+        self.opened += 1
+        if self.step == "connect":
+            raise self.exc
+        return BrokenConn(self, self.step, self.exc)
+
+
+class MutationUncertaintyTests(Base):
+    def test_refusals_before_any_connection_are_definite_and_never_uncertain(self):
+        net = Net()
+        for call, cls in ((lambda: gw._Transport(WCreds(), net).perform("POST", f"{B}/messages/{MID}/trash", b"{}"), pol.Denied),
+                          (lambda: gw._Transport(WCreds(), net).perform("POST", MODIFY, b'{"addLabelIds":["TRASH"]}'), pol.Denied),
+                          (lambda: adapter(net, WCreds(minutes=-5)).archive_message(MID), gw.WriteAuthError),
+                          (lambda: adapter(net).archive_message("../x"), pol.Denied)):
+            with self.assertRaises(cls) as ctx:
+                call()
+            self.assertNotIsInstance(ctx.exception, gw.UncertainOutcome)
+        with mock.patch.object(pol, "MAX_REQUESTS", 0):
+            with self.assertRaises(pol.Denied) as ctx:
+                adapter(net).archive_message(MID)
+            self.assertEqual(ctx.exception.code, "DENIED_BUDGET")
+        self.assertEqual((net.opened, net.log), (0, []))  # no connection was even created
+
+    def test_every_failure_after_dispatch_began_is_uncertain_even_creating_the_connection(self):
+        boom = (RuntimeError("secret " + A_TOK), KeyError(MID), UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"), http.client.IncompleteRead(b"x"),
+                BrokenPipeError(), ConnectionResetError(), TimeoutError(), ssl.SSLError("x"), OSError(), ValueError("v"), http.client.BadStatusLine("x"))
+        for step in ("connect", "request", "getresponse", "read", "status"):
+            for exc in boom:
+                net = BreakNet(step, exc)
+                with self.assertRaises(gw.UncertainOutcome, msg=(step, exc)) as ctx:
+                    adapter(net).archive_message(MID)
+                self.assertIn(ctx.exception.code, ("TIMEOUT", "NETWORK_ERROR", "AMBIGUOUS_RESULT"))
+                self.assertNotIn(A_TOK, str(ctx.exception) + repr(ctx.exception))
+                self.assertEqual(net.opened, 1, "no retry")
+                if step != "connect":
+                    self.assertEqual(net.opened, net.closed, "connection closed on the failure path")
+
+    def test_post_dispatch_oversized_malformed_and_wrong_answers_are_uncertain_never_denied_or_rejected(self):
+        for item in ((200, b"x" * (pol.MAX_RESPONSE + 1)), (302, b""), (200, b""), (200, b"{"), (200, b'{"id":"%s"' % MID.encode()), (200, b'{"id":"%s","id":"%s"}' % (MID.encode(), MID.encode())),
+                     (200, json.dumps({"id": "18c0ffee0000ffff"}).encode()), (200, json.dumps({"id": MID, "threadId": TID, "labelIds": [5]}).encode()),
+                     (200, json.dumps({"id": MID, "labelIds": ["x" * 80]}).encode()), (500, b""), (502, b"<html>"), (301, b"x")):
+            net = Net(item, ok(id=MID, threadId=TID, labelIds=[]))
+            with self.assertRaises(gw.UncertainOutcome, msg=item[0]) as ctx:
+                adapter(net).archive_message(MID)
+            self.assertNotIsInstance(ctx.exception, (pol.Denied, gw.RequestRejected))
+            self.assertEqual((len(net.log), net.opened), (1, 1))
+
+    def test_the_uncertain_codes_are_stable_and_usable_for_reconciliation(self):
+        unknown = set(cleanup_exec.OUTCOME_CODES["UNKNOWN"])
+        seen = set()
+        for item in (TimeoutError(), OSError(), (500, b""), (302, b""), (200, b"junk")):
+            with self.assertRaises(gw.UncertainOutcome) as ctx:
+                adapter(Net(item)).archive_message(MID)
+            seen.add(ctx.exception.code)
+        self.assertTrue(seen <= unknown, seen)
+        self.assertEqual(seen, {"TIMEOUT", "NETWORK_ERROR", "SERVER_ERROR", "AMBIGUOUS_RESULT"})
+        self.assertNotIn("NOT_APPLIED", seen | unknown)
+
+    def test_a_genuine_inbox_removal_is_still_reported_deterministically(self):
+        r = adapter(Net(ok(id=MID, threadId=TID, labelIds=["Label_9"]))).archive_message(MID)
+        self.assertEqual((r.label_ids, r.inbox_removed), (("Label_9",), True))
+
+
+class AccountGateTests(Base):
+    def test_a_new_adapter_cannot_archive_until_the_live_account_is_verified(self):
+        net = Net(ok(id=MID, threadId=TID, labelIds=[]))
+        a = adapter(net, verified=False)
+        with self.assertRaises(gw.AccountNotVerified) as ctx:
+            a.archive_message(MID)
+        self.assertEqual((ctx.exception.code, net.opened), ("ACCOUNT_NOT_VERIFIED", 0))
+        net = Net(ok(emailAddress=ACCOUNT), ok(id=MID, threadId=TID, labelIds=[]))
+        a = adapter(net, verified=False)
+        a.verify_account()
+        self.assertTrue(a.archive_message(MID).inbox_removed)
+        self.assertEqual([r["method"] for r in net.log], ["GET", "POST"])
+
+    def test_mismatch_malformed_or_failed_lookups_lock_modification(self):
+        for lookup in (ok(emailAddress=ACCOUNT_OTHER), ok(emailAddress=""), ok(emailAddress=5), ok(emailAddress=None), ok(), (200, b"junk"), (500, b"{}"), (404, b"{}"),
+                       gerr(401), OSError("x"), TimeoutError()):
+            net = Net(lookup, ok(id=MID, threadId=TID, labelIds=[]))
+            a = adapter(net, verified=False)
+            with self.assertRaises(gw.WriteTransportError):
+                a.verify_account()
+            with self.assertRaises(gw.AccountNotVerified):
+                a.archive_message(MID)
+            self.assertEqual([r["method"] for r in net.log], ["GET"], lookup)  # the mutation was never sent
+
+    def test_a_verified_adapter_loses_its_state_after_a_later_identity_or_authorization_problem(self):
+        ok_profile = ok(emailAddress=ACCOUNT)
+        a = adapter(Net(ok_profile, ok(emailAddress=ACCOUNT_OTHER), ok(id=MID, threadId=TID, labelIds=[])), verified=False)
+        a.verify_account()
+        with self.assertRaises(gw.AccountMismatch):  # a later check finds another account
+            a.verify_account()
+        with self.assertRaises(gw.AccountNotVerified):
+            a.archive_message(MID)
+        a = adapter(Net(ok_profile, gerr(401), ok(id=MID, threadId=TID, labelIds=[])), verified=False)
+        a.verify_account()
+        with self.assertRaises(gw.WriteAuthError):  # any authorization problem on a later call
+            a.message_state(MID)
+        with self.assertRaises(gw.AccountNotVerified):
+            a.archive_message(MID)
+        a = adapter(Net(ok_profile, OSError("x"), ok(id=MID, threadId=TID, labelIds=[])), verified=False)
+        a.verify_account()
+        with self.assertRaises(gw.ReadFailure):  # a failed re-verification also locks
+            a.verify_account()
+        with self.assertRaises(gw.AccountNotVerified):
+            a.archive_message(MID)
+
+    def test_the_expected_account_must_be_real_and_is_checked_against_the_live_profile_only(self):
+        for expected in (None, "", "  ", 5):
+            a = adapter(Net(ok(emailAddress=ACCOUNT)), expected=expected, verified=False)
+            with self.assertRaises(gw.AccountMismatch):
+                a.verify_account()
+        a = adapter(Net(ok(emailAddress=" " + ACCOUNT.upper() + " ")), verified=False)
+        a.verify_account()  # case and surrounding whitespace do not matter, nothing else does
 
 class OpenAdapterTests(WBase):
     def setUp(self):
@@ -407,6 +623,9 @@ class OpenAdapterTests(WBase):
             a = gw.open_archive_adapter(ACCOUNT, self.wstore, self.path, connection_factory=net)
         self.assertIsInstance(a, gw.ArchiveAdapter)
         self.assertEqual((net.opened, net.log), (0, []))  # nothing is verified with Google until the separately approved live step
+        with self.assertRaises(gw.AccountNotVerified):  # and until then the adapter cannot modify anything
+            a.archive_message(MID)
+        self.assertEqual(net.opened, 0)
 
     def test_refuses_without_a_record_on_account_client_or_validity_problems(self):
         with self.assertRaisesRegex(oauth.AuthError, "no write authorization"):
@@ -432,7 +651,7 @@ class OpenAdapterTests(WBase):
     def test_fetch_profile_email_is_a_single_allowed_read(self):
         net = Net(ok(emailAddress=ACCOUNT))
         self.assertEqual(gw.fetch_profile_email(WCreds(), net), ACCOUNT)
-        self.assertEqual([(r["method"], r["target"]) for r in net.log], [("GET", "/gmail/v1/users/me/profile")])
+        self.assertEqual([(r["method"], r["target"]) for r in net.log], [("GET", "/gmail/v1/users/me/profile?fields=emailAddress")])
 
 
 if __name__ == "__main__":

@@ -258,6 +258,34 @@ A separate project helps keep the grants apart but is not a security guarantee b
     return 0
 
 
+def _discard_new_grant(store, issued):
+    """Best-effort revocation of a grant that Google just issued and that this tool will NOT use. Returns a privacy-safe sentence.
+
+    Three distinct outcomes - revoked / revocation failed / not safely attempted - and never a claim that consent was undone unless Google
+    confirmed it. It never touches a previously stored credential, and it refuses to revoke when the new grant might be the same as one that
+    is already stored (the Keychain is re-checked immediately before the call).
+    """
+    from gmail_intelligence import oauth, oauth_write
+    from gmail_intelligence.keystore import KeystoreError
+
+    manual = "remove the app at https://myaccount.google.com/permissions"
+    token = getattr(issued, "refresh_token", None) or getattr(issued, "token", None)
+    if not token:
+        return f"revocation was NOT attempted (no credential handle was available): Google consent still stands; {manual}"
+    try:
+        existing = store.load()
+    except KeystoreError:
+        return f"revocation was NOT attempted (the Keychain could not be checked, and a stored authorization might share this grant): Google consent still stands; {manual}"
+    if existing is not None:
+        return ("revocation was NOT attempted (a write authorization is already stored and might share this grant): nothing was stored or revoked, "
+                f"Google consent still stands; {manual}")
+    try:
+        oauth_write.revoke_refresh_token(token)
+    except oauth.AuthError:
+        return f"revocation FAILED: Google consent still stands; {manual}"
+    return "the newly issued grant was revoked at Google (confirmed by Google's response)"
+
+
 def cmd_auth_login_write(args):
     from gmail_intelligence import gmail_write, oauth, oauth_write
     from gmail_intelligence.keystore import KeystoreError
@@ -266,8 +294,8 @@ def cmd_auth_login_write(args):
     try:
         client = oauth_write.load_write_client_config(path)
         store = _write_store()
-        if store.load() is not None:
-            return _fail("a write authorization is already stored; run `auth logout-write` (and `auth revoke-write`) first")
+        if store.load() is not None:  # never start a second authorization while one is stored: the stored credential is never replaced
+            return _fail("a write authorization is already stored; run `auth revoke-write` or `auth logout-write` first")
     except (KeystoreError, oauth.AuthError) as exc:
         return _fail(exc)
     print(oauth_write.LOGIN_WARNING)
@@ -275,20 +303,24 @@ def cmd_auth_login_write(args):
         return _fail("declined; no authorization was requested")
     try:
         creds, granted = oauth_write.run_login_write(path, open_browser=not args.no_browser)
-        account = gmail_write.fetch_profile_email(creds)
-    except (oauth.AuthError, gmail_write.WriteTransportError) as exc:
+    except oauth_write.LoginRejected as exc:  # Google issued a grant, but this tool refuses it
+        return _fail(f"{exc}; nothing was stored; {_discard_new_grant(store, exc.issued)}")
+    except oauth.AuthError as exc:  # denied, cancelled or timed out: no credential was issued
         return _fail(exc)
-    if account.strip().lower() != args.expect_account.strip().lower():
-        try:  # nothing is stored for the wrong account, so do not leave a live grant behind either
-            oauth_write.revoke_refresh_token(creds.refresh_token)
-            note = "the unwanted grant was revoked at Google"
-        except oauth.AuthError:
-            note = "could NOT revoke the unwanted grant; remove it at https://myaccount.google.com/permissions"
-        return _fail(f"the authorized account differs from --expect-account; nothing stored; {note}")
+    issued = oauth_write.IssuedToken(getattr(creds, "refresh_token", None), getattr(creds, "token", None))
     try:
+        account = gmail_write.fetch_profile_email(creds)
+    except (gmail_write.WriteTransportError, gmail_write.Denied) as exc:
+        return _fail(f"could not confirm which account was authorized ({exc.code}); nothing was stored; {_discard_new_grant(store, issued)}")
+    if account.strip().lower() != args.expect_account.strip().lower():
+        return _fail(f"the authorized account differs from --expect-account; nothing was stored; {_discard_new_grant(store, issued)}")
+    try:
+        if store.load() is not None:  # an entry appeared during the browser flow: keep it, store nothing, and do not guess about the grant
+            return _fail("a write authorization appeared in the Keychain during login; the existing entry was kept and nothing new was stored; "
+                         f"{_discard_new_grant(store, issued)}")
         store.save(oauth_write.write_blob(creds, account, granted, client))
     except KeystoreError as exc:
-        return _fail(exc)
+        return _fail(f"{exc}; nothing was stored; {_discard_new_grant(store, issued)}")
     print("Write authorization stored in its own Keychain item. Nothing was archived or changed.")
     return 0
 
@@ -360,11 +392,13 @@ def cmd_auth_revoke_write(args):
         oauth_write.check_blob(blob)
         if not args.yes and input(f"This contacts Google and revokes the write grant. Type exactly: {oauth_write.REVOKE_PHRASE}\n> ").strip() != oauth_write.REVOKE_PHRASE:
             return _fail("cancelled")
-        oauth_write.revoke_refresh_token(blob.get("refresh_token"))
-        store.delete()
+        outcome = oauth_write.revoke_refresh_token(blob.get("refresh_token"))
+        store.delete()  # only reached after Google confirmed (or reported the token already invalid); otherwise the local token stays
     except (KeystoreError, oauth.AuthError) as exc:
         return _fail(exc)
-    print("The write grant was revoked at Google and the local token was removed. The read-only authorization was not touched.")
+    print("Google reports the token was already invalid or revoked; the local token was removed." if outcome == "ALREADY_INVALID"
+          else "Google confirmed the revocation and the local token was removed.")
+    print("The read-only authorization was not touched.")
     return 0
 
 

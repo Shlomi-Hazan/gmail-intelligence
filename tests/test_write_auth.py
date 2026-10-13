@@ -2,6 +2,7 @@
 
 Fake credentials, fake OAuth flow/transport and a fake Keychain only. No Google account, browser, network, real Keychain or real index.
 """
+import contextlib
 import json
 import os
 import sys
@@ -32,9 +33,10 @@ def write_client_config(**over):
 
 class WCreds:
     """Fake write credentials. refresh() is a recorded no-op unless a failure is scripted."""
-    def __init__(self, minutes=60, scopes=(oauth_write.WRITE_SCOPE,), refresh=R_TOK, client_id=WRITE_CLIENT_ID, raises=None):
+    def __init__(self, minutes=60, scopes=(oauth_write.WRITE_SCOPE,), refresh=R_TOK, client_id=WRITE_CLIENT_ID, raises=None, refreshed_scopes=(oauth_write.WRITE_SCOPE,)):
         self.token, self.refresh_token, self.client_id = A_TOK, refresh, client_id
         self.expiry, self.scopes, self.raises, self.refreshed, self.requests = utcnow() + timedelta(minutes=minutes), list(scopes), raises, 0, []
+        self.granted_scopes, self.refreshed_scopes, self.after_refresh = None, refreshed_scopes, {}
 
     @property
     def valid(self):
@@ -46,6 +48,9 @@ class WCreds:
             raise self.raises
         self.requests.append(request(oauth_write.TOKEN_URI, method="POST", body=b"x"))
         self.token, self.expiry = A_TOK, utcnow() + timedelta(hours=1)
+        self.granted_scopes = None if self.refreshed_scopes is None else list(self.refreshed_scopes)
+        for k, v in self.after_refresh.items():
+            setattr(self, k, v)
 
 
 class RecordingBackend(FakeBackend):
@@ -186,15 +191,45 @@ class OAuthWriteTests(WBase):
         self.stored_blob()  # a read-only token exists and must not change
         read_before = dict(self.backend.items)
         blob = oauth_write.write_blob(WCreds(minutes=1), ACCOUNT, [oauth_write.WRITE_SCOPE], client)
+        self.wstore.save(blob)
         sent = []
         delegate = lambda url, **kw: sent.append((url, kw)) or "ok"  # noqa: E731
-        real = oauth_write.blob_to_write_credentials(blob, client)
-        real.refresh = lambda request: request(oauth_write.TOKEN_URI, method="POST", body=b"x") and None  # use the real request object
-        with mock.patch.object(oauth_write, "blob_to_write_credentials", return_value=real):
-            oauth_write.refresh_and_store(self.wstore, blob, client, request=delegate)
+        fresh = WCreds(minutes=1)
+        with mock.patch.object(oauth_write, "blob_to_write_credentials", return_value=fresh):
+            creds, new = oauth_write.refresh_and_store(self.wstore, blob, client, request=delegate)
         self.assertEqual(sent[0][0], oauth_write.TOKEN_URI)
         self.assertEqual((sent[0][1]["method"], sent[0][1]["allow_redirects"]), ("POST", False))
+        self.assertEqual(self.wstore.load(), new)
+        self.assertGreater(oauth_write.remaining_validity(creds.expiry), oauth_write.MIN_REMAINING)
         self.assertEqual({k: v for k, v in self.backend.items.items() if k[0] != keystore_write.SERVICE_WRITE}, read_before)
+
+    def test_a_refresh_result_with_changed_missing_or_unknown_scopes_is_refused_and_stores_nothing(self):
+        client = write_client_config()
+        blob = oauth_write.write_blob(WCreds(minutes=1), ACCOUNT, [oauth_write.WRITE_SCOPE], client)
+        self.wstore.save(blob)
+        before = dict(self.backend.items)
+        bad = [("broader", dict(refreshed_scopes=(oauth_write.WRITE_SCOPE, oauth.SCOPE))), ("other scope", dict(refreshed_scopes=(oauth.SCOPE,))),
+               ("mail scope", dict(refreshed_scopes=("https://mail.google.com/",))), ("extra unknown", dict(refreshed_scopes=(oauth_write.WRITE_SCOPE, "https://example.invalid/x"))),
+               ("scopes not reported", dict(refreshed_scopes=None)), ("empty scopes", dict(refreshed_scopes=())),
+               ("no token", dict(after_refresh={"token": None})), ("no expiry", dict(after_refresh={"expiry": None})), ("refresh token lost", dict(after_refresh={"refresh_token": None}))]
+        for label, kwargs in bad:
+            fake = WCreds(minutes=1, **{k: v for k, v in kwargs.items() if k != "after_refresh"})
+            fake.after_refresh = kwargs.get("after_refresh", {})
+            with mock.patch.object(oauth_write, "blob_to_write_credentials", return_value=fake):
+                with self.assertRaises(oauth.AuthError, msg=label) as ctx:
+                    oauth_write.refresh_and_store(self.wstore, blob, client, request=lambda *a, **k: "ok")
+            for s_ in SENTINELS:
+                self.assertNotIn(s_, str(ctx.exception))
+            self.assertEqual(self.backend.items, before, label)  # the previously stored credential is untouched
+        self.assertEqual(self.wstore.load(), blob)
+
+    def test_status_and_read_commands_never_refresh_the_write_token(self):
+        self.write_client_file()
+        self.wstore.save(oauth_write.write_blob(WCreds(minutes=1), ACCOUNT, [oauth_write.WRITE_SCOPE], write_client_config()))
+        with mock.patch.object(oauth_write, "refresh_write_credentials", side_effect=AssertionError("refresh")), \
+                mock.patch.object(oauth_write, "refresh_and_store", side_effect=AssertionError("refresh")):
+            self.run_cli("auth", "status-write")
+            self.run_cli("auth", "status")
 
     def test_the_pinned_oauth_request_refuses_any_other_url_or_method(self):
         pinned = oauth_write.PinnedOAuthRequest(oauth_write.TOKEN_URI, lambda *a, **k: "sent")
@@ -212,33 +247,49 @@ class OAuthWriteTests(WBase):
             for s in SENTINELS:
                 self.assertNotIn(s, str(ctx.exception))
 
-    def test_revocation_is_explicit_pinned_and_reports_failures_without_secrets(self):
+    def test_revocation_response_classification(self):
         sent = []
 
         class Resp:
-            def __init__(self, status):
-                self.status = status
+            def __init__(self, status, data=b""):
+                self.status, self.data = status, data
 
-        def request(status):
-            return lambda url, **kw: sent.append((url, kw)) or Resp(status)
+        def request(status, data=b""):
+            return lambda url, **kw: sent.append((url, kw)) or Resp(status, data)
 
-        self.assertTrue(oauth_write.revoke_refresh_token(R_TOK, request=request(200)))
-        self.assertTrue(oauth_write.revoke_refresh_token(R_TOK, request=request(400)))  # already invalid counts as revoked
+        def revoke(status, data=b""):
+            return oauth_write.revoke_refresh_token(R_TOK, request=request(status, data))
+
+        self.assertEqual(revoke(200), "REVOKED")
+        self.assertEqual(revoke(200, b"{}"), "REVOKED")
+        self.assertEqual(revoke(400, b'{"error":"invalid_token","error_description":"Token expired or revoked"}'), "ALREADY_INVALID")
         self.assertEqual({u for u, _ in sent}, {oauth_write.REVOKE_URI})
         self.assertEqual(sent[0][1]["body"], b"token=" + R_TOK.encode())
         self.assertFalse(sent[0][1]["allow_redirects"])
-        for status in (500, 403, 302):
-            with self.assertRaisesRegex(oauth.AuthError, "not confirmed") as ctx:
-                oauth_write.revoke_refresh_token(R_TOK, request=request(status))
+        rejected = [(200, b"<html>captive portal</html>"), (200, b"junk"), (200, b"[]"), (400, b'{"error":"invalid_request"}'), (400, b'{"error":"invalid_client"}'),
+                    (400, b'{"error":"unauthorized_client"}'), (400, b""), (400, b"junk"), (400, b"[]"), (400, b'["invalid_token"]'), (400, b'{"error":["invalid_token"]}'),
+                    (400, b'{"error":"INVALID_TOKEN"}'), (400, b'{"error":"invalid_token","error":"invalid_request"}'), (400, b'{"error":"invalid_token"}' + b" " * 5000),
+                    (400, b'{"detail":"invalid_token"}'), (400, "{\"error\":\"invalid_token\"}"), (301, b""), (302, b""), (307, b""), (308, b""), (204, b""), (201, b""),
+                    (401, b""), (403, b""), (404, b""), (429, b""), (500, b""), (503, b""), (None, b""), (True, b""), ("200", b""), (200.0, b"")]
+        for status, data in rejected:
+            with self.assertRaises(oauth.AuthError, msg=(status, data[:30])) as ctx:
+                revoke(status, data)
+            self.assertIn("kept", str(ctx.exception).lower())  # a local credential is never dropped without confirmation
             self.assertNotIn(R_TOK, str(ctx.exception))
 
+    def test_revocation_transport_failures_and_inputs(self):
         def broken(*a, **k):
             raise OSError("down " + R_TOK)
         with self.assertRaises(oauth.AuthError) as ctx:
             oauth_write.revoke_refresh_token(R_TOK, request=broken)
         self.assertNotIn(R_TOK, str(ctx.exception))
+        self.assertIn("kept", str(ctx.exception))
+        for bad in ("", None, 5):
+            with self.assertRaises(oauth.AuthError):
+                oauth_write.revoke_refresh_token(bad)
+        pinned = oauth_write.PinnedOAuthRequest(oauth_write.TOKEN_URI, lambda *a, **k: None)  # a request pinned to the wrong URL is refused
         with self.assertRaises(oauth.AuthError):
-            oauth_write.revoke_refresh_token("")
+            oauth_write.revoke_refresh_token(R_TOK, request=pinned)
 
 
 class KeystoreWriteTests(WBase):
@@ -317,7 +368,7 @@ class WriteCliTests(WBase):
         self.write_client_file()
         creds = creds or WCreds()
         runner = patch.pop("runner", mock.Mock(return_value=(creds, [oauth_write.WRITE_SCOPE])))
-        revoke = patch.pop("revoke", mock.Mock(return_value=True))
+        revoke = patch.pop("revoke", mock.Mock(return_value="REVOKED"))
         with mock.patch.object(oauth_write, "run_login_write", runner), mock.patch.object(gmail_write, "fetch_profile_email", return_value=account), \
                 mock.patch.object(oauth_write, "revoke_refresh_token", revoke):
             result = self.run_cli("auth", "login-write", "--expect-account", expect, "--no-browser", stdin=stdin)
@@ -343,15 +394,144 @@ class WriteCliTests(WBase):
             runner.assert_not_called()  # no browser, no OAuth flow
         self.assertIsNone(self.wstore.load())
 
+    # ---- failures AFTER Google issued a grant: best-effort revocation, never a false claim, never a stored or revoked unrelated credential
+    def fake_flow_login(self, flow, revoke=None, profile=ACCOUNT, expect=ACCOUNT, save_error=None, pre=None):
+        """Run the REAL run_login_write with a fake flow through the CLI (so LoginRejected is raised by the real code)."""
+        self.write_client_file()
+        real = oauth_write.run_login_write
+        revoke = revoke or mock.Mock(return_value="REVOKED")
+        patches = [mock.patch.object(oauth_write, "run_login_write", lambda path, **k: real(path, flow_factory=lambda c, s: flow, open_browser=False)),
+                   mock.patch.object(oauth_write, "revoke_refresh_token", revoke)]
+        if isinstance(profile, BaseException):
+            patches.append(mock.patch.object(gmail_write, "fetch_profile_email", side_effect=profile))
+        else:
+            patches.append(mock.patch.object(gmail_write, "fetch_profile_email", return_value=profile))
+        if save_error:
+            patches.append(mock.patch.object(keystore_write.WriteTokenStore, "save", side_effect=save_error))
+        with contextlib.ExitStack() as stack:  # scoped: the base class patches (network block, temporary home) stay untouched
+            for p_ in patches:
+                stack.enter_context(p_)
+            return self.run_cli("auth", "login-write", "--expect-account", expect, "--no-browser", stdin=oauth_write.LOGIN_PHRASE), revoke
+
+    def assert_discarded(self, result, revoke, token, outcome_text="revoked at Google", message=None):
+        code, out, err = result
+        self.assertEqual(code, 1)
+        self.assertIn(outcome_text, err)
+        self.assertIn("nothing was stored", err)
+        if message:
+            self.assertIn(message, err)
+        revoke.assert_called_once_with(token)
+        self.assertIsNone(self.wstore.load())
+        self.assertNotIn(ACCOUNT, out + err)
+        self.assertNotIn(ACCOUNT_OTHER, out + err)
+        self.assertNotIn("undone", (out + err).lower())  # consent is never claimed undone unless Google confirmed a revocation
+
+    def test_scope_rejection_after_consent_revokes_the_new_grant(self):
+        flow = FakeFlow(creds=WCreds(), scopes=(oauth_write.WRITE_SCOPE, oauth.SCOPE))
+        result, revoke = self.fake_flow_login(flow)
+        self.assert_discarded(result, revoke, R_TOK, message="unexpected OAuth scopes")
+
+    def test_a_scope_change_warning_after_consent_still_revokes_the_issued_token(self):
+        flow = FakeFlow(creds=WCreds(), raises=Warning("scope changed"))
+        flow.oauth2session.token = {"scope": [oauth_write.WRITE_SCOPE, oauth.SCOPE], "refresh_token": R_TOK, "access_token": A_TOK}
+        result, revoke = self.fake_flow_login(flow)
+        self.assert_discarded(result, revoke, R_TOK, message="different scopes")
+
+    def test_a_foreign_client_or_missing_refresh_token_revokes_what_was_issued(self):
+        flow = FakeFlow(creds=WCreds(client_id="1-other.apps.googleusercontent.com"), scopes=(oauth_write.WRITE_SCOPE,))
+        result, revoke = self.fake_flow_login(flow)
+        self.assert_discarded(result, revoke, R_TOK, message="different OAuth client")
+        self.tearDown_stores()
+        flow = FakeFlow(creds=WCreds(refresh=None), scopes=(oauth_write.WRITE_SCOPE,))
+        result, revoke = self.fake_flow_login(flow)
+        self.assert_discarded(result, revoke, A_TOK, message="refresh token")  # the access token is revoked instead
+
+    def tearDown_stores(self):
+        self.backend.items.clear()
+        self.backend.touched.clear()
+
+    def test_profile_failure_or_malformed_profile_after_consent_revokes_the_new_grant(self):
+        for exc in (gmail_write.UncertainOutcome("NETWORK_ERROR"), gmail_write.ReadFailure(), gmail_write.WriteAuthError(), gmail_write.Denied("DENIED_SIZE")):
+            self.tearDown_stores()
+            flow = FakeFlow(creds=WCreds(), scopes=(oauth_write.WRITE_SCOPE,))
+            result, revoke = self.fake_flow_login(flow, profile=exc)
+            self.assert_discarded(result, revoke, R_TOK, message="could not confirm which account")
+
+    def test_expected_account_mismatch_revokes_the_new_grant_and_reports_honestly(self):
+        flow = FakeFlow(creds=WCreds(), scopes=(oauth_write.WRITE_SCOPE,))
+        result, revoke = self.fake_flow_login(flow, profile=ACCOUNT_OTHER)
+        self.assert_discarded(result, revoke, R_TOK, message="differs from --expect-account")
+
+    def test_keychain_persistence_failure_revokes_the_new_grant(self):
+        flow = FakeFlow(creds=WCreds(), scopes=(oauth_write.WRITE_SCOPE,))
+        result, revoke = self.fake_flow_login(flow, save_error=keystore.KeystoreError("Keychain write failed (RuntimeError)"))
+        self.assert_discarded(result, revoke, R_TOK, message="Keychain write failed")
+
+    def test_a_failed_revocation_is_reported_as_failed_and_consent_is_not_claimed_undone(self):
+        flow = FakeFlow(creds=WCreds(), scopes=(oauth_write.WRITE_SCOPE,))
+        (code, out, err), revoke = self.fake_flow_login(flow, profile=ACCOUNT_OTHER, revoke=mock.Mock(side_effect=oauth.AuthError("revocation was not confirmed (HTTP 500)")))
+        self.assertEqual(code, 1)
+        self.assertIn("revocation FAILED", err)
+        self.assertIn("Google consent still stands", err)
+        self.assertNotIn("was revoked at Google", err)
+        self.assertIsNone(self.wstore.load())
+
+    def test_an_existing_credential_is_never_replaced_or_revoked_by_a_new_login(self):
+        before = self.write_blob()
+        flow = FakeFlow(creds=WCreds(), scopes=(oauth_write.WRITE_SCOPE,))
+        (code, out, err), revoke = self.fake_flow_login(flow)  # login refuses before any flow starts
+        self.assertEqual(code, 1)
+        self.assertIn("already stored", err)
+        revoke.assert_not_called()
+        self.assertEqual(self.wstore.load(), before)
+        self.assertIsNone(flow.kwargs)  # the authorization flow never ran
+
+    def test_a_credential_that_appears_during_login_is_kept_and_nothing_is_revoked_because_the_grant_may_be_shared(self):
+        self.write_client_file()
+        appeared = {}
+
+        def runner(path, **k):
+            appeared["blob"] = self.write_blob()  # another process stored a credential while the browser flow was running
+            return WCreds(), [oauth_write.WRITE_SCOPE]
+        revoke = mock.Mock(return_value="REVOKED")
+        with mock.patch.object(oauth_write, "run_login_write", runner), mock.patch.object(gmail_write, "fetch_profile_email", return_value=ACCOUNT), \
+                mock.patch.object(oauth_write, "revoke_refresh_token", revoke):
+            code, out, err = self.run_cli("auth", "login-write", "--expect-account", ACCOUNT, stdin=oauth_write.LOGIN_PHRASE)
+        self.assertEqual(code, 1)
+        self.assertIn("appeared in the Keychain", err)
+        self.assertIn("revocation was NOT attempted", err)
+        self.assertIn("might share this grant", err)
+        revoke.assert_not_called()
+        self.assertEqual(self.wstore.load(), appeared["blob"])  # the previously stored credential is untouched
+
+    def test_when_the_keychain_cannot_be_checked_revocation_is_not_attempted(self):
+        issued = oauth_write.IssuedToken(R_TOK, A_TOK)
+
+        class Unreadable:
+            def load(self):
+                raise keystore.KeystoreError("locked")
+        with mock.patch.object(oauth_write, "revoke_refresh_token", side_effect=AssertionError("revoked")):
+            text = cli._discard_new_grant(Unreadable(), issued)
+            self.assertIn("revocation was NOT attempted", text)
+            self.assertIn("Google consent still stands", text)
+            self.assertIn("revocation was NOT attempted", cli._discard_new_grant(self.wstore, oauth_write.IssuedToken(None, None)))
+        self.assertEqual(repr(issued), "<IssuedToken>")  # token material never reaches a repr
+
+    def test_authorization_errors_before_a_grant_exists_attempt_no_revocation(self):
+        for exc in (oauth.AuthError("authorization was cancelled or denied in the browser"), oauth.AuthError("timed out waiting for browser authorization")):
+            runner = mock.Mock(side_effect=exc)
+            (code, _, err), _, revoke = self.login(runner=runner)
+            self.assertEqual(code, 1)
+            revoke.assert_not_called()
+            self.assertIsNone(self.wstore.load())
+
     def test_login_with_the_wrong_account_stores_nothing_and_revokes_the_unwanted_grant(self):
         (code, _, err), _, revoke = self.login(account=ACCOUNT_OTHER)
         self.assertEqual(code, 1)
         self.assertIn("differs from --expect-account", err)
         self.assertNotIn(ACCOUNT_OTHER, err)
-        revoke.assert_called_once()
+        revoke.assert_called_once_with(R_TOK)
         self.assertIsNone(self.wstore.load())
-        (code, _, err), _, _ = self.login(account=ACCOUNT_OTHER, revoke=mock.Mock(side_effect=oauth.AuthError("x")))
-        self.assertIn("could NOT revoke", err)
 
     def test_login_refuses_when_already_authorized_missing_client_and_storage_failure(self):
         self.write_blob()
@@ -423,7 +603,7 @@ class WriteCliTests(WBase):
     def test_revoke_write_needs_the_phrase_revokes_remotely_then_removes_locally(self):
         self.stored_blob()
         self.write_blob()
-        calls = mock.Mock(return_value=True)
+        calls = mock.Mock(return_value="REVOKED")
         with mock.patch.object(oauth_write, "revoke_refresh_token", calls):
             self.assertEqual(self.run_cli("auth", "revoke-write", stdin="revoke")[0], 1)
             calls.assert_not_called()
