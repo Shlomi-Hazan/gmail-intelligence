@@ -182,6 +182,7 @@ CREATE TABLE cleanup_exec_item (
 CREATE UNIQUE INDEX cleanup_exec_item_seq ON cleanup_exec_item (account, exec_id, seq);
 CREATE TRIGGER cleanup_exec_insert_guard BEFORE INSERT ON cleanup_execution
 WHEN NEW.state <> 'PREPARED'
+  OR EXISTS (SELECT 1 FROM cleanup_execution x WHERE x.account = NEW.account AND x.exec_id = NEW.exec_id)
   OR NOT EXISTS (SELECT 1 FROM cleanup_approval a WHERE a.account = NEW.account AND a.plan_id = NEW.plan_id
       AND a.nonce = NEW.approval_nonce AND a.plan_hash = NEW.plan_hash AND a.status = 'CONSUMED')
   OR NOT EXISTS (SELECT 1 FROM cleanup_plan p WHERE p.account = NEW.account AND p.plan_id = NEW.plan_id AND p.state = 'APPROVED'
@@ -246,6 +247,7 @@ CREATE TRIGGER cleanup_exec_no_delete BEFORE DELETE ON cleanup_execution
 BEGIN SELECT RAISE(ABORT, 'executions are never deleted'); END;
 CREATE TRIGGER cleanup_exec_slice_insert_guard BEFORE INSERT ON cleanup_exec_slice
 WHEN NEW.state NOT IN ('PENDING','CONFIRMED')
+  OR EXISTS (SELECT 1 FROM cleanup_exec_slice x WHERE x.account = NEW.account AND x.exec_id = NEW.exec_id AND x.slice_no = NEW.slice_no)
   OR (SELECT state FROM cleanup_execution e WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id) IS NOT 'PREPARED'
 BEGIN SELECT RAISE(ABORT, 'slices can only be created while the execution is being reserved'); END;
 CREATE UNIQUE INDEX cleanup_exec_one_active_slice ON cleanup_exec_slice (account, exec_id) WHERE state = 'ACTIVE';
@@ -273,6 +275,7 @@ CREATE TRIGGER cleanup_exec_slice_no_delete BEFORE DELETE ON cleanup_exec_slice
 BEGIN SELECT RAISE(ABORT, 'slices are never deleted'); END;
 CREATE TRIGGER cleanup_exec_item_insert_guard BEFORE INSERT ON cleanup_exec_item
 WHEN NEW.state NOT IN ('PENDING','SKIPPED_DRIFT') OR NEW.evidence_checked <> 0
+  OR EXISTS (SELECT 1 FROM cleanup_exec_item x WHERE x.account = NEW.account AND x.exec_id = NEW.exec_id AND x.message_id = NEW.message_id)
   OR (SELECT state FROM cleanup_execution e WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id) IS NOT 'PREPARED'
   OR NOT EXISTS (SELECT 1 FROM cleanup_execution e JOIN cleanup_item ci ON ci.account = e.account AND ci.plan_id = e.plan_id
       WHERE e.account = NEW.account AND e.exec_id = NEW.exec_id AND ci.message_id = NEW.message_id)
@@ -378,6 +381,12 @@ class Index:
         os.chmod(self.path, 0o600)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        # PRAGMAs are per connection. Without recursive_triggers, INSERT OR REPLACE deletes the old row WITHOUT firing the BEFORE DELETE
+        # (no-delete) triggers. Every production connection is opened here; the setting is verified, not assumed.
+        self.conn.execute("PRAGMA recursive_triggers = ON")
+        if self.conn.execute("PRAGMA recursive_triggers").fetchone()[0] != 1:
+            self.conn.close()
+            raise IndexProblem("could not enable recursive_triggers; refusing to open the index")
         self.migrated_from = self.backup_path = None
         try:
             version = self.conn.execute("PRAGMA user_version").fetchone()[0]

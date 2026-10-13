@@ -1464,9 +1464,9 @@ class FinalMicroCorrectionTests(ExecBase):
         self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 1, now=self.tick())
         return plan, ex
 
-    def work(self, ex, plan_outcomes):
+    def work(self, ex, plan_outcomes, slice_no=1):
         """plan_outcomes: list of 'A' applied, 'R' rejected, 'D' skipped (drift), 'G' skipped (gone), 'U' unknown, one per slice-1 item."""
-        for mid, o in zip(self.ids_of(ex["exec_id"], 1), plan_outcomes):
+        for mid, o in zip(self.ids_of(ex["exec_id"], slice_no), plan_outcomes):
             ce.renew_lease(self.index, ACCT, ex["exec_id"], self.token, now=self.tick())
             if o in "DG":
                 ce.record_skip(self.index, ACCT, ex["exec_id"], self.token, mid, "SKIPPED_DRIFT" if o == "D" else "SKIPPED_GONE", "LABELS_CHANGED" if o == "D" else "NOT_FOUND", now=self.tick())
@@ -1537,6 +1537,219 @@ class FinalMicroCorrectionTests(ExecBase):
         self.refused("UPDATE cleanup_execution SET state='AWAITING_CONTINUATION' WHERE exec_id=?", ex["exec_id"])
         plan2 = None  # noqa: F841
 
+
+
+class ReplaceBypassAndEmptyLabelTests(ExecBase):
+    """Final P2 corrections: REPLACE/UPSERT cannot reset execution rows; an explicit empty label set is valid only when expected."""
+    sql = HardeningTests.sql
+    refused = HardeningTests.refused
+    snapshot = FinalMicroCorrectionTests.snapshot
+    at_micro = FinalMicroCorrectionTests.at_micro
+    iso = FinalMicroCorrectionTests.iso
+    big = FinalMicroCorrectionTests.big
+    work = FinalMicroCorrectionTests.work
+    LABELS = ["INBOX", "CATEGORY_PROMOTIONS"]
+
+    def applied_execution(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a = self.ids_of(ex["exec_id"])[0]
+        intent = self.at_micro()
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, self.LABELS, now=intent)
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=self.ev(a, ("CATEGORY_PROMOTIONS",), when=self.iso(intent)),
+                          now=intent + timedelta(seconds=5))
+        return ex, a
+
+    def statements(self, E, a):
+        x = self.index._q("SELECT * FROM cleanup_execution WHERE exec_id=?", E)[0]
+        ex_cols = (x["account"], E, x["plan_id"], x["plan_hash"], x["approval_nonce"], x["action"], x["item_count"], x["slice_count"],
+                   x["confirmation_sha256"], x["created_at"], x["created_at"])
+        ex_sql = ("INTO cleanup_execution (account,exec_id,plan_id,plan_hash,approval_nonce,action,state,item_count,slice_count,confirmation_sha256,"
+                  "created_at,state_changed_at) VALUES (?,?,?,?,?,?,'PREPARED',?,?,?,?,?)")
+        sl_sql = "INTO cleanup_exec_slice (account,exec_id,slice_no,size,state) VALUES (?,?,1,2,'CONFIRMED')"
+        it_sql = "INTO cleanup_exec_item (account,exec_id,message_id,seq,slice_no,state) VALUES (?,?,?,1,1,'PENDING')"
+        out = []
+        for verb in ("INSERT OR REPLACE ", "REPLACE ", "INSERT OR REPLACE "):
+            out += [(verb + ex_sql, ex_cols), (verb + sl_sql, (ACCT, E)), (verb + it_sql, (ACCT, E, a))]
+        out += [("INSERT " + ex_sql + " ON CONFLICT DO UPDATE SET state='PREPARED'", ex_cols),
+                ("INSERT " + sl_sql + " ON CONFLICT DO UPDATE SET state='CONFIRMED'", (ACCT, E)),
+                ("INSERT " + it_sql + " ON CONFLICT DO UPDATE SET state='PENDING', evidence_checked=0, evidence_source=NULL, evidence_observed_at=NULL", (ACCT, E, a)),
+                ("INSERT OR IGNORE " + ex_sql, ex_cols)]
+        return out
+
+    def test_every_connection_enables_and_verifies_recursive_triggers(self):
+        self.assertEqual(self.index.conn.execute("PRAGMA recursive_triggers").fetchone()[0], 1)
+        other = idx.Index(self.index.path)  # the production entry point, a second independent connection
+        try:
+            self.assertEqual(other.conn.execute("PRAGMA recursive_triggers").fetchone()[0], 1)
+            self.assertEqual(other.conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+        finally:
+            other.conn.close()
+        self.assertEqual(sum(1 for line in (SRC / "gmail_intelligence" / "index.py").read_text().splitlines() if "sqlite3.connect(" in line), 3)
+        # the two other connects only create and verify a backup copy; the one that opens the index is followed by the pragmas
+        text = (SRC / "gmail_intelligence" / "index.py").read_text()
+        self.assertLess(text.index("self.conn = sqlite3.connect(self.path)"), text.index("PRAGMA recursive_triggers = ON"))
+
+    def test_replace_and_upsert_cannot_reset_an_applied_item_or_reopen_anything(self):
+        ex, a = self.applied_execution()
+        E = ex["exec_id"]
+        before = self.snapshot()
+        for stmt, params in self.statements(E, a):
+            self.refused(stmt, *params)
+            self.assertEqual(self.snapshot(), before, stmt)  # state, evidence, approvals and audit are untouched
+        row = self.index._q("SELECT state, evidence_checked, evidence_source FROM cleanup_exec_item WHERE message_id=?", a)[0]
+        self.assertEqual(tuple(row), ("APPLIED", 1, "CALLER_SUPPLIED"))
+        self.assertEqual(self.exec_state(E), "EXECUTING")
+
+    def test_the_insert_guards_hold_even_if_the_pragma_were_off(self):
+        ex, a = self.applied_execution()
+        E = ex["exec_id"]
+        self.index.conn.execute("PRAGMA recursive_triggers = OFF")  # simulates a raw connection; the guards must not depend on it
+        try:
+            before = self.snapshot()
+            for stmt, params in self.statements(E, a):
+                self.refused(stmt, *params)
+                self.assertEqual(self.snapshot(), before, stmt)
+        finally:
+            self.index.conn.execute("PRAGMA recursive_triggers = ON")
+
+    def test_replace_cannot_reopen_a_terminal_execution(self):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        E = ex["exec_id"]
+        a, b = self.ids_of(E)
+        ce.stop_execution(self.index, ACCT, E, self.token, "OWNER_REQUEST", now=self.tick())
+        self.assertIn(self.exec_state(E), ("FAILED", "PARTIAL"))
+        before = self.snapshot()
+        for stmt, params in self.statements(E, a):
+            self.refused(stmt, *params)
+        self.assertEqual(self.snapshot(), before)
+        self.assertNotIn(self.exec_state(E), ("PREPARED", "EXECUTING"))
+
+    def test_replace_of_audit_and_approval_rows_is_refused_too(self):
+        ex, a = self.applied_execution()
+        before = self.snapshot()
+        row = self.index._q("SELECT * FROM cleanup_audit ORDER BY seq LIMIT 1")[0]
+        marks = ",".join("?" * len(row.keys()))
+        self.refused(f"INSERT OR REPLACE INTO cleanup_audit ({','.join(row.keys())}) VALUES ({marks})", *tuple(row))
+        self.assertEqual(self.snapshot(), before)
+
+    # ---- empty label sets
+    def archive(self, labels, observed, when_delta=0, **kw):
+        ex = self.started(self.approved_plan(["m1", "m2"]))
+        a = self.ids_of(ex["exec_id"])[0]
+        intent = self.at_micro()
+        ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, labels, now=intent)
+        ev = ce.Evidence("LABEL_OBSERVATION", a, observed, self.iso(intent + timedelta(microseconds=when_delta)), kw.get("source", "CALLER_SUPPLIED"))
+        return ex, a, intent, ev
+
+    def test_inbox_only_message_archived_to_an_empty_set_is_accepted(self):
+        ex, a, intent, ev = self.archive(["INBOX"], ())
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=ev, now=intent + timedelta(seconds=5))
+        row = self.index._q("SELECT state, evidence_checked, evidence_source FROM cleanup_exec_item WHERE message_id=?", a)[0]
+        self.assertEqual(tuple(row), ("APPLIED", 1, "CALLER_SUPPLIED"))
+        self.assertIn("not attributed", ce.CODE_MEANING["RECONCILED_OBSERVED_ARCHIVED"])  # observed state, never authorship
+
+    def test_a_custom_label_remains_and_matches_exactly(self):
+        ex, a, intent, ev = self.archive(["INBOX", "CUSTOM"], ("CUSTOM",))
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=ev, now=intent + timedelta(seconds=5))
+        self.assertEqual(self.index._q("SELECT state FROM cleanup_exec_item WHERE message_id=?", a)[0][0], "APPLIED")
+
+    def test_empty_or_unexpected_observations_are_refused_without_any_mutation(self):
+        cases = (("INBOX+CUSTOM observed empty", ["INBOX", "CUSTOM"], (), "BAD_EVIDENCE"),
+                 ("INBOX only observed OTHER", ["INBOX"], ("OTHER",), "EVIDENCE_MISMATCH"),
+                 ("INBOX only still INBOX", ["INBOX"], ("INBOX",), "EVIDENCE_MISMATCH"))
+        for label, prev, observed, expect in cases:
+            self.setUp()
+            ex, a, intent, ev = self.archive(prev, observed)
+            before = self.snapshot()
+            with self.assertRaises(ce.ExecError, msg=label) as cm:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=ev, now=intent + timedelta(seconds=5))
+            self.assertEqual(cm.exception.code, expect, label)
+            self.assertEqual(self.snapshot(), before, label)
+
+    def test_an_empty_observation_still_needs_valid_source_timestamp_chronology_and_a_real_evidence_object(self):
+        ex, a, intent, good = self.archive(["INBOX"], ())
+        now = intent + timedelta(seconds=5)
+        before = self.snapshot()
+        bad = [ce.Evidence("LABEL_OBSERVATION", a, (), good.observed_at, src) for src in ("TRUSTED_ADAPTER", "gmail-live-read", None)]
+        bad += [ce.Evidence("LABEL_OBSERVATION", a, (), when) for when in ("yesterday", good.observed_at[:-1], None, self.iso(intent - timedelta(microseconds=1)),
+                                                                            self.iso(now + timedelta(minutes=6)))]
+        bad += [ce.Evidence("LABEL_OBSERVATION", a, None, good.observed_at), ce.Evidence("LABEL_OBSERVATION", a, "", good.observed_at),
+                ce.Evidence("LABEL_OBSERVATION", a, ("",), good.observed_at), ce.Evidence("OTHER", a, (), good.observed_at), None, (), "APPLIED"]
+        for ev in bad:
+            with self.assertRaises(ce.ExecError, msg=ev) as cm:
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=ev, now=now)
+            self.assertEqual(cm.exception.code, "BAD_EVIDENCE")
+            self.assertEqual(self.snapshot(), before)
+
+    def test_reconciling_an_observed_empty_state_releases_the_account(self):
+        ex, a, intent, _ = self.archive(["INBOX"], ())
+        E = ex["exec_id"]
+        u = intent + timedelta(seconds=10)
+        ce.record_outcome(self.index, ACCT, E, self.token, a, "UNKNOWN", code="TIMEOUT", now=u)
+        ce.stop_execution(self.index, ACCT, E, self.token, "AMBIGUOUS_RESULT", now=u + timedelta(seconds=1))
+        self.assertEqual(self.exec_state(E), "RECONCILIATION_REQUIRED")
+        now = u + timedelta(minutes=1)
+        before = self.snapshot()
+        with self.assertRaises(ce.ExecError):  # observed before the UNKNOWN transition: still refused, nothing changes
+            ce.reconcile_item(self.index, ACCT, E, a, ce.Evidence("LABEL_OBSERVATION", a, (), self.iso(u - timedelta(microseconds=1))), now=now)
+        self.assertEqual(self.snapshot(), before)
+        done = ce.reconcile_item(self.index, ACCT, E, a, ce.Evidence("LABEL_OBSERVATION", a, (), self.iso(u)), now=now)
+        self.assertEqual(self.index._q("SELECT state, error_code, evidence_checked FROM cleanup_exec_item WHERE message_id=?", a)[0][:], ("APPLIED", "RECONCILED_OBSERVED_ARCHIVED", 1))
+        self.assertIn(done["state"], ("PARTIAL", "EXECUTED"))
+        nxt = self.reserve(self.approved_plan(["m3", "m4"]))  # the account is free again
+        self.assertEqual(nxt["state"], "PREPARED")
+
+    def test_a_non_empty_observation_of_an_inbox_only_item_is_a_conflict_or_unmodified(self):
+        for observed, expect in ((("INBOX",), "RECONCILED_UNMODIFIED"), (("OTHER",), "RECONCILED_CONFLICT")):
+            self.setUp()
+            ex, a, intent, _ = self.archive(["INBOX"], ())
+            E = ex["exec_id"]
+            ce.record_outcome(self.index, ACCT, E, self.token, a, "UNKNOWN", code="TIMEOUT", now=intent + timedelta(seconds=10))
+            ce.stop_execution(self.index, ACCT, E, self.token, "AMBIGUOUS_RESULT", now=intent + timedelta(seconds=11))
+            ce.reconcile_item(self.index, ACCT, E, a, ce.Evidence("LABEL_OBSERVATION", a, observed, self.iso(intent + timedelta(seconds=30))), now=intent + timedelta(minutes=1))
+            self.assertEqual(self.index._q("SELECT error_code FROM cleanup_exec_item WHERE message_id=?", a)[0][0], expect)
+
+    # ---- reporting
+    def text(self, ex):
+        return cleanup_exec_report.show_text(self.index, ACCT, ce.get_execution(self.index, ACCT, ex["exec_id"]), False)
+
+    def test_reports_are_qualified_and_surface_the_unsafe_slice_reason_without_ids(self):
+        plan, ex = self.big()
+        self.work(ex, "A" * 24 + "R")
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        text = self.text(ex)
+        self.assertIn("STOPPED SAFELY", text)
+        self.assertIn("never attempted", text)
+        self.assertIn("recorded as applied", text)
+        self.assertIn("not authenticated", text)
+        self.assertIn("not attributed", text)
+        self.assertNotIn("nothing was applied", text)
+        self.assertNotIn("example.test", text)
+        self.assertNotIn(ACCT, text)
+        import re
+        self.assertIsNone(re.search(r"\bm\d+\b", text))
+
+    def test_failed_report_has_no_unqualified_applied_claim_and_executed_explains_final_skips(self):
+        plan, ex = self.big()
+        self.work(ex, "R" * 25)
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        self.assertIn("no target was recorded as applied", self.text(ex))
+        self.assertIn("STOPPED SAFELY", self.text(ex))
+
+    def test_executed_report_explains_a_final_slice_of_safe_skips(self):
+        plan, ex = self.big()
+        self.work(ex, "A" * 25)
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 1, self.token, now=self.tick())
+        ce.confirm_slice(self.index, ACCT, ex["exec_id"], 2, ce.continuation_phrase(plan, 2, 100), now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 2, now=self.tick())
+        self.work(ex, "A" * 100, 2)
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 2, self.token, now=self.tick())
+        ce.confirm_slice(self.index, ACCT, ex["exec_id"], 3, ce.continuation_phrase(plan, 3, 5), now=self.tick())
+        self.token = ce.start_slice(self.index, ACCT, ex["exec_id"], 3, now=self.tick())
+        self.work(ex, "DDDDD", 3)
+        ce.end_slice(self.index, ACCT, ex["exec_id"], 3, self.token, now=self.tick())
+        self.assertEqual(self.exec_state(ex["exec_id"]), "EXECUTED")
+        self.assertIn("made only of safe skips", self.text(ex))
 
 
 class SourceGuards(unittest.TestCase):

@@ -20,6 +20,8 @@ Invariants (also enforced by schema triggers where practical):
     executor (another client could have archived the message), and local metadata alone cannot prove that Gmail changed.
   * A slice that ended with no applied item, or with any rejected / unknown / conflicting item, never leads to an ordinary
     continuation: the execution finishes (FAILED / PARTIAL) and the remaining targets are NEVER_ATTEMPTED (fail closed).
+  * An explicit empty label observation is accepted only when the expected archived state is empty (previous labels were exactly
+    INBOX); a missing evidence object, a missing field or a malformed label list is never read as "empty".
   * Intent, result and evidence times are stored with microsecond resolution (UTC, fixed format) so ordering is exact.
   * Each step is a short SQLite transaction. SQLite and Gmail cannot commit atomically, so the intent is committed BEFORE any
     future Gmail call and the outcome AFTER it; the gap is exactly what reconciliation covers.
@@ -134,7 +136,8 @@ def _check_evidence(ev, item, now):
     """
     ok = (isinstance(ev, Evidence) and ev.kind in EVIDENCE_KINDS and ev.source in ACCEPTED_EVIDENCE_SOURCES
           and isinstance(ev.message_id, str) and ev.message_id == item["message_id"]
-          and isinstance(ev.labels, (tuple, list)) and 0 < len(ev.labels) <= 100
+          and isinstance(ev.labels, (tuple, list)) and len(ev.labels) <= 100
+          and (ev.labels or _expects_no_labels(item))  # an EXPLICIT empty observation is valid only when the expected archived state is empty
           and all(isinstance(x, str) and 0 < len(x) <= 64 and x.isascii() for x in ev.labels))
     seen = None
     if ok:
@@ -152,6 +155,11 @@ def _check_evidence(ev, item, now):
 
 def _evidence_cols(ev, seen):
     return {"evidence_checked": 1, "evidence_source": ev.source, "evidence_observed_at": _us(seen)}
+
+
+def _expects_no_labels(item):
+    """True when the recorded previous labels were exactly INBOX, so the archived state legitimately has no labels."""
+    return item["prev_label_ids"] is not None and not _expected_after(item)[0]
 
 
 def _expected_after(item):

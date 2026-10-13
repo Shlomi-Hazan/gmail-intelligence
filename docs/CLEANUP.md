@@ -205,8 +205,13 @@ accepted `evidence_source` is `CALLER_SUPPLIED`; `TRUSTED_ADAPTER` is reserved i
 caller cannot claim it. (4) *Mutation attributed to our executor*: **never established**; another client or the owner may have archived the message, so
 `APPLIED` means "recorded with evidence-consistent archived state", not proof of who changed it. The column is named `evidence_checked` (not "verified") and is stored
 with `evidence_source` and `evidence_observed_at`. Callers cannot assert an outcome; `reconcile_item` derives it. **Local metadata alone cannot prove that a Gmail
-mutation occurred.** M4C-A has no Gmail client; tests construct evidence explicitly. Known limit: a message whose only label was `INBOX` has an empty expected
-label set, which the evidence contract cannot express (empty observations are rejected), so it can only stay `UNKNOWN` (fail closed) until a later adapter defines it.
+mutation occurred.** M4C-A has no Gmail client; tests construct evidence explicitly. **Empty label sets.** A message whose previous labels were exactly `INBOX` legitimately has no labels after ARCHIVE. An explicit empty observation `()` is
+accepted only for such an item (expected archived state empty; it then yields `APPLIED` / `RECONCILED_OBSERVED_ARCHIVED` like any other matching
+observation). For any item whose expected state is non-empty an empty observation is rejected (`BAD_EVIDENCE`), and a non-empty observation of an
+item that expects none is a mismatch / `CONFLICT`. Source, timestamp and chronology checks are unchanged. A missing evidence object, a `None`
+label list or a malformed one is never read as "empty". **Contract for the future M4C-C adapter:** Gmail omits `labelIds` when a message has none; the adapter
+must turn a missing field into an explicit empty tuple ONLY when the API response is otherwise valid and complete (right message id, no error,
+no truncated payload). The observation still proves nothing about who made the change.
 
 **Strict evidence chronology.** Intent, result and evidence times are stored with microsecond resolution as UTC in one fixed format
 (`YYYY-MM-DDTHH:MM:SS.ffffffZ`; a database `CHECK` enforces the format, so string order is chronological order). Evidence must satisfy
@@ -220,6 +225,13 @@ and `APPLIED` cannot exist without checked evidence (table `CHECK`). Direct SQL 
 
 **ARCHIVE needs `INBOX`.** `record_intent` refuses previous labels without `INBOX` before anything is stored, and the schema repeats it (a `CHECK` on
 `prev_label_ids` and the intent trigger). Other labels, including private user labels, are preserved exactly as recorded (sorted JSON array).
+
+**`REPLACE` / `UPSERT` cannot bypass the immutability triggers.** SQLite's `INSERT OR REPLACE` deletes the old row without firing `BEFORE DELETE` unless
+`recursive_triggers` is on. `Index` (the only production entry point; the other two `sqlite3.connect` calls only copy and verify a backup) enables
+`PRAGMA foreign_keys` and `PRAGMA recursive_triggers` on every connection and refuses to open if the latter is not active; the setting is per connection, never assumed.
+Independently of the pragma, the insert guards of `cleanup_execution`, `cleanup_exec_slice` and `cleanup_exec_item` refuse any insert whose primary key already exists, which
+also stops `ON CONFLICT DO UPDATE` and `REPLACE INTO`. A refused statement leaves state, approvals and audit unchanged. Someone who can run arbitrary SQL, change PRAGMAs or
+use a raw connection to a copy of the file remains outside the trust boundary.
 
 **Cross-row invariant "EXECUTING has exactly one ACTIVE slice (and a lease)".** SQLite triggers fire per statement, so this cannot be enforced as a plain trigger without
 breaking the fixed items -> slices -> execution order. It is enforced where it can be: a trigger refuses `EXECUTING` without exactly one `ACTIVE` slice (so `start_slice`
