@@ -41,7 +41,7 @@ def utcnow():
 
 
 def client_config(kind="installed"):
-    return {kind: {"client_id": "123-abc.apps.googleusercontent.com", SECRET_KEY: C_SEC,
+    return {kind: {"client_id": "100000000001-readsynth01.apps.googleusercontent.com", SECRET_KEY: C_SEC,
                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                    "token_uri": "https://oauth2.googleapis.com/token"}}
 
@@ -351,6 +351,8 @@ class GmailAdapterTests(Base):
         for path in (SRC / "gmail_intelligence").glob("*.py"):
             src = path.read_text()
             for scope in ("gmail.modify", "gmail.send", "gmail.settings", "mail.google.com", "gmail.compose"):
+                if scope == "gmail.modify" and path.name == "oauth_write.py":
+                    continue  # M4C-B1: the single module that defines the write scope (see test_write_boundary)
                 self.assertNotIn(scope, src, f"{path.name} mentions {scope}")
 
 

@@ -552,8 +552,9 @@ class SourceGuards(unittest.TestCase):
             self.assertNotRegex(text, r"execute\(\s*f[\"']")
 
     def test_write_scope_is_not_requested_anywhere(self):
-        offenders = [p.name for p in SRC.rglob("*.py")
-                     if re.search(r"auth/gmail\.(modify|compose|send|insert|labels|settings)|mail\.google\.com", p.read_text())]
+        # M4C-B1: the write scope is defined in exactly ONE module (oauth_write.py) and nowhere else.
+        offenders = [p.name for p in SRC.rglob("*.py") if p.name != "oauth_write.py"
+                     and re.search(r"auth/gmail\.(modify|compose|send|insert|labels|settings)|mail\.google\.com", p.read_text())]
         self.assertEqual(offenders, [])
         from gmail_intelligence import oauth
         self.assertEqual(sorted(oauth.EXPECTED_SCOPES), ["https://www.googleapis.com/auth/gmail.readonly"])

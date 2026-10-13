@@ -39,3 +39,17 @@ def inside_git_repo(path):
 def too_permissive(path):
     """True if group/other can access the file."""
     return bool(stat.S_IMODE(os.stat(path).st_mode) & 0o077)
+
+
+WRITE_CLIENT_FILE = "client_secret_write.json"
+WRITE_SETUP_FILE = "write_setup.json"
+
+
+def write_setup_path():
+    """Non-secret record (fingerprints only) of the owner's attestation that the write client lives in a SEPARATE Google Cloud project."""
+    return app_dir() / WRITE_SETUP_FILE
+
+
+def write_client_secret_path():
+    """Client file for the SEPARATE write authorization (M4C-B). Never the read-only client file."""
+    return app_dir() / WRITE_CLIENT_FILE
