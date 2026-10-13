@@ -223,6 +223,25 @@ identical). A database trigger repeats the ordering check for direct SQL.
 **Evidence is immutable once accepted.** Triggers refuse any change that sets `evidence_checked` back to 0 or alters the stored source or observation time,
 and `APPLIED` cannot exist without checked evidence (table `CHECK`). Direct SQL by someone who can edit the file remains outside the guarantee (see M4B limits).
 
+**Trusted observations (M4C-C1; contract only, no executor yet).** A `TrustedObservation` (module `exec_evidence`) is the only way evidence can be recorded with the
+source `TRUSTED_ADAPTER`. It can only be issued by an archive adapter that has verified the account, through the existing minimal message read (no new endpoint or
+scope): either a PRESENT message with an explicit labels tuple (an omitted `labelIds` in an otherwise complete answer is the explicit empty tuple, valid only where an empty
+archived state was expected) or a message definitively ABSENT (only for an unambiguous Gmail not-found document). The state machine accepts it only if it has the exact type, is
+bound to this account and this message, was issued by an adapter that still holds its verification, is unused, is not older than five minutes and satisfies the same strict
+chronology as other evidence. Ordinary `Evidence(source="TRUSTED_ADAPTER")` is rejected, and `ACCEPTED_EVIDENCE_SOURCES` still lists only `CALLER_SUPPLIED`.
+`require_source` can only RESTRICT which kind a call accepts; it never selects the stored source. After full validation the one-time token is consumed BEFORE persistence: if the
+database write then fails, the token stays consumed (in memory, for the life of its adapter; nothing claims it survives a restart) and a new observation is needed. A trusted
+observation of an absent message reconciles to `CONFLICT`, never to `APPLIED`. Reports state per evidence source what an "applied" record does and does not establish.
+**What this does not establish:** the guard is an in-process capability boundary against accidents and ordinary callers, not a cryptographic guarantee against code in the same
+process, and an observed desired state never proves that this tool made the change.
+
+**Dispatch metadata (M4C-C1).** Every transport exception carries `dispatched`. It is `False` ONLY where it is raised explicitly before any transmission could begin (policy
+refusal, unverified account, request budget, missing or expired credentials); otherwise it is true or unknown, and unknown is treated as possibly sent. It is never inferred
+from a counter, an exception class or a received status code. A complete HTTP error answer to a POST (even a well-formed Gmail error document) is NOT proof that the mutation had no
+effect, so a future executor must record such an outcome as `UNKNOWN` and reconcile; nothing is retried automatically. The vocabulary and the database are unchanged: the code
+`REJECTED` is not reinterpreted, its description now states that it records the recorder's assertion and that this library cannot show whether anything was sent, and
+existing records keep that uncertainty.
+
 **ARCHIVE needs `INBOX`.** `record_intent` refuses previous labels without `INBOX` before anything is stored, and the schema repeats it (a `CHECK` on
 `prev_label_ids` and the intent trigger). Other labels, including private user labels, are preserved exactly as recorded (sorted JSON array).
 

@@ -9,6 +9,25 @@ NOTE = ("This version has NO Gmail execution: nothing here can archive, trash or
 
 EVIDENCE_NOTE = ("'Applied' here means the item was RECORDED with caller-supplied evidence of the expected archived state; the evidence is not "
                  "authenticated and the change is not attributed to this tool (another client could have made it).")
+TRUSTED_NOTE = ("{n} item(s) were recorded from a trusted-adapter observation: the verified Gmail adapter observed the expected archived state (an in-process "
+                "capability guard, not a cryptographic proof). Observing the desired state does not prove that this tool made the change.")
+CALLER_NOTE = ("{n} item(s) were recorded with caller-supplied evidence: its structure was checked, but it is not authenticated.")
+
+
+def evidence_notes(index, account, exec_id):
+    """Lines that say, per evidence source, what an 'applied' record does and does not establish. No ids."""
+    counts = {r["evidence_source"]: r["n"] for r in index._q(
+        "SELECT evidence_source, COUNT(*) n FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='APPLIED' GROUP BY evidence_source", account, exec_id)}
+    if not counts:
+        return []
+    lines = []
+    if counts.get("CALLER_SUPPLIED"):
+        lines.append(EVIDENCE_NOTE + " " + CALLER_NOTE.format(n=counts["CALLER_SUPPLIED"]))
+    if counts.get("TRUSTED_ADAPTER"):
+        lines.append(TRUSTED_NOTE.format(n=counts["TRUSTED_ADAPTER"]))
+    if not lines:  # an APPLIED item without a recognized source is shown with the most cautious wording
+        lines.append(EVIDENCE_NOTE)
+    return lines
 
 
 def _last_reason(index, account, ex):
@@ -74,8 +93,8 @@ def show_text(index, account, ex, show_ids=False):
     if state == "EXECUTED":
         out.append("  EXECUTED: every slice finished; a final slice made only of safe skips (nothing attempted) can still end EXECUTED when earlier "
                    "slices had applied items and nothing failed.")
-    if ce.item_counts(index, account, ex["exec_id"]).get("APPLIED"):
-        out.append("  " + EVIDENCE_NOTE)
+    for line in evidence_notes(index, account, ex["exec_id"]):
+        out.append("  " + line)
     if show_ids:
         out.append("  items (id : state : code):")
         out += [f"    {r['message_id']} : {r['state']} : {r['error_code'] or '-'}" for r in index._q(

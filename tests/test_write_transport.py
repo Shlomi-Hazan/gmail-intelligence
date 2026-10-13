@@ -421,10 +421,10 @@ class TransportTests(Base):
 
     def test_the_adapter_exposes_no_http_client_token_credentials_or_generic_service(self):
         public = {n for n in dir(gw.ArchiveAdapter) if not n.startswith("_")}
-        self.assertEqual(public, {"verify_account", "message_state", "thread_state", "archive_message"})
+        self.assertEqual(public, {"verify_account", "message_state", "thread_state", "observe", "archive_message"})
         a = adapter(Net())
         self.assertFalse(hasattr(a, "__dict__"))
-        self.assertEqual(gw.ArchiveAdapter.__slots__, ("_t", "_expected"))
+        self.assertEqual(gw.ArchiveAdapter.__slots__, ("_t", "_expected", "_issuer"))
         for banned in ("service", "http", "creds", "credentials", "token", "request", "execute", "users", "messages", "modify", "trash", "send", "batch_modify", "transport"):
             self.assertFalse(hasattr(a, banned), banned)
         for bad_class in (gw.MessageState, gw.ArchiveResult):

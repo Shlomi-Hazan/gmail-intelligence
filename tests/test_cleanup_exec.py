@@ -1756,7 +1756,7 @@ class SourceGuards(unittest.TestCase):
     MODULES = ("cleanup_exec.py", "cleanup_exec_report.py")
 
     def test_m4c_a_modules_have_no_gmail_oauth_network_or_keychain_code(self):
-        allowed_local = {"cleanup_audit", "cleanup_plans", "cleanup_exec", "cleanup_protect", "index"}
+        allowed_local = {"cleanup_audit", "cleanup_plans", "cleanup_exec", "cleanup_protect", "index", "exec_evidence"}
         for name in self.MODULES:
             text = (SRC / "gmail_intelligence" / name).read_text()
             for node in ast.walk(ast.parse(text)):

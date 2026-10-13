@@ -49,6 +49,8 @@ _MESSAGES = {
 class Denied(Exception):
     """A request the policy refuses. `code` is stable; the message never contains request data."""
 
+    dispatched = None  # set explicitly at the raise site: False only where nothing can have been sent; None means "unknown" (treat as possibly sent)
+
     def __init__(self, code):
         super().__init__(_MESSAGES[code])
         self.code = code

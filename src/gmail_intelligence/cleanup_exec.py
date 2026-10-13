@@ -36,7 +36,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from gmail_intelligence import cleanup_audit as audit, cleanup_plans as cp
+from gmail_intelligence import cleanup_audit as audit, cleanup_plans as cp, exec_evidence
 from gmail_intelligence.cleanup_audit import sha256
 from gmail_intelligence.cleanup_plans import PlanError, _iso, _parse, _txn, _utc, short
 from gmail_intelligence.index import EXEC_ITEM_CODES
@@ -58,10 +58,10 @@ STOP_REASONS = ("CIRCUIT_BREAKER", "AMBIGUOUS_RESULT", "AUTH_PROBLEM", "ACCOUNT_
 assert set(SKIP_REASONS) | {c for v in OUTCOME_CODES.values() for c in v} <= set(EXEC_ITEM_CODES)
 CODE_MEANING = {
     "NEVER_ATTEMPTED": "never attempted: execution stopped or was aborted before this message was touched",
-    "REJECTED": "attempt rejected by Gmail (known, unmodified)",
+    "REJECTED": "recorded as a known rejection, unmodified (the recorder's assertion: this library cannot show whether anything was sent; older records keep that uncertainty)",
     "RECONCILED_UNMODIFIED": "observed equal to its state before the attempt (does not prove no write occurred)",
     "RECONCILED_OBSERVED_ARCHIVED": "observed in the expected archived state (not attributed to this executor)",
-    "RECONCILED_CONFLICT": "observed in a state that is neither before nor after",
+    "RECONCILED_CONFLICT": "observed in a state that is neither before nor after (including a message observed absent)",
     "INTERRUPTED": "process or lease lost while the outcome was open (uncertain write)",
     "AMBIGUOUS_RESULT": "result of the attempt is uncertain",
     "TIMEOUT": "no answer (uncertain write)", "SERVER_ERROR": "server error (uncertain write)", "NETWORK_ERROR": "network error (uncertain write)",
@@ -88,7 +88,8 @@ EVIDENCE_KINDS = ("LABEL_OBSERVATION",)
 # CALLER_SUPPLIED: structure accepted, nothing authenticated. TRUSTED_ADAPTER is reserved for the future M4C-C read-only adapter and is
 # NOT accepted yet: no code in M4C-A can produce an authenticated Gmail response.
 EVIDENCE_SOURCES = ("CALLER_SUPPLIED", "TRUSTED_ADAPTER")
-ACCEPTED_EVIDENCE_SOURCES = ("CALLER_SUPPLIED",)
+ACCEPTED_EVIDENCE_SOURCES = ("CALLER_SUPPLIED",)  # for ordinary `Evidence` ONLY. It must never list TRUSTED_ADAPTER (that would let a caller type it).
+TRUSTED_EVIDENCE_SOURCE = "TRUSTED_ADAPTER"  # persisted only for a genuine, unused exec_evidence.TrustedObservation (a separate, stricter branch)
 _TS = r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,6}))?(Z|[+-][0-9]{2}:[0-9]{2})"
 
 
@@ -128,33 +129,66 @@ class Evidence:
     source: str = "CALLER_SUPPLIED"
 
 
-def _check_evidence(ev, item, now):
-    """Validate evidence against the item. Returns (sorted labels, observed UTC datetime). Writes nothing.
+def _check_evidence(ev, item, now, account=None, require_source=None):
+    """Validate evidence against the item. Returns (sorted labels or None for an absent message, observed UTC datetime, source). Writes and consumes nothing.
 
-    Chronology is STRICT: the observation may not predate the recorded intent (no tolerance), nor - for an UNKNOWN item - the recorded
-    UNKNOWN transition. Only the upper bound uses the shared clock tolerance, because "now" itself may lag a skewed clock.
+    Two separate branches. Ordinary `Evidence` is caller-supplied (source CALLER_SUPPLIED only). A `TrustedObservation` must be of that exact type, unused,
+    issued for this account and this message, and not older than exec_evidence.MAX_AGE. Chronology is STRICT for both: the observation may not predate the
+    recorded intent (no tolerance), nor - for an UNKNOWN item - the recorded UNKNOWN transition. Only the upper bound uses the shared clock tolerance,
+    because "now" itself may lag a skewed clock. `require_source` can only RESTRICT which branch is acceptable; it never selects the stored source.
     """
-    ok = (isinstance(ev, Evidence) and ev.kind in EVIDENCE_KINDS and ev.source in ACCEPTED_EVIDENCE_SOURCES
-          and isinstance(ev.message_id, str) and ev.message_id == item["message_id"]
-          and isinstance(ev.labels, (tuple, list)) and len(ev.labels) <= 100
-          and (ev.labels or _expects_no_labels(item))  # an EXPLICIT empty observation is valid only when the expected archived state is empty
-          and all(isinstance(x, str) and 0 < len(x) <= 64 and x.isascii() for x in ev.labels))
-    seen = None
+    trusted = exec_evidence.is_trusted(ev)
+    seen = labels = source = None
+    if trusted:
+        source = TRUSTED_EVIDENCE_SOURCE
+        ok = (isinstance(account, str) and ev.account == account.strip().lower() and ev.message_id == item["message_id"]
+              and (not ev.present or bool(ev.labels) or _expects_no_labels(item))  # an EXPLICIT empty tuple is valid only when the expected state is empty
+              and exec_evidence.is_pending(ev))
+        if ok:
+            seen = ev.observed_at
+            labels = sorted(set(ev.labels)) if ev.present else None
+    else:
+        source = ev.source if isinstance(ev, Evidence) else None
+        ok = (isinstance(ev, Evidence) and ev.kind in EVIDENCE_KINDS and ev.source in ACCEPTED_EVIDENCE_SOURCES
+              and isinstance(ev.message_id, str) and ev.message_id == item["message_id"]
+              and isinstance(ev.labels, (tuple, list)) and len(ev.labels) <= 100
+              and (ev.labels or _expects_no_labels(item))  # an EXPLICIT empty observation is valid only when the expected archived state is empty
+              and all(isinstance(x, str) and 0 < len(x) <= 64 and x.isascii() for x in ev.labels))
+        if ok:
+            try:
+                seen = _norm_ts(ev.observed_at)
+            except (ValueError, TypeError):
+                ok = False
+            else:
+                labels = sorted(set(ev.labels))
+    if ok and require_source is not None and source != require_source:
+        ok = False
     if ok:
         try:
-            seen = _norm_ts(ev.observed_at)
             floors = [_parse_us(item["intent_at"])] + ([_parse_us(item["result_at"])] if item["state"] == "UNKNOWN" else [])
         except (ValueError, TypeError):
             ok = False
         else:
-            ok = all(seen >= f for f in floors) and seen <= now + cp.CLOCK_TOLERANCE
+            ok = all(seen >= f for f in floors) and seen <= now + cp.CLOCK_TOLERANCE and (not trusted or now - seen <= exec_evidence.MAX_AGE)
     if not ok:
         raise ExecError("BAD_EVIDENCE", "the evidence is missing, malformed, or inconsistent with the recorded intent and its chronology")
-    return sorted(set(ev.labels)), seen
+    return labels, seen, source
 
 
-def _evidence_cols(ev, seen):
-    return {"evidence_checked": 1, "evidence_source": ev.source, "evidence_observed_at": _us(seen)}
+def _consume_trusted(ev):
+    """Use up a trusted observation once, AFTER all validation and BEFORE persistence. If persistence then fails the observation stays consumed
+    (in memory, for the life of its issuer; nothing here survives a restart) and a new observation is needed."""
+    if exec_evidence.is_trusted(ev) and not exec_evidence.consume(ev):
+        raise ExecError("BAD_EVIDENCE", "the observation was already used or is not valid")
+
+
+def _check_require_source(require_source):
+    if require_source is not None and require_source not in EVIDENCE_SOURCES:
+        raise ExecError("BAD_INPUT", "require_source must be CALLER_SUPPLIED, TRUSTED_ADAPTER or omitted")
+
+
+def _evidence_cols(source, seen):
+    return {"evidence_checked": 1, "evidence_source": source, "evidence_observed_at": _us(seen)}
 
 
 def _expects_no_labels(item):
@@ -503,13 +537,16 @@ def record_intent(index, account, exec_id, token, message_id, prev_label_ids, no
                   prev_label_ids=json.dumps(sorted(set(labels))), intent_at=_us(now))
 
 
-def record_outcome(index, account, exec_id, token, message_id, outcome, code=None, evidence=None, now=None):
-    """INTENT -> APPLIED | NOT_APPLIED (known rejection) | UNKNOWN (ambiguous: needs reconciliation, never retried automatically).
+def record_outcome(index, account, exec_id, token, message_id, outcome, code=None, evidence=None, now=None, require_source=None):
+    """INTENT -> APPLIED | NOT_APPLIED (recorded as a known rejection) | UNKNOWN (ambiguous: needs reconciliation, never retried automatically).
 
-    APPLIED requires structured `Evidence` (strictly not earlier than the intent) showing exactly the previous labels minus INBOX; anything else is not APPLIED.
+    APPLIED requires structured evidence (strictly not earlier than the intent) showing exactly the previous labels minus INBOX: ordinary caller-supplied
+    `Evidence`, or an unused `TrustedObservation` of a PRESENT message; anything else is not APPLIED. `require_source` restricts which kind is acceptable
+    (a production executor passes "TRUSTED_ADAPTER"). It records an observed state; it never shows who made the change.
     """
     if outcome not in OUTCOME_CODES:
         raise ExecError("BAD_INPUT", "outcome must be APPLIED, NOT_APPLIED or UNKNOWN")
+    _check_require_source(require_source)
     code = _code(code if code is not None else OUTCOME_CODES[outcome][0], OUTCOME_CODES[outcome])
     now = _utc(now)
     with _txn(index):
@@ -517,10 +554,11 @@ def record_outcome(index, account, exec_id, token, message_id, outcome, code=Non
         it = _item(index, account, exec_id, message_id)
         extra = {}
         if outcome == "APPLIED":
-            observed, seen = _check_evidence(evidence, it, now)
-            if it["prev_label_ids"] is None or observed != _expected_after(it)[0]:
+            observed, seen, source = _check_evidence(evidence, it, now, account, require_source)
+            if observed is None or it["prev_label_ids"] is None or observed != _expected_after(it)[0]:
                 raise ExecError("EVIDENCE_MISMATCH", "the observed labels are not the expected archived state; record UNKNOWN instead")
-            extra = _evidence_cols(evidence, seen)
+            _consume_trusted(evidence)
+            extra = _evidence_cols(source, seen)
         _set_item(index, account, exec_id, ex["plan_id"], message_id, outcome, "INTENT", _iso(now), code=code, result_at=_us(now), **extra)
 
 
@@ -675,13 +713,14 @@ def confirm_slice(index, account, exec_id, slice_no, confirmation, now=None):
 
 
 # ---------------------------------------------------------------- reconciliation of UNKNOWN items (from OBSERVED state only)
-def reconcile_item(index, account, exec_id, message_id, evidence, now=None):
-    """Resolve an UNKNOWN item from structured, caller-supplied evidence. The caller cannot assert an outcome; the library derives it.
+def reconcile_item(index, account, exec_id, message_id, evidence, now=None, require_source=None):
+    """Resolve an UNKNOWN item from structured evidence: ordinary caller-supplied `Evidence` or an unused `TrustedObservation`. The caller cannot assert an outcome.
 
     Observed == expected archived state -> APPLIED (RECONCILED_OBSERVED_ARCHIVED; evidence_checked, not attributed); observed == the state before the attempt -> NOT_APPLIED
-    (RECONCILED_UNMODIFIED, which does not prove that no write occurred); anything else -> CONFLICT. No write is ever retried here.
-    Not reachable from the CLI: M4C-A has no Gmail client to produce real evidence.
+    (RECONCILED_UNMODIFIED, which does not prove that no write occurred); anything else, including a trusted observation that the message is ABSENT -> CONFLICT.
+    No write is ever retried here. Not reachable from the CLI.
     """
+    _check_require_source(require_source)
     now = _utc(now)
     at = _iso(now)
     with _txn(index):
@@ -692,10 +731,13 @@ def reconcile_item(index, account, exec_id, message_id, evidence, now=None):
         it = _item(index, account, exec_id, message_id)
         if it["state"] != "UNKNOWN":
             raise ExecError("BAD_ITEM_STATE", "only an UNKNOWN item can be reconciled")
-        observed, seen = _check_evidence(evidence, it, now)
+        observed, seen, source = _check_evidence(evidence, it, now, account, require_source)
         after, before = _expected_after(it)
-        if observed == after:
-            new, code, extra = "APPLIED", "RECONCILED_OBSERVED_ARCHIVED", _evidence_cols(evidence, seen)
+        _consume_trusted(evidence)
+        if observed is None:  # definitively absent: neither the state before nor the archived state, and never "archived"
+            new, code, extra = "CONFLICT", "RECONCILED_CONFLICT", {}
+        elif observed == after:
+            new, code, extra = "APPLIED", "RECONCILED_OBSERVED_ARCHIVED", _evidence_cols(source, seen)
         elif observed == before:
             new, code, extra = "NOT_APPLIED", "RECONCILED_UNMODIFIED", {}
         else:
