@@ -262,6 +262,11 @@ POST; an independent trusted post-read bound to this execution; `APPLIED` only f
 to be before any transmission is `NOT_APPLIED`/`REJECTED`; anything that may have been sent (every HTTP error, timeout, redirect, malformed answer or unexpected exception) is `UNKNOWN`
 and the execution stops (`RECONCILIATION_REQUIRED`). A read failure before the intent stops safely with no POST. Persistence errors propagate and leave an open intent that lease expiry
 turns into `UNKNOWN` (`INTERRUPTED`), which a trusted observation reconciles. Nothing is retried; no new status code, audit event or schema was added.
+**Fake-only boundary and its limits.** `FakeMailbox` is immutable (assigning or deleting any attribute raises), and the executor checks at the start and again right before the POST that the
+mailbox still routes to its own in-memory service (exact adapter, transport, credential and connection-factory types, all pointing at its own service). That stops supported ordinary use
+(attribute assignment, swapping a connection factory) from routing execution to a real adapter; code in the same process that deliberately uses reflection or monkey-patching can still
+bypass any such check. The executor does not claim that the preflight and the POST are atomic against other Gmail clients: a change in between is not prevented, it is caught only by the
+exact post-read and recorded as `UNKNOWN`.
 **What this does not establish:** the guard is an in-process capability boundary against accidents and ordinary callers, not a cryptographic guarantee against code in the same
 process, and an observed desired state never proves that this tool made the change.
 

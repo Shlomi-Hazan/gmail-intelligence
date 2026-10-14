@@ -19,7 +19,7 @@ from datetime import timezone
 
 from gmail_intelligence import cleanup_exec as ce, cleanup_plans as cp, cleanup_protect
 from gmail_intelligence.cleanup_audit import canonical, sha256
-from gmail_intelligence.exec_fake_mailbox import FakeMailbox
+from gmail_intelligence.exec_fake_mailbox import FakeMailbox, wiring_is_fake
 
 TRUSTED = ce.TRUSTED_EVIDENCE_SOURCE
 _STOP_BY_CODE = {"ACCOUNT_MISMATCH": "ACCOUNT_MISMATCH", "AUTH_PROBLEM": "AUTH_PROBLEM", "RATE_LIMITED": "RATE_LIMITED"}
@@ -114,7 +114,7 @@ def _thread_problem(index, account, message_id, thread_id, thread):
 
 def execute_one(index, account, exec_id, token, message_id, mailbox):
     """Run the single-item flow described in the module docstring. Returns an ItemResult; raises ExecError for refusals that change nothing."""
-    if type(mailbox) is not FakeMailbox:
+    if type(mailbox) is not FakeMailbox or not wiring_is_fake(mailbox):
         raise ce.ExecError("MAILBOX_NOT_ALLOWED", "only the fake test mailbox is accepted in this version; nothing was read or changed")
     plan = _preconditions(index, account, exec_id, token, message_id, mailbox)
 
@@ -159,7 +159,10 @@ def execute_one(index, account, exec_id, token, message_id, mailbox):
     ce.record_intent(index, account, exec_id, token, message_id, labels, now=_now(mailbox))
     ce.renew_lease(index, account, exec_id, token, now=_now(mailbox))  # LEASE_LOST propagates: no POST, the open intent is recovered as UNKNOWN later
 
-    # ---- the single archive attempt: marked BEFORE the call, never retried
+    # ---- the single archive attempt: never retried. Nothing makes the preflight and this request atomic against other Gmail clients: a change in
+    # between is caught only by the exact post-read (UNKNOWN), never prevented.
+    if not wiring_is_fake(mailbox):  # re-checked at the last moment: the intent stays open for recovery, no request is made
+        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "the mailbox is no longer wired to the fake service; no request was made")
     try:
         mailbox.archive_message(message_id)
     except Exception as exc:  # noqa: BLE001 - only a provable pre-dispatch refusal is a clean "not applied"

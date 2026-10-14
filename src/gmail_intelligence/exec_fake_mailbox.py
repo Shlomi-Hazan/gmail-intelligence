@@ -166,8 +166,22 @@ class _Factory:
         return _Connection(self._service)
 
 
+def wiring_is_fake(mailbox):
+    """True only if this FakeMailbox still routes every request to its own in-memory service: the exact adapter, transport, credentials and connection
+    factory types it was built with, all pointing at its own service. The executor checks this at the start and again right before the archive POST.
+    Defence in depth against a swapped inner object; it is NOT a guarantee against deliberate reflection by code in the same process."""
+    try:
+        adapter = mailbox._adapter
+        transport = adapter._t
+        factory = transport._factory
+        return (type(mailbox) is FakeMailbox and type(adapter) is gw.ArchiveAdapter and type(transport) is gw._Transport and type(factory) is _Factory
+                and type(transport._creds) is _FakeCreds and factory._service is mailbox._service and transport._creds is mailbox._service.creds)
+    except AttributeError:
+        return False
+
+
 class FakeMailbox:
-    """The one mailbox type the C2 executor accepts. Final; no credential, factory or transport can be supplied."""
+    """The one mailbox type the C2 executor accepts. Final and immutable; no credential, factory or transport can be supplied or replaced by assignment."""
     __slots__ = ("_service", "_adapter", "_clock")
     FAKE_ONLY = True
 
@@ -180,9 +194,16 @@ class FakeMailbox:
         if not isinstance(messages, dict) or not all(re.fullmatch(r"[0-9a-f]{1,32}", str(mid)) and re.fullmatch(r"[0-9a-f]{1,32}", str(v[0]))
                                                        for mid, v in messages.items()):
             raise ValueError("messages must map hex message ids to (hex thread id, labels)")
-        self._service = _Service(account.strip(), messages, tuple(script))
-        self._clock = clock
-        self._adapter = gw.ArchiveAdapter(gw._Transport(self._service.creds, _Factory(self._service)), account.strip(), _clock=clock)
+        service = _Service(account.strip(), messages, tuple(script))
+        for name, value in (("_service", service), ("_clock", clock),
+                            ("_adapter", gw.ArchiveAdapter(gw._Transport(service.creds, _Factory(service)), account.strip(), _clock=clock))):
+            object.__setattr__(self, name, value)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("a FakeMailbox is immutable: its adapter, service and clock cannot be replaced")
+
+    def __delattr__(self, name):
+        raise AttributeError("a FakeMailbox is immutable")
 
     def __repr__(self):
         return "<FakeMailbox>"

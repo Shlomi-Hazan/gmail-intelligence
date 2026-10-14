@@ -84,6 +84,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D78 | **Fake-only single-item executor (C2).** `cleanup_executor.execute_one` accepts only the final `exec_fake_mailbox.FakeMailbox` (no credentials, factory or transport parameter). One item, one slice; no CLI path. A real port needs its own reviewed change. |
 | D79 | **C2 failure policy.** Intent is committed before the single POST; exact label equality at preflight and post-read; a provably undispatched refusal is `NOT_APPLIED`/`REJECTED`; anything possibly sent is `UNKNOWN`; a read failure before the intent stops with no POST; persistence failures leave an open intent that lease expiry recovers as `UNKNOWN`. No retry of a mutation. |
 | D80 | **C2 scope.** No canary, slicing, pacing, recovery automation, reporting or release work (C3-C5), no real adapter, no OAuth or Google Cloud, no schema or vocabulary change. |
+| D81 | **Immutable fake mailbox (C2 review).** `FakeMailbox` rejects attribute assignment and deletion, and the executor re-verifies the mailbox's wiring before reading and immediately before the POST. A review reproduced `mailbox._adapter = <real adapter>` passing the exact-type check; this closes it for ordinary use. Deliberate same-process reflection is out of scope. |
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
 

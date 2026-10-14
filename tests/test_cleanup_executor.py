@@ -701,6 +701,52 @@ class FakeOnlyTests(ExecutorBase):
         self.assertEqual(type(transport._factory).__name__, "_Factory")
         self.assertEqual(type(transport._creds).__name__, "_FakeCreds")
 
+    def test_a_fake_mailbox_cannot_be_rewired_to_a_real_adapter_by_ordinary_assignment(self):
+        ex = self.execution()
+        mb = self.mailbox()
+        net = TWT.Net(TWT.ok(emailAddress=ACCT))
+        real = TWT.adapter(net, expected=ACCT, verified=False)
+        for name in ("_adapter", "_service", "_clock", "service", "anything"):
+            with self.assertRaises(AttributeError, msg=name):
+                setattr(mb, name, real if name == "_adapter" else object())
+        with self.assertRaises(AttributeError):
+            del mb._adapter
+        before = self.snapshot()
+        res = self.run_one(ex, mb)  # the untouched fake still works
+        self.assertEqual(res.item_state, "APPLIED")
+        self.assertEqual((net.opened, net.log), (0, []))
+        self.assertNotEqual(before, self.snapshot())
+
+    def test_a_swapped_inner_adapter_or_transport_is_detected_before_any_request(self):
+        for label, swap in (("the adapter", lambda mb, net: object.__setattr__(mb, "_adapter", TWT.adapter(net, expected=ACCT, verified=False))),
+                            ("the connection factory", lambda mb, net: setattr(mb._adapter._t, "_factory", net)),
+                            ("the credentials", lambda mb, net: setattr(mb._adapter._t, "_creds", TWT.WCreds()))):
+            with self.subTest(label):
+                self.setUp()
+                ex = self.execution()
+                mb = self.mailbox()
+                net = TWT.Net(TWT.ok(emailAddress=ACCT))
+                swap(mb, net)
+                self.assertFalse(fm.wiring_is_fake(mb))
+                self.untouched(ex, mb)
+                self.assertEqual((net.opened, net.log), (0, []))
+
+    def test_a_rewiring_between_the_intent_and_the_post_makes_no_request(self):
+        ex = self.execution()
+        net = TWT.Net()
+        mb = self.mailbox()
+        real = ce.record_intent
+
+        def intent_then_rewire(*a, **kw):
+            real(*a, **kw)
+            setattr(mb._adapter._t, "_factory", net)
+        with mock.patch.object(ce, "record_intent", side_effect=intent_then_rewire):
+            with self.assertRaises(ce.ExecError) as ctx:
+                cx.execute_one(self.index, ACCT, ex["exec_id"], self.token, M0, mb)
+        self.assertEqual(ctx.exception.code, "MAILBOX_NOT_ALLOWED")
+        self.assertEqual((net.opened, net.log, mb.service.posts()), (0, [], 0))
+        self.assertEqual(self.item()["state"], "INTENT")  # left open: lease expiry makes it UNKNOWN for reconciliation
+
     def test_a_full_run_works_while_every_real_connection_path_is_a_bomb(self):
         ex = self.execution()
         mb = self.mailbox()
