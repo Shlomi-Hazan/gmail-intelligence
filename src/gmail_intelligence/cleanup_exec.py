@@ -131,21 +131,24 @@ class Evidence:
     source: str = "CALLER_SUPPLIED"
 
 
-def _check_evidence(ev, item, now, account=None, require_source=None):
+def _check_evidence(ev, item, now, account=None, require_source=None, context=None):
     """Validate evidence against the item. Returns (sorted labels or None for an absent message, observed UTC datetime, source). Writes and consumes nothing.
 
     Two separate branches. Ordinary `Evidence` is caller-supplied (source CALLER_SUPPLIED only). A `TrustedObservation` must be of that exact type, unused,
     issued for this account and this message, and not older than exec_evidence.MAX_AGE. Chronology is STRICT for both: the observation may not predate the
     recorded intent (no tolerance), nor - for an UNKNOWN item - the recorded UNKNOWN transition. Only the upper bound uses the shared clock tolerance,
     because "now" itself may lag a skewed clock. `require_source` can only RESTRICT which branch is acceptable; it never selects the stored source.
+    A trusted observation must also carry exactly the `context` the library derived for THIS execution, plan, message, phase and lease (C2-GATE-1);
+    a missing expected context refuses every trusted observation.
     """
     trusted = exec_evidence.is_trusted(ev)
     seen = labels = source = None
     if trusted:
         source = TRUSTED_EVIDENCE_SOURCE
         try:  # an uninitialised or half-built observation (its slots unset) is malformed evidence, not a programming error
-            t_account, t_mid, t_present, t_labels, t_seen = ev.account, ev.message_id, ev.present, ev.labels, ev.observed_at  # one read each (a snapshot)
+            t_account, t_mid, t_present, t_labels, t_seen, t_ctx = ev.account, ev.message_id, ev.present, ev.labels, ev.observed_at, ev.context  # one read each
             ok = (isinstance(account, str) and t_account == account.strip().lower() and t_mid == item["message_id"]
+                  and type(context) is str and t_ctx == context
                   and (not t_present or bool(t_labels) or _expects_no_labels(item))  # an EXPLICIT empty tuple is valid only when the expected state is empty
                   and exec_evidence.is_pending(ev))
         except AttributeError:
@@ -185,6 +188,31 @@ def _check_evidence(ev, item, now, account=None, require_source=None):
     if not ok:
         raise ExecError("BAD_EVIDENCE", "the evidence is missing, malformed, or inconsistent with the recorded intent and its chronology")
     return labels, seen, source
+
+
+def _context(ex, message_id, phase, extra):
+    """Opaque binding of an observation to ONE execution, plan, approval, message, phase and (for POSTREAD) lease. Identity, not secrecy: anyone who can read
+    the database can compute it; its job is to stop an observation made for another execution, plan, account, message, phase or lease from being accepted."""
+    return sha256(audit.canonical({"v": 1, "account": ex["account"].lower(), "exec": ex["exec_id"], "plan": ex["plan_id"], "plan_hash": ex["plan_hash"],
+                                   "approval": ex["approval_nonce"], "message": message_id, "phase": phase, "extra": extra}))
+
+
+def postread_context(index, account, exec_id, token, message_id):
+    """The context the executor must pass to `observe` for the independent read AFTER its single archive attempt. Needs the live lease token."""
+    ex = get_execution(index, account, exec_id)
+    if not _token_ok(token) or not ex["lease_token"] or not hmac.compare_digest(ex["lease_token"], sha256(token)):
+        raise ExecError("LEASE_LOST", "this process does not hold the execution lease; stop")
+    _item(index, account, exec_id, message_id)
+    return _context(ex, message_id, "POSTREAD", ex["lease_token"])
+
+
+def reconcile_context(index, account, exec_id, message_id):
+    """The context for observing an UNKNOWN item during reconciliation: bound to that exact UNKNOWN episode (its recorded result time)."""
+    ex = get_execution(index, account, exec_id)
+    it = _item(index, account, exec_id, message_id)
+    if it["state"] != "UNKNOWN":
+        raise ExecError("BAD_ITEM_STATE", "only an UNKNOWN item can be reconciled")
+    return _context(ex, message_id, "RECONCILE", it["result_at"])
 
 
 def _consume_trusted(ev):
@@ -576,7 +604,7 @@ def record_outcome(index, account, exec_id, token, message_id, outcome, code=Non
         it = _item(index, account, exec_id, message_id)
         extra, meta = {}, None
         if outcome == "APPLIED":
-            observed, seen, source = _check_evidence(evidence, it, now, account, require_source)
+            observed, seen, source = _check_evidence(evidence, it, now, account, require_source, _context(ex, message_id, "POSTREAD", ex["lease_token"]))
             if observed is None or it["prev_label_ids"] is None or observed != _expected_after(it)[0]:
                 raise ExecError("EVIDENCE_MISMATCH", "the observed labels are not the expected archived state; record UNKNOWN instead")
             _consume_trusted(evidence)
@@ -754,7 +782,7 @@ def reconcile_item(index, account, exec_id, message_id, evidence, now=None, requ
         it = _item(index, account, exec_id, message_id)
         if it["state"] != "UNKNOWN":
             raise ExecError("BAD_ITEM_STATE", "only an UNKNOWN item can be reconciled")
-        observed, seen, source = _check_evidence(evidence, it, now, account, require_source)
+        observed, seen, source = _check_evidence(evidence, it, now, account, require_source, _context(ex, message_id, "RECONCILE", it["result_at"]))
         after, before = _expected_after(it)
         _consume_trusted(evidence)
         kind = _observed_kind(observed, after, before)

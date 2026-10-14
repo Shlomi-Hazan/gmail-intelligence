@@ -300,13 +300,13 @@ class ArchiveAdapter:
     """
     __slots__ = ("_t", "_expected", "_issuer")
 
-    def __init__(self, transport, expected_account, clock=None):
+    def __init__(self, transport, expected_account, *, _clock=None):  # `_clock` exists for the fake-only test mailbox; no production factory passes it
         if transport._bound:
             raise ValueError("this transport already belongs to another adapter")  # no cross-account reuse of credentials or verified state
         transport._bound = True
         self._t, self._expected = transport, expected_account
         # one issuer per adapter, bound to the expected account; none when no account is expected (such an adapter can never observe)
-        self._issuer = (exec_evidence.new_issuer(expected_account, clock or _utcnow, seal=_SEAL)
+        self._issuer = (exec_evidence.new_issuer(expected_account, _clock or _utcnow, seal=_SEAL)
                         if isinstance(expected_account, str) and expected_account.strip() else None)
         self._verified = False
 
@@ -396,7 +396,7 @@ class ArchiveAdapter:
         except Exception:  # noqa: BLE001 - any other failure (including an unusable answer) after dispatch may have begun is never a clean "not applied"
             raise _mark(UncertainOutcome("AMBIGUOUS_RESULT"), True) from None
 
-    def observe(self, message_id):
+    def observe(self, message_id, *, context):
         """One trusted observation of a message's labels, through the existing minimal GET (no new endpoint, no new scope).
 
         Needs a verified account. Returns a one-time `exec_evidence.TrustedObservation`: present with an explicit labels tuple (an omitted `labelIds`
@@ -406,6 +406,8 @@ class ArchiveAdapter:
         """
         if not self._verified or self._issuer is None:
             raise _mark(AccountNotVerified(), False)
+        if type(context) is not str or not 0 < len(context) <= 128 or not context.isascii():
+            raise _mark(ReadFailure(), False)  # an observation is always bound to an execution context; nothing is requested without one
         try:
             url = f"{policy.BASE}/gmail/v1/users/me/messages/{policy.valid_id(message_id)}?format=minimal&fields=id,threadId,labelIds"
         except Denied as exc:
@@ -415,16 +417,16 @@ class ArchiveAdapter:
         except MessageNotFound as exc:
             if not exc.absent_confirmed:
                 raise _mark(ReadFailure(), True) from None  # a 404 that is not an unambiguous not-found document is not an observation
-            return self._issue(message_id, False, None)
+            return self._issue(message_id, False, None, context)
         if obj.get("id") != message_id or type(obj.get("threadId")) is not str or not obj["threadId"]:
             raise _mark(ReadFailure(), True)
-        return self._issue(message_id, True, _labels(obj.get("labelIds")))
+        return self._issue(message_id, True, _labels(obj.get("labelIds")), context)
 
-    def _issue(self, message_id, present, labels):
+    def _issue(self, message_id, present, labels, context):
         if not self._verified:  # verification was lost while the answer was being read
             raise _mark(AccountNotVerified(), True)
         try:
-            return self._issuer.issue(message_id, present, labels)
+            return self._issuer.issue(message_id, present, labels, context)
         except exec_evidence.ObservationError:
             raise _mark(ReadFailure(), True) from None
 
@@ -434,7 +436,7 @@ def fetch_profile_email(creds, connection_factory=None):
     return ArchiveAdapter(_Transport(creds, connection_factory), None)._profile_email()
 
 
-def open_archive_adapter(expected_account, store, client_path, now=None, connection_factory=None, clock=None):
+def open_archive_adapter(expected_account, store, client_path, now=None, connection_factory=None):
     """Build the adapter from the stored write authorization. LOCAL checks only: no refresh, no network, no prompt.
 
     Needs: a stored record, a matching client file, the exact scope, the same OAuth client, the expected account and at least ten minutes of
@@ -451,4 +453,4 @@ def open_archive_adapter(expected_account, store, client_path, now=None, connect
     if (blob.get("account") or "").strip().lower() != (expected_account or "").strip().lower():
         raise AccountMismatch()
     oauth_write.require_validity(creds, now)
-    return ArchiveAdapter(_Transport(creds, connection_factory), expected_account, clock)
+    return ArchiveAdapter(_Transport(creds, connection_factory), expected_account)

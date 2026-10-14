@@ -4,6 +4,8 @@ A `TrustedObservation` is what a designated archive adapter hands to the executi
 state. What it can and cannot establish:
   * it was issued by an adapter object that had verified the account, for exactly one account and one message;
   * it is valid once (the token is consumed), for a short time, and only if the adapter still holds its verification;
+  * it is bound to an opaque `context` chosen by the executor and recomputed by the state machine (execution, plan, message, phase, lease), so an
+    observation made for one execution cannot be accepted for another (M4C-C2);
   * it reports an OBSERVED state at a time T. It never proves that this application changed anything: the owner or another client could have.
 
 The guard is an IN-PROCESS capability boundary against accidents and ordinary callers (a private mint object, a final type, per-issuer
@@ -50,16 +52,17 @@ def _aware(value):
 
 class TrustedObservation:
     """One observed label state: `present` with an explicit `labels` tuple (possibly empty), or definitively absent (`labels` is None)."""
-    __slots__ = ("account", "message_id", "present", "labels", "observed_at", "_issuer", "_nonce")
+    __slots__ = ("account", "message_id", "present", "labels", "observed_at", "context", "_issuer", "_nonce")
 
     def __init_subclass__(cls, **kwargs):
         raise TypeError("TrustedObservation is final")
 
-    def __init__(self, *, _mint, account, message_id, present, labels, observed_at, issuer, nonce):
+    def __init__(self, *, _mint, account, message_id, present, labels, observed_at, context, issuer, nonce):
         if _mint is not _MINT:
             raise TypeError("a TrustedObservation can only be issued by an adapter")
         if (type(account) is not str or not account or type(message_id) is not str or not message_id or type(present) is not bool
-                or not _aware(observed_at) or type(nonce) is not str or type(issuer) is not ObservationIssuer):
+                or not _aware(observed_at) or type(nonce) is not str or type(issuer) is not ObservationIssuer
+                or type(context) is not str or not 0 < len(context) <= 128 or not context.isascii()):
             raise ObservationError("invalid observation fields")
         if present:
             if type(labels) is not tuple or len(labels) > 100 or not all(type(x) is str and 0 < len(x) <= 64 and x.isascii() for x in labels):
@@ -67,7 +70,7 @@ class TrustedObservation:
         elif labels is not None:
             raise ObservationError("an absent message has no labels")
         for name, value in (("account", account), ("message_id", message_id), ("present", present), ("labels", labels),
-                            ("observed_at", observed_at.astimezone(timezone.utc)), ("_issuer", issuer), ("_nonce", nonce)):
+                            ("observed_at", observed_at.astimezone(timezone.utc)), ("context", context), ("_issuer", issuer), ("_nonce", nonce)):
             object.__setattr__(self, name, value)
 
     def __setattr__(self, name, value):
@@ -101,14 +104,15 @@ class ObservationIssuer:
     def __repr__(self):
         return "<ObservationIssuer>"
 
-    def issue(self, message_id, present, labels):
-        """Mint one observation stamped by the injected clock. The caller (the adapter) must have verified the account first."""
+    def issue(self, message_id, present, labels, context):
+        """Mint one observation stamped by the issuer's clock and bound to `context` (an opaque string chosen by the executor: execution, plan, message,
+        phase and lease). The caller (the adapter) must have verified the account first."""
         observed_at = self._clock()
         if not _aware(observed_at):
             raise ObservationError("the clock must return an aware datetime")
         nonce = secrets.token_hex(16)
         obs = TrustedObservation(_mint=_MINT, account=self._account, message_id=message_id, present=present, labels=labels,
-                                 observed_at=observed_at, issuer=self, nonce=nonce)
+                                 observed_at=observed_at, context=context, issuer=self, nonce=nonce)
         with self._lock:
             if len(self._pending) >= MAX_PENDING:
                 raise ObservationError("too many unused observations")
