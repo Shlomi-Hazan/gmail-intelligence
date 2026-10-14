@@ -416,6 +416,10 @@ class TrustedEvidenceTests(TCE.ExecBase):
         ad = make_adapter(net, account=account, clock=FakeClock(at if at is not None else self.t))
         return ad.observe(mid), ad
 
+    def last_item_meta(self):
+        row = self.index._q("SELECT meta FROM cleanup_audit WHERE event_type='ITEM_TRANSITION' ORDER BY seq DESC LIMIT 1")[0]
+        return json.loads(row["meta"])
+
     def snapshot(self):
         q = self.index._q
         return ([tuple(r) for r in q("SELECT * FROM cleanup_exec_item ORDER BY message_id")], [tuple(r) for r in q("SELECT * FROM cleanup_execution")],
@@ -591,14 +595,16 @@ class TrustedEvidenceTests(TCE.ExecBase):
         absent, _ = self.observe(a, absent=True, at=self.t + timedelta(seconds=1))
         done = ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, absent, now=self.tick(), require_source="TRUSTED_ADAPTER")
         row = self.index._q("SELECT state, error_code, evidence_checked, evidence_source, evidence_observed_at FROM cleanup_exec_item WHERE message_id=?", a)[0]
-        self.assertEqual(tuple(row), ("CONFLICT", "RECONCILED_CONFLICT", 0, None, None))
+        self.assertEqual(tuple(row)[:4], ("CONFLICT", "RECONCILED_CONFLICT", 0, "TRUSTED_ADAPTER"))  # source and time are kept; the checked flag stays 0
+        self.assertEqual(row["evidence_observed_at"], ce._us(absent.observed_at))
+        self.assertEqual(self.last_item_meta()["obs"], "ABSENT")
         self.assertIn(done["state"], ("FAILED", "PARTIAL"))
         self.assertNotEqual(done["state"], "EXECUTED")
         self.assertFalse(ee.is_pending(absent))
 
     def test_reconciliation_derives_the_outcome_from_a_trusted_observation(self):
-        expected = (("archived", None, "APPLIED", "RECONCILED_OBSERVED_ARCHIVED", "TRUSTED_ADAPTER"), ("before", self.LABELS, "NOT_APPLIED", "RECONCILED_UNMODIFIED", None),
-                    ("other", ("Label_77",), "CONFLICT", "RECONCILED_CONFLICT", None))
+        expected = (("archived", None, "APPLIED", "RECONCILED_OBSERVED_ARCHIVED", "TRUSTED_ADAPTER"), ("before", self.LABELS, "NOT_APPLIED", "RECONCILED_UNMODIFIED", "TRUSTED_ADAPTER"),
+                    ("other", ("Label_77",), "CONFLICT", "RECONCILED_CONFLICT", "TRUSTED_ADAPTER"))
         for label, labels, state, code, source in expected:
             self.setUp()
             ex, a = self.unknown_item()
@@ -606,6 +612,119 @@ class TrustedEvidenceTests(TCE.ExecBase):
             ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, obs, now=self.tick())
             row = self.index._q("SELECT state, error_code, evidence_source FROM cleanup_exec_item WHERE message_id=?", a)[0]
             self.assertEqual(tuple(row), (state, code, source), label)
+
+    # ---- audit correction (P1: source spoofing through a stateful Evidence subclass; P2: what each reconciliation outcome keeps)
+    def stateful_variants(self, a):
+        """Ordinary-Python subclasses of Evidence whose `source` (or other fields) change between reads. None of them uses reflection."""
+        at = ce.cp._iso(self.t)
+
+        class Flip(ce.Evidence):  # first read says TRUSTED_ADAPTER, every later read says CALLER_SUPPLIED
+            def __init__(self, *args):
+                self.__dict__.update(_a=args, _n=0)
+            kind = "LABEL_OBSERVATION"
+            message_id = property(lambda s: s._a[0])
+            labels = property(lambda s: s._a[1])
+            observed_at = property(lambda s: s._a[2])
+
+            @property
+            def source(self):
+                self._n += 1
+                return "TRUSTED_ADAPTER" if self._n == 1 else "CALLER_SUPPLIED"
+
+        class FlipBack(Flip):  # first read looks ordinary, later reads say TRUSTED_ADAPTER
+            @property
+            def source(self):
+                self._n += 1
+                return "CALLER_SUPPLIED" if self._n == 1 else "TRUSTED_ADAPTER"
+
+        class Plain(ce.Evidence):  # a harmless subclass with honest values is still not the exact type
+            pass
+        return (Flip(a, self.AFTER, at), FlipBack(a, self.AFTER, at), Plain("LABEL_OBSERVATION", a, self.AFTER, at, "CALLER_SUPPLIED"))
+
+    def test_p1_a_stateful_source_subclass_is_rejected_everywhere(self):
+        for require in (None, "TRUSTED_ADAPTER", "CALLER_SUPPLIED"):
+            self.setUp()
+            ex, a = self.intent()
+            before = self.snapshot()
+            for ev in self.stateful_variants(a):
+                with self.assertRaises(ce.ExecError, msg=(type(ev).__name__, require)) as ctx:
+                    ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=ev, now=self.tick(), require_source=require)
+                self.assertEqual(ctx.exception.code, "BAD_EVIDENCE")
+            self.assertEqual(self.snapshot(), before)
+            self.assertEqual(self.index._q("SELECT COUNT(*) FROM cleanup_exec_item WHERE evidence_source='TRUSTED_ADAPTER'")[0][0], 0)
+
+    def test_p1_the_same_subclasses_cannot_reconcile_an_unknown_item(self):
+        ex, a = self.unknown_item()
+        before = self.snapshot()
+        for ev in self.stateful_variants(a):
+            for require in (None, "TRUSTED_ADAPTER"):
+                with self.assertRaises(ce.ExecError, msg=type(ev).__name__) as ctx:
+                    ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, ev, now=self.tick(), require_source=require)
+                self.assertEqual(ctx.exception.code, "BAD_EVIDENCE")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_p1_ordinary_evidence_is_always_stored_with_the_constant_caller_source(self):
+        self.assertEqual(ce.ACCEPTED_EVIDENCE_SOURCES, ("CALLER_SUPPLIED",))
+        self.assertEqual(ce.CALLER_EVIDENCE_SOURCE, "CALLER_SUPPLIED")
+        ex, a = self.intent()
+        labels = list(self.AFTER)  # a list is accepted and snapshotted once
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=ce.Evidence("LABEL_OBSERVATION", a, labels, ce.cp._iso(self.t)), now=self.tick())
+        self.assertEqual(self.index._q("SELECT evidence_source FROM cleanup_exec_item WHERE message_id=?", a)[0][0], "CALLER_SUPPLIED")
+        self.assertEqual(self.index._q("SELECT COUNT(*) FROM cleanup_exec_item WHERE evidence_source='TRUSTED_ADAPTER'")[0][0], 0)
+        self.assertEqual(self.last_item_meta().get("src"), None)  # historical shape of the audit event for caller-supplied evidence
+
+    def test_p1_require_trusted_accepts_only_a_valid_unused_observation(self):
+        ex, a = self.intent()
+        for bad in (self.ev(a, self.AFTER), *self.stateful_variants(a)):
+            with self.assertRaises(ce.ExecError):
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=bad, now=self.tick(), require_source="TRUSTED_ADAPTER")
+        obs, _ = self.observe(a)
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=obs, now=self.tick(), require_source="TRUSTED_ADAPTER")
+        self.assertEqual(self.index._q("SELECT evidence_source FROM cleanup_exec_item WHERE message_id=?", a)[0][0], "TRUSTED_ADAPTER")
+        self.assertFalse(ee.is_pending(obs))  # used; replay is covered by test_an_observation_works_once_and_a_replay_is_refused
+
+    def test_p1_invalid_ordinary_evidence_never_consumes_a_trusted_nonce(self):
+        ex, a = self.intent()
+        obs, _ = self.observe(a)
+        for bad in (self.ev(a, ("Label_77",)), *self.stateful_variants(a)):
+            with self.assertRaises(ce.ExecError):
+                ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=bad, now=self.tick(), require_source="TRUSTED_ADAPTER")
+            self.assertTrue(ee.is_pending(obs))
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=obs, now=self.tick(), require_source="TRUSTED_ADAPTER")
+        self.assertFalse(ee.is_pending(obs))
+
+    def test_p2_every_trusted_reconciliation_outcome_keeps_its_source_time_and_observed_kind(self):
+        cases = (("ARCHIVED", None, "APPLIED", 1), ("PREVIOUS", self.LABELS, "NOT_APPLIED", 0), ("OTHER_LABELS", ("Label_77",), "CONFLICT", 0), ("ABSENT", "absent", "CONFLICT", 0))
+        seen_codes = set()
+        for kind, labels, state, checked in cases:
+            self.setUp()
+            ex, a = self.unknown_item()
+            obs, _ = self.observe(a, labels=None if labels == "absent" else labels, absent=labels == "absent", at=self.t + timedelta(seconds=1))
+            ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, obs, now=self.tick(), require_source="TRUSTED_ADAPTER")
+            row = self.index._q("SELECT state, error_code, evidence_checked, evidence_source, evidence_observed_at FROM cleanup_exec_item WHERE message_id=?", a)[0]
+            self.assertEqual((row["state"], row["evidence_checked"], row["evidence_source"], row["evidence_observed_at"]), (state, checked, "TRUSTED_ADAPTER", ce._us(obs.observed_at)), kind)
+            meta = self.last_item_meta()
+            self.assertEqual((meta["obs"], meta["src"], meta["seen"]), (kind, "TRUSTED_ADAPTER", ce._us(obs.observed_at)))
+            self.assertNotIn(a, json.dumps(meta))  # no message id; no label names either
+            self.assertTrue(ce.audit.verify_chain(self.index, ACCT)[0])
+            seen_codes.add((kind, meta["obs"]))
+        self.assertEqual(len(seen_codes), 4)  # absence and conflicting labels are distinguishable in the audit event even though the item code is shared
+
+    def test_p2_a_trusted_applied_outcome_records_the_archived_observation_in_the_audit_event(self):
+        ex, a = self.intent()
+        obs, _ = self.observe(a)
+        ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=obs, now=self.tick(), require_source="TRUSTED_ADAPTER")
+        meta = self.last_item_meta()
+        self.assertEqual((meta["obs"], meta["src"], meta["seen"]), ("ARCHIVED", "TRUSTED_ADAPTER", ce._us(obs.observed_at)))
+
+    def test_p2_caller_supplied_reconciliation_keeps_its_historical_storage(self):
+        for labels, state in ((self.AFTER, "APPLIED"), (self.LABELS, "NOT_APPLIED"), (("Label_77",), "CONFLICT")):
+            self.setUp()
+            ex, a = self.unknown_item()
+            ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, self.ev(a, labels, when=ce.cp._iso(self.t + timedelta(seconds=1))), now=self.tick())
+            row = self.index._q("SELECT state, evidence_source FROM cleanup_exec_item WHERE message_id=?", a)[0]
+            self.assertEqual(tuple(row), (state, "CALLER_SUPPLIED" if state == "APPLIED" else None))
+            self.assertNotIn("obs", self.last_item_meta())
 
     # ---- require_source and compatibility
     def test_require_source_only_restricts_and_never_selects_the_stored_source(self):

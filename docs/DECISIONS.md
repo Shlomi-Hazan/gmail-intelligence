@@ -76,6 +76,9 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D70 | **Historical `REJECTED`.** The vocabulary and schema are unchanged and existing records are not reinterpreted; the description states the recorder's assertion and the uncertainty about transmission. |
 | D71 | **Reporting.** Reports distinguish caller-supplied from trusted-adapter evidence and state that an observed desired state is not proof of who made the change. |
 | D72 | **C1 scope.** Only the contract, the adapter observation, dispatch metadata, reporting and fake-only tests; no executor, no orchestration, no CLI, no canary, no recovery orchestration (C2-C5 each need separate approval). |
+| D73 | **Exact ordinary evidence (C1 audit correction).** Only `type(ev) is Evidence` is ordinary caller-supplied evidence; its fields are read once into a snapshot and the persisted source is the constant `CALLER_SUPPLIED`. This closes a demonstrated bypass in which a subclass with a stateful `source` property persisted `TRUSTED_ADAPTER` through `require_source`. |
+| D74 | **Trusted reconciliation audit.** A valid trusted observation leaves its source and time on the item row (checked flag unchanged) and `obs`/`src`/`seen` in the `ITEM_TRANSITION` event, distinguishing archived, previous, other labels and absence without a new code or schema change. Caller-supplied storage is unchanged. |
+| D75 | **Clock and binding assumptions.** The injected clock is trusted infrastructure (production: controlled UTC clock); freshness is not cryptographic. Observations are not bound to an execution or plan id; C2 must prevent cross-execution reuse. |
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
 

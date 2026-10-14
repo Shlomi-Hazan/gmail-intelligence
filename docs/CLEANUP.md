@@ -232,6 +232,18 @@ chronology as other evidence. Ordinary `Evidence(source="TRUSTED_ADAPTER")` is r
 `require_source` can only RESTRICT which kind a call accepts; it never selects the stored source. After full validation the one-time token is consumed BEFORE persistence: if the
 database write then fails, the token stays consumed (in memory, for the life of its adapter; nothing claims it survives a restart) and a new observation is needed. A trusted
 observation of an absent message reconciles to `CONFLICT`, never to `APPLIED`. Reports state per evidence source what an "applied" record does and does not establish.
+**Ordinary evidence is the exact `Evidence` type only (C1 correction).** A subclass is refused: it could compute `source` (or any field) differently on each read. Fields of ordinary
+evidence are read once into a snapshot and validated; the stored source is the constant `CALLER_SUPPLIED`, never an attribute of the evidence object.
+**Audit completeness for trusted reconciliations.** The item row keeps `evidence_source` and `evidence_observed_at` for every valid trusted observation; `evidence_checked` stays 0
+unless the item is `APPLIED` (schema rule, unchanged). The `ITEM_TRANSITION` audit event adds flat metadata `obs` (`ARCHIVED`, `PREVIOUS`, `OTHER_LABELS` or `ABSENT`), `src` and `seen`.
+So an observed absence and an observed change of labels, which share the item code `RECONCILED_CONFLICT`, remain distinguishable in the audit history. No message ids or label names
+are recorded, no schema or vocabulary changed, and caller-supplied evidence keeps exactly its historical storage. `obs` describes what was observed, not who acted.
+**Clock and execution-context assumptions.** The observation time and the five-minute freshness check rest on the clock injected into the adapter. That clock is trusted
+infrastructure supplied by the executor or the test harness: a wrong or malicious clock undermines the freshness assertions, and freshness is never cryptographic. Production
+executor code must use a controlled UTC clock, not a caller-selected one; injected clocks are for deterministic synthetic tests and carefully controlled internal use.
+An observation is bound to its issuing adapter, the verified account, one message id, its observation time and a one-time nonce. It is NOT bound to an execution id or plan id;
+strict chronology (not earlier than the item's intent or UNKNOWN transition) and one-time consumption limit accidental reuse. **C2 design requirement:** the executor must prevent
+cross-execution observation reuse and accept only observations made inside its own active, verified execution context.
 **What this does not establish:** the guard is an in-process capability boundary against accidents and ordinary callers, not a cryptographic guarantee against code in the same
 process, and an observed desired state never proves that this tool made the change.
 

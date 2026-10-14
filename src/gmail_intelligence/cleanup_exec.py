@@ -89,6 +89,7 @@ EVIDENCE_KINDS = ("LABEL_OBSERVATION",)
 # NOT accepted yet: no code in M4C-A can produce an authenticated Gmail response.
 EVIDENCE_SOURCES = ("CALLER_SUPPLIED", "TRUSTED_ADAPTER")
 ACCEPTED_EVIDENCE_SOURCES = ("CALLER_SUPPLIED",)  # for ordinary `Evidence` ONLY. It must never list TRUSTED_ADAPTER (that would let a caller type it).
+CALLER_EVIDENCE_SOURCE = "CALLER_SUPPLIED"  # the only source ordinary `Evidence` can ever be stored with (a constant, never read from the evidence object)
 TRUSTED_EVIDENCE_SOURCE = "TRUSTED_ADAPTER"  # persisted only for a genuine, unused exec_evidence.TrustedObservation (a separate, stricter branch)
 _TS = r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,6}))?(Z|[+-][0-9]{2}:[0-9]{2})"
 
@@ -141,26 +142,33 @@ def _check_evidence(ev, item, now, account=None, require_source=None):
     seen = labels = source = None
     if trusted:
         source = TRUSTED_EVIDENCE_SOURCE
-        ok = (isinstance(account, str) and ev.account == account.strip().lower() and ev.message_id == item["message_id"]
-              and (not ev.present or bool(ev.labels) or _expects_no_labels(item))  # an EXPLICIT empty tuple is valid only when the expected state is empty
+        t_account, t_mid, t_present, t_labels, t_seen = ev.account, ev.message_id, ev.present, ev.labels, ev.observed_at  # one read each (a snapshot)
+        ok = (isinstance(account, str) and t_account == account.strip().lower() and t_mid == item["message_id"]
+              and (not t_present or bool(t_labels) or _expects_no_labels(item))  # an EXPLICIT empty tuple is valid only when the expected state is empty
               and exec_evidence.is_pending(ev))
         if ok:
-            seen = ev.observed_at
-            labels = sorted(set(ev.labels)) if ev.present else None
+            seen = t_seen
+            labels = sorted(set(t_labels)) if t_present else None
     else:
-        source = ev.source if isinstance(ev, Evidence) else None
-        ok = (isinstance(ev, Evidence) and ev.kind in EVIDENCE_KINDS and ev.source in ACCEPTED_EVIDENCE_SOURCES
-              and isinstance(ev.message_id, str) and ev.message_id == item["message_id"]
-              and isinstance(ev.labels, (tuple, list)) and len(ev.labels) <= 100
-              and (ev.labels or _expects_no_labels(item))  # an EXPLICIT empty observation is valid only when the expected archived state is empty
-              and all(isinstance(x, str) and 0 < len(x) <= 64 and x.isascii() for x in ev.labels))
+        # Ordinary caller-supplied evidence: the EXACT type only (a subclass could compute any attribute differently on every read). Every field is read
+        # ONCE into a local snapshot and only the snapshot is validated and used; the persisted source is the constant below, never a caller attribute.
+        ok = type(ev) is Evidence
         if ok:
+            kind, claimed, mid, raw_labels, observed_at = ev.kind, ev.source, ev.message_id, ev.labels, ev.observed_at
+            ok = (kind in EVIDENCE_KINDS and claimed in ACCEPTED_EVIDENCE_SOURCES and isinstance(mid, str) and mid == item["message_id"]
+                  and isinstance(raw_labels, (tuple, list)) and len(raw_labels) <= 100)
+        if ok:
+            snapshot = tuple(raw_labels)
+            ok = ((snapshot or _expects_no_labels(item))  # an EXPLICIT empty observation is valid only when the expected archived state is empty
+                  and all(isinstance(x, str) and 0 < len(x) <= 64 and x.isascii() for x in snapshot))
+        if ok:
+            source = CALLER_EVIDENCE_SOURCE
             try:
-                seen = _norm_ts(ev.observed_at)
+                seen = _norm_ts(observed_at)
             except (ValueError, TypeError):
                 ok = False
             else:
-                labels = sorted(set(ev.labels))
+                labels = sorted(set(snapshot))
     if ok and require_source is not None and source != require_source:
         ok = False
     if ok:
@@ -189,6 +197,16 @@ def _check_require_source(require_source):
 
 def _evidence_cols(source, seen):
     return {"evidence_checked": 1, "evidence_source": source, "evidence_observed_at": _us(seen)}
+
+
+def _observation_meta(source, seen, kind):
+    """Flat audit metadata for a TRUSTED observation: what was observed (ARCHIVED, PREVIOUS, OTHER_LABELS or ABSENT), by which source, and when. No ids, no labels."""
+    return {"obs": kind, "src": source, "seen": _us(seen)}
+
+
+def _observed_kind(observed, after, before):
+    """Classify an observed label set against the recorded item: absence, the archived state, the state before the attempt, or anything else."""
+    return "ABSENT" if observed is None else "ARCHIVED" if observed == after else "PREVIOUS" if observed == before else "OTHER_LABELS"
 
 
 def _expects_no_labels(item):
@@ -342,7 +360,7 @@ def _set_slice(index, account, exec_id, plan_id, slice_no, new, old, at, **cols)
     _tr(index, account, plan_id, "SLICE_TRANSITION", at, exec=exec_id, slice=slice_no, **{"from": old, "to": new})
 
 
-def _set_item(index, account, exec_id, plan_id, message_id, new, old, at, code=None, **cols):
+def _set_item(index, account, exec_id, plan_id, message_id, new, old, at, code=None, audit_meta=None, **cols):
     sets = "".join(f", {k}=?" for k in cols)
     n = index.conn.execute(f"UPDATE cleanup_exec_item SET state=?, error_code=COALESCE(?, error_code){sets} WHERE account=? AND "
                            "exec_id=? AND message_id=? AND state=?", (new, code, *cols.values(), account, exec_id, message_id, old)).rowcount
@@ -350,7 +368,7 @@ def _set_item(index, account, exec_id, plan_id, message_id, new, old, at, code=N
         raise ExecError("BAD_ITEM_STATE", f"item is not {old}")
     row = index._q("SELECT seq, slice_no FROM cleanup_exec_item WHERE account=? AND exec_id=? AND message_id=?", account, exec_id, message_id)[0]
     _tr(index, account, plan_id, "ITEM_TRANSITION", at, exec=exec_id, seq=row["seq"], slice=row["slice_no"], code=code or "",
-        **{"from": old, "to": new})  # a sequence number identifies the item; message ids never enter the audit log
+        **{"from": old, "to": new}, **(audit_meta or {}))  # a sequence number identifies the item; message ids never enter the audit log
 
 
 # ---------------------------------------------------------------- reservation (consumes the approval)
@@ -552,14 +570,15 @@ def record_outcome(index, account, exec_id, token, message_id, outcome, code=Non
     with _txn(index):
         ex = _active(index, account, exec_id, token, now)
         it = _item(index, account, exec_id, message_id)
-        extra = {}
+        extra, meta = {}, None
         if outcome == "APPLIED":
             observed, seen, source = _check_evidence(evidence, it, now, account, require_source)
             if observed is None or it["prev_label_ids"] is None or observed != _expected_after(it)[0]:
                 raise ExecError("EVIDENCE_MISMATCH", "the observed labels are not the expected archived state; record UNKNOWN instead")
             _consume_trusted(evidence)
             extra = _evidence_cols(source, seen)
-        _set_item(index, account, exec_id, ex["plan_id"], message_id, outcome, "INTENT", _iso(now), code=code, result_at=_us(now), **extra)
+            meta = _observation_meta(source, seen, "ARCHIVED") if source == TRUSTED_EVIDENCE_SOURCE else None
+        _set_item(index, account, exec_id, ex["plan_id"], message_id, outcome, "INTENT", _iso(now), code=code, audit_meta=meta, result_at=_us(now), **extra)
 
 
 # ---------------------------------------------------------------- finishing, stopping, interruption
@@ -734,15 +753,20 @@ def reconcile_item(index, account, exec_id, message_id, evidence, now=None, requ
         observed, seen, source = _check_evidence(evidence, it, now, account, require_source)
         after, before = _expected_after(it)
         _consume_trusted(evidence)
-        if observed is None:  # definitively absent: neither the state before nor the archived state, and never "archived"
-            new, code, extra = "CONFLICT", "RECONCILED_CONFLICT", {}
-        elif observed == after:
+        kind = _observed_kind(observed, after, before)
+        if kind == "ARCHIVED":
             new, code, extra = "APPLIED", "RECONCILED_OBSERVED_ARCHIVED", _evidence_cols(source, seen)
-        elif observed == before:
+        elif kind == "PREVIOUS":
             new, code, extra = "NOT_APPLIED", "RECONCILED_UNMODIFIED", {}
-        else:
+        else:  # ABSENT (definitively gone: neither the state before nor the archived state) or OTHER_LABELS
             new, code, extra = "CONFLICT", "RECONCILED_CONFLICT", {}
-        _set_item(index, account, exec_id, ex["plan_id"], message_id, new, "UNKNOWN", at, code=code, result_at=_us(now), **extra)
+        meta = None
+        if source == TRUSTED_EVIDENCE_SOURCE:
+            # The item's checked-evidence flag stays 0 unless APPLIED (schema rule), but a trusted observation still leaves its source and time on the
+            # row, and the audit event says WHAT was observed. Caller-supplied evidence keeps its historical storage (nothing extra).
+            meta = _observation_meta(source, seen, kind)
+            extra = {"evidence_source": source, "evidence_observed_at": _us(seen), **extra}
+        _set_item(index, account, exec_id, ex["plan_id"], message_id, new, "UNKNOWN", at, code=code, audit_meta=meta, result_at=_us(now), **extra)
         if not item_counts(index, account, exec_id).get("UNKNOWN", 0):
             _set_exec(index, account, exec_id, ex["plan_id"], _settle(index, account, exec_id), "RECONCILIATION_REQUIRED", at, reason="RECONCILED")
     return get_execution(index, account, exec_id)
