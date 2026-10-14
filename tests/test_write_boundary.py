@@ -76,7 +76,8 @@ class ImportBoundaryTests(unittest.TestCase):
 
     def test_refresh_is_never_started_by_a_command_and_no_production_code_builds_the_adapter_yet(self):
         fake_only = {"archive_message": {("cleanup_executor.py", "_process_item"), ("exec_fake_mailbox.py", "archive_message")},
-                     "verify_account": {("cleanup_executor.py", "_process_item"), ("exec_fake_mailbox.py", "verify_account")}}
+                     "verify_account": {("cleanup_executor.py", "_process_item"), ("exec_fake_mailbox.py", "verify_account"), ("cleanup_undo.py", "undo_item"),
+                                        ("cleanup_undo.py", "reconcile_undo"), ("cleanup_recovery.py", "recover")}}
         for attr in ("refresh_write_credentials", "refresh_and_store", "open_archive_adapter", "archive_message", "verify_account"):
             outside = {c for c in self.callers(attr) if c[0] not in WRITE_FILES}
             # the only consumers are the executor's single per-item flow (shared by execute_one and execute_batch) and the fake-only mailbox it accepts (M4C-C2); no production code builds a real adapter

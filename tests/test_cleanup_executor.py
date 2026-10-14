@@ -785,7 +785,7 @@ class FakeOnlyTests(ExecutorBase):
                 mods = [a.name for a in node.names] if isinstance(node, ast.Import) else ([node.module or ""] + [a.name for a in node.names] if isinstance(node, ast.ImportFrom) else [])
                 if any(m.split(".")[-1] in ("cleanup_executor", "exec_fake_mailbox") for m in mods):
                     importers.append(path.name)
-        self.assertEqual(sorted(set(importers)), ["cleanup_executor.py"])
+        self.assertEqual(sorted(set(importers)), ["cleanup_executor.py", "cleanup_recovery.py", "cleanup_undo.py"])  # the fake-only library modules; never the CLI
 
 
 if __name__ == "__main__":

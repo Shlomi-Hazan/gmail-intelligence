@@ -277,6 +277,23 @@ remaining targets become `NEVER_ATTEMPTED` and nothing is retried. The batch ref
 finishes the slice through `end_slice`: the next slice needs the owner's typed continuation and a new lease. A crash or lost lease is recovered by the existing `recover_interrupted`
 (possibly dispatched items become `UNKNOWN`, untouched ones `NEVER_ATTEMPTED`); the batch never resumes anything. Results carry sequence numbers, never message ids.
 **Several approved items in one thread.** A sibling that this execution already archived (recorded `APPLIED` with checked evidence) legitimately differs from the indexed labels, so it must now be in exactly its recorded archived state (its indexed labels minus `INBOX`); every other sibling must still equal its indexed labels, membership must be unchanged, and no sibling, archived or not, may carry a protected label. Any other difference is still `THREAD_CHANGED`. The current target keeps its exact preflight checks.
+
+**Recovery (M4D; library only, fake mailbox only, no CLI).** `cleanup_recovery.recover(index, account, mailbox)` only composes existing primitives: `recover_interrupted` turns executions
+whose lease expired into UNKNOWN work (never resumed), every UNKNOWN item is reconciled with `reconcile_item` from a FRESH trusted observation bound to that item's UNKNOWN episode, and
+every uncertain undo is reconciled the same way. It performs no mutation (no archive, no undo, no retry). It fails closed: another account raises before anything changes; an
+unverifiable account, an authorization problem or a database error stops it and is reported; an item without usable evidence stays UNKNOWN. An execution with a live lease is not touched.
+The report (`RecoveryReport`, `format_report`) distinguishes APPLIED, NOT_APPLIED, NEVER_ATTEMPTED, SKIPPED, CONFLICT, UNKNOWN, PENDING and INTENT per execution, says what was resolved
+now and which items (by sequence number) need the owner; it never contains message ids, labels, senders, accounts or credentials. `status_report` is the read-only variant.
+
+**Undo (M4D; library only, FAKE mailbox only).** `cleanup_undo` puts INBOX back on ONE message that an execution archived and recorded as APPLIED with a checked trusted-adapter
+observation. It is not an archive and is never recorded as one: the original item row, its APPLIED history and evidence, and its audit events are never touched. The undo ledger is the
+hash-chained audit log (no schema change): `UNDO_AUTHORIZED` -> `UNDO_INTENT` -> `UNDO_RESULT`, the state of one item's undo being derived from those events. The owner authorizes each
+item with a SEPARATE typed phrase (`undo_phrase`; the archive approval and phrases authorize nothing here; wrong phrases are recorded and locked out; the authorization lasts 15
+minutes). `undo_item` then verifies the account, the original APPLIED evidence, plan and approval integrity, that the message is in exactly its recorded archived state and the whole
+thread (same rules as the executor, protected labels included), commits the intent BEFORE any mutation (once per authorization, serialised by the write transaction), makes at most ONE fake
+mutation, and reads back with an independent execution-bound trusted observation: `RESTORED` only for exactly the originally recorded labels (INBOX back, everything else preserved),
+anything unclear `UNKNOWN`. An interrupted or unknown undo is resolved only by `reconcile_undo` from a fresh observation (never by repeating the mutation); a proven non-mutation
+(`NOT_RESTORED`) allows a new authorization. The real Gmail write boundary stays archive-only: the fake mailbox implements the inverse in memory, with no HTTP route and no policy entry.
 **What this does not establish:** the guard is an in-process capability boundary against accidents and ordinary callers, not a cryptographic guarantee against code in the same
 process, and an observed desired state never proves that this tool made the change.
 
