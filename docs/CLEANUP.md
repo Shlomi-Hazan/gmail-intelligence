@@ -280,14 +280,14 @@ finishes the slice through `end_slice`: the next slice needs the owner's typed c
 
 **Recovery (M4D; library only, fake mailbox only, no CLI).** `cleanup_recovery.recover(index, account, mailbox)` only composes existing primitives: `recover_interrupted` turns executions
 whose lease expired into UNKNOWN work (never resumed), every UNKNOWN item is reconciled with `reconcile_item` from a FRESH trusted observation bound to that item's UNKNOWN episode, and
-every uncertain undo is reconciled the same way. It performs no mutation (no archive, no undo, no retry). It fails closed: another account raises before anything changes; an
-unverifiable account, an authorization problem or a database error stops it and is reported; an item without usable evidence stays UNKNOWN. An execution with a live lease is not touched.
+every uncertain undo is reconciled the same way. It performs no mutation (no archive, no undo, no retry). It fails closed: another account raises before anything changes; when anything needs recovery the account is verified BEFORE any local transition, so an
+unverifiable account changes nothing; an an authorization problem or a database error stops it and is reported; an item without usable evidence stays UNKNOWN. An execution with a live lease is not touched.
 The report (`RecoveryReport`, `format_report`) distinguishes APPLIED, NOT_APPLIED, NEVER_ATTEMPTED, SKIPPED, CONFLICT, UNKNOWN, PENDING and INTENT per execution, says what was resolved
 now and which items (by sequence number) need the owner; it never contains message ids, labels, senders, accounts or credentials. `status_report` is the read-only variant.
 
 **Undo (M4D; library only, FAKE mailbox only).** `cleanup_undo` puts INBOX back on ONE message that an execution archived and recorded as APPLIED with a checked trusted-adapter
 observation. It is not an archive and is never recorded as one: the original item row, its APPLIED history and evidence, and its audit events are never touched. The undo ledger is the
-hash-chained audit log (no schema change): `UNDO_AUTHORIZED` -> `UNDO_INTENT` -> `UNDO_RESULT`, the state of one item's undo being derived from those events. The owner authorizes each
+hash-chained audit log (no schema change): `UNDO_AUTHORIZED` -> `UNDO_INTENT` -> `UNDO_RESULT`, the state of one item's undo being derived from those events by a strict state machine (NONE -> AUTHORIZED -> OPEN -> a result referring to that intent; a new authorization only from NONE or NOT_RESTORED). Any other sequence is `INCONSISTENT`: it authorizes nothing and is reported to the owner. The owner authorizes each
 item with a SEPARATE typed phrase (`undo_phrase`; the archive approval and phrases authorize nothing here; wrong phrases are recorded and locked out; the authorization lasts 15
 minutes). `undo_item` then verifies the account, the original APPLIED evidence, plan and approval integrity, that the message is in exactly its recorded archived state and the whole
 thread (same rules as the executor, protected labels included), commits the intent BEFORE any mutation (once per authorization, serialised by the write transaction), makes at most ONE fake

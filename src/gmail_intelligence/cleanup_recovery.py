@@ -11,7 +11,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import timezone
 
-from gmail_intelligence import cleanup_exec as ce, cleanup_undo as cu
+from gmail_intelligence import cleanup_exec as ce, cleanup_plans as cp, cleanup_undo as cu
 from gmail_intelligence.exec_fake_mailbox import FakeMailbox, wiring_is_fake
 
 _STOP_CODES = ("AUTH_PROBLEM", "ACCOUNT_MISMATCH", "ACCOUNT_NOT_VERIFIED")
@@ -79,23 +79,33 @@ def status_report(index, account):
 
 def recover(index, account, mailbox):
     """Recover and reconcile everything that can be resolved from fresh evidence. See the module docstring. Raises ExecError (and changes nothing) only for a refused
-    mailbox or another account; every other failure is reported and leaves the item unresolved."""
+    mailbox or another account; every other failure is reported and leaves the item unresolved. When anything needs recovery the account is verified BEFORE any local
+    transition is made, so an unverifiable account changes nothing."""
     if type(mailbox) is not FakeMailbox or not wiring_is_fake(mailbox):
         raise ce.ExecError("MAILBOX_NOT_ALLOWED", "only the fake test mailbox is accepted in this version; nothing was read or changed")
     if mailbox.account.strip().lower() != account.strip().lower():
         raise ce.ExecError("ACCOUNT_MISMATCH", "the mailbox belongs to another account; nothing was changed")
     stopped, interrupted, resolved, notes, undos_resolved = "", [], {}, {}, 0
+    cp_iso = cp._iso
+    pending_exec, undo_open = [], []
     try:
-        interrupted = ce.recover_interrupted(index, account, now=mailbox.clock().astimezone(timezone.utc))
-        pending_exec = [e for e in _relevant(index, account)
-                        if ce.get_execution(index, account, e)["state"] == "RECONCILIATION_REQUIRED"
-                        and index._q("SELECT 1 FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='UNKNOWN' LIMIT 1", account, e)]
-        undo_open = cu.open_undos(index, account)
-        if pending_exec or undo_open:
+        # Verify the account FIRST whenever there is anything to recover or reconcile: an unverifiable account must not leave even a local recovery transition behind.
+        now = mailbox.clock().astimezone(timezone.utc)
+        stale = index._q("SELECT 1 FROM cleanup_execution WHERE account=? AND state='EXECUTING' AND (lease_expires_at IS NULL OR lease_expires_at <= ?) LIMIT 1",
+                         account, cp_iso(now))
+        unknown = index._q("SELECT 1 FROM cleanup_exec_item i JOIN cleanup_execution e ON e.account=i.account AND e.exec_id=i.exec_id "
+                           "WHERE i.account=? AND i.state='UNKNOWN' AND e.state='RECONCILIATION_REQUIRED' LIMIT 1", account)
+        if stale or unknown or cu.open_undos(index, account):
             try:
                 mailbox.verify_account()
             except Exception:  # noqa: BLE001 - an unverifiable account is never a reason to guess
                 stopped = "ACCOUNT_NOT_VERIFIED"
+        if not stopped:
+            interrupted = ce.recover_interrupted(index, account, now=now)
+            pending_exec = [e for e in _relevant(index, account)
+                            if ce.get_execution(index, account, e)["state"] == "RECONCILIATION_REQUIRED"
+                            and index._q("SELECT 1 FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='UNKNOWN' LIMIT 1", account, e)]
+            undo_open = cu.open_undos(index, account)
         if not stopped:
             for exec_id in pending_exec:
                 for r in index._q("SELECT message_id, seq FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='UNKNOWN' ORDER BY seq", account, exec_id):

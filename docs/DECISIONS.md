@@ -95,6 +95,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D89 | **Separate, single-use undo authorization (M4D).** A typed per-item phrase (not any archive phrase), 15-minute validity, locked out after repeated wrong phrases, one intent per authorization; only a proven non-mutation allows a new one. |
 | D90 | **Fake-only undo (M4D).** The inverse exists only in the fake mailbox's memory; the real adapter, write policy, scopes and endpoints stay archive-only. A real undo needs its own reviewed change. |
 | D91 | **Undo uncertainty (M4D).** Intent before mutation, one attempt, independent bound post-read, anything unclear `UNKNOWN`, resolved only by a fresh observation. |
+| D92 | **Review corrections (M4D).** Recovery verifies the account before any local transition when there is work to do (an unverifiable account changes nothing; `status_report` needs no live access), and the undo ledger is a strict state machine: any unsupported or inconsistent event sequence is `INCONSISTENT`, authorizes nothing and is reported. Found by review: the first version accepted an authorization while an attempt was open. |
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
 

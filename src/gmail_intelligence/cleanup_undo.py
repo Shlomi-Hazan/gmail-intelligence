@@ -23,7 +23,7 @@ from gmail_intelligence.exec_fake_mailbox import FakeMailbox, wiring_is_fake
 UNDO_AUTH_TTL = timedelta(minutes=15)
 UNDO_EVENTS = ("UNDO_AUTHORIZED", "UNDO_INTENT", "UNDO_RESULT")
 RESULTS = ("RESTORED", "NOT_RESTORED", "CONFLICT", "UNKNOWN")
-STATUSES = ("NONE", "AUTHORIZED", "OPEN") + RESULTS
+STATUSES = ("NONE", "AUTHORIZED", "OPEN", "INCONSISTENT") + RESULTS
 
 
 @dataclass(frozen=True)
@@ -65,15 +65,31 @@ def _ledger(index, account, exec_id, seq):
 
 
 def _state(ledger):
-    """(status, last authorization event, last intent event, last result event) derived from the ledger."""
+    """(status, last authorization event, last intent event, last result event) derived from the ledger by a STRICT state machine.
+
+    NONE -> AUTHORIZED -> OPEN (intent, referencing that authorization) -> a result that references that intent: RESTORED | NOT_RESTORED | CONFLICT | UNKNOWN. UNKNOWN is
+    resolved only by a RECONCILE result. A new authorization is possible only from NONE or NOT_RESTORED. ANY other sequence (a second intent, an authorization while an
+    attempt is open, a result for another intent, events after RESTORED or CONFLICT, missing or unknown fields) yields INCONSISTENT, which authorizes nothing."""
+    bad = ("INCONSISTENT", None, None, None)
     status, auth, intent, result = "NONE", None, None, None
     for ev in ledger:
-        if ev["type"] == "UNDO_AUTHORIZED":
+        kind, meta = ev["type"], ev["meta"]
+        if kind == "UNDO_AUTHORIZED":
+            if status not in ("NONE", "NOT_RESTORED"):
+                return bad
             status, auth, intent, result = "AUTHORIZED", ev, None, None
-        elif ev["type"] == "UNDO_INTENT":
+        elif kind == "UNDO_INTENT":
+            if status != "AUTHORIZED" or meta.get("auth") != auth["hash"]:
+                return bad
             status, intent, result = "OPEN", ev, None
-        elif ev["type"] == "UNDO_RESULT":
-            status, result = ev["meta"]["result"], ev
+        elif kind == "UNDO_RESULT":
+            res, via = meta.get("result"), meta.get("via")
+            resolves = status == "OPEN" and via in ("DIRECT", "RECONCILE") or status == "UNKNOWN" and via == "RECONCILE"
+            if res not in RESULTS or not resolves or meta.get("intent") != intent["hash"] or (via == "RECONCILE" and res == "UNKNOWN"):
+                return bad
+            status, result = res, ev
+        else:
+            return bad
     return status, auth, intent, result
 
 
@@ -253,15 +269,18 @@ def reconcile_undo(index, account, exec_id, seq, mailbox):
 
 
 def open_undos(index, account):
-    """[(exec_id, item seq, status)] for undos that need attention: an intent without a result, or an UNKNOWN result."""
+    """[(exec_id, item seq, status)] for undos that need attention: an intent without a result, an UNKNOWN result or an inconsistent ledger."""
     seen, out = set(), []
-    for r in index._q("SELECT meta FROM cleanup_audit WHERE account=? AND event_type='UNDO_INTENT' ORDER BY seq", account):
+    marks = ",".join("?" * len(UNDO_EVENTS))
+    for r in index._q(f"SELECT meta FROM cleanup_audit WHERE account=? AND event_type IN ({marks}) ORDER BY seq", account, *UNDO_EVENTS):
         meta = json.loads(r["meta"])
+        if "exec" not in meta or "item" not in meta:
+            continue
         key = (meta["exec"], meta["item"])
         if key in seen:
             continue
         seen.add(key)
         status = undo_status(index, account, *key)
-        if status in ("OPEN", "UNKNOWN"):
+        if status in ("OPEN", "UNKNOWN", "INCONSISTENT"):  # an inconsistent ledger is never acted on, only reported
             out.append((key[0], key[1], status))
     return out

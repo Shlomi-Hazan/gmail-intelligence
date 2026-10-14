@@ -95,7 +95,9 @@ class RecoveryTests(RecoveryBase):
         other = self.umb(mb, [Step("PROFILE", status=200, body=wrong)])
         report = cr.recover(self.index, ACCT, other)
         self.assertEqual(report.stopped, "ACCOUNT_NOT_VERIFIED")
-        self.assertEqual(self.item(self.mid(2))["state"], "UNKNOWN")
+        self.assertEqual(self.item(self.mid(2))["state"], "INTENT")  # not even the local recovery transition was made
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(report.interrupted, ())
         self.assertNotIn("GET_MESSAGE", [k for k, _ in other.service.log])  # no observation was even requested
         self.assertTrue(report.needs_owner)
 
@@ -451,6 +453,100 @@ class UndoUncertaintyTests(UndoBase):
         self.assertEqual(ctx.exception.code, "UNDO_NOT_AUTHORIZED")
         self.assertEqual((first.service.undos(), second.service.undos(), out[0].status), (0, 1, "RESTORED"))
         self.assertEqual([t for t, _ in self.undo_events()].count("UNDO_INTENT"), 1)
+
+
+class UndoLedgerTests(UndoBase):
+    """The audit chain is the undo ledger: its state machine is strict, and anything it does not recognise authorizes nothing."""
+
+    def put(self, ex, kind, **meta):
+        with cp._txn(self.index):
+            return audit.append(self.index, ACCT, ex["plan_id"], kind, cp._iso(self.uc()), {"exec": ex["exec_id"], "item": 1, **meta})
+
+    def intent_meta(self, ex):
+        auth = cu._state(cu._ledger(self.index, ACCT, ex["exec_id"], 1))[1]
+        return {"auth": auth["hash"], "t": ce._us(self.uc())}
+
+    def test_every_unsupported_or_inconsistent_sequence_fails_closed_and_is_reported(self):
+        sequences = {
+            "a second intent": lambda ex: (self.put(ex, "UNDO_INTENT", **self.intent_meta(ex)), self.put(ex, "UNDO_INTENT", **self.intent_meta(ex))),
+            "an authorization while an attempt is open": lambda ex: (self.put(ex, "UNDO_INTENT", **self.intent_meta(ex)), self.put(ex, "UNDO_AUTHORIZED", phrase_sha256="x")),
+            "a second authorization": lambda ex: self.put(ex, "UNDO_AUTHORIZED", phrase_sha256="x"),
+            "a result for another intent": lambda ex: (self.put(ex, "UNDO_INTENT", **self.intent_meta(ex)),
+                                                       self.put(ex, "UNDO_RESULT", intent="0" * 64, result="RESTORED", via="DIRECT")),
+            "a result without an intent": lambda ex: self.put(ex, "UNDO_RESULT", intent="0" * 64, result="RESTORED", via="DIRECT"),
+            "an intent for another authorization": lambda ex: self.put(ex, "UNDO_INTENT", auth="f" * 64, t=ce._us(self.uc())),
+            "an unknown result value": lambda ex: (self.put(ex, "UNDO_INTENT", **self.intent_meta(ex)),
+                                                   self.put(ex, "UNDO_RESULT", intent=cu._state(cu._ledger(self.index, ACCT, ex["exec_id"], 1))[2]["hash"], result="WHATEVER", via="DIRECT")),
+            "a reconciliation that claims UNKNOWN": lambda ex: (self.put(ex, "UNDO_INTENT", **self.intent_meta(ex)),
+                                                                self.put(ex, "UNDO_RESULT", intent=cu._state(cu._ledger(self.index, ACCT, ex["exec_id"], 1))[2]["hash"], result="UNKNOWN", via="RECONCILE")),
+            "a result without its fields": lambda ex: (self.put(ex, "UNDO_INTENT", **self.intent_meta(ex)), self.put(ex, "UNDO_RESULT")),
+            "an intent right after a not-restored result": lambda ex: (self.put(ex, "UNDO_INTENT", **self.intent_meta(ex)), self.put(
+                ex, "UNDO_RESULT", intent=cu._state(cu._ledger(self.index, ACCT, ex["exec_id"], 1))[2]["hash"], result="NOT_RESTORED", via="DIRECT", code="REJECTED"),
+                self.put(ex, "UNDO_INTENT", **self.intent_meta(ex))),
+        }
+        for label, build in sequences.items():
+            with self.subTest(label):
+                self.setUp()
+                ex, mb = self.archived()
+                self.authorize(ex, 1)
+                build(ex)
+                um = self.umb(mb)
+                self.assertEqual(cu.undo_status(self.index, ACCT, ex["exec_id"], 1), "INCONSISTENT")
+                for call in (lambda: self.undo(ex, um, 1), lambda: self.authorize(ex, 1), lambda: cu.reconcile_undo(self.index, ACCT, ex["exec_id"], 1, um)):
+                    with self.assertRaises(ce.ExecError) as ctx:
+                        call()
+                    self.assertIn(ctx.exception.code, ("UNDO_NOT_AUTHORIZED", "UNDO_NOT_ALLOWED", "NOTHING_TO_RECONCILE"))
+                self.assertEqual(um.service.undos(), 0)
+                status = cr.status_report(self.index, ACCT)
+                self.assertEqual(status.undos, ((ex["exec_id"], 1, "INCONSISTENT"),))
+                self.assertTrue(status.needs_owner)
+                report = cr.recover(self.index, ACCT, um)
+                self.assertEqual((report.undos, um.service.undos()), (((ex["exec_id"], 1, "INCONSISTENT"),), 0))
+                self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
+
+    def test_events_after_a_final_result_make_the_ledger_inconsistent(self):
+        ex, mb = self.archived()
+        self.authorize(ex, 1)
+        self.undo(ex, self.umb(mb), 1)
+        self.assertEqual(cu.undo_status(self.index, ACCT, ex["exec_id"], 1), "RESTORED")
+        self.put(ex, "UNDO_AUTHORIZED", phrase_sha256="x")
+        self.assertEqual(cu.undo_status(self.index, ACCT, ex["exec_id"], 1), "INCONSISTENT")
+
+    def test_not_restored_followed_by_a_new_authorization_is_a_valid_second_cycle_and_the_second_attempt_is_separate(self):
+        ex, mb = self.archived()
+        self.authorize(ex, 1)
+        first = self.umb(mb, [Step("UNDO", raises=Crash(), apply=False)])
+        with self.assertRaises(Crash):
+            self.undo(ex, first, 1)
+        self.assertEqual(cu.undo_status(self.index, ACCT, ex["exec_id"], 1), "OPEN")
+        self.assertEqual(cu.reconcile_undo(self.index, ACCT, ex["exec_id"], 1, self.umb(mb)).status, "NOT_RESTORED")
+        self.assertEqual(cu.undo_status(self.index, ACCT, ex["exec_id"], 1), "NOT_RESTORED")
+        self.authorize(ex, 1)
+        self.assertEqual(cu.undo_status(self.index, ACCT, ex["exec_id"], 1), "AUTHORIZED")
+        second = self.umb(mb)
+        self.assertEqual(self.undo(ex, second, 1).status, "RESTORED")
+        self.assertEqual([t for t, _ in self.undo_events()], ["UNDO_AUTHORIZED", "UNDO_INTENT", "UNDO_RESULT", "UNDO_AUTHORIZED", "UNDO_INTENT", "UNDO_RESULT"])
+        intents = {m["intent"] for t, m in self.undo_events() if t == "UNDO_RESULT"}
+        self.assertEqual(len(intents), 2)  # each result refers to its own attempt
+        self.assertEqual((first.service.undos(), second.service.undos()), (1, 1))
+        with self.assertRaises(ce.ExecError):
+            self.authorize(ex, 1)
+        self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
+
+    def test_consuming_the_observation_before_persisting_cannot_produce_a_false_restored_or_a_second_mutation(self):
+        ex, mb = self.archived()
+        self.authorize(ex, 1)
+        um = self.umb(mb)
+        with mock.patch.object(cu, "_record", side_effect=sqlite3.OperationalError("disk I/O error")):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.undo(ex, um, 1)
+        self.assertNotIn("UNDO_RESULT", [t for t, _ in self.undo_events()])  # nothing claims RESTORED
+        self.assertEqual(cu.undo_status(self.index, ACCT, ex["exec_id"], 1), "OPEN")
+        with self.assertRaises(ce.ExecError):
+            self.undo(ex, um, 1)
+        self.assertEqual(um.service.undos(), 1)
+        self.assertEqual(cu.reconcile_undo(self.index, ACCT, ex["exec_id"], 1, um).status, "RESTORED")  # resolved by a FRESH observation
+        self.assertEqual(um.service.undos(), 1)
 
 
 class UndoSameThreadTests(UndoBase):
