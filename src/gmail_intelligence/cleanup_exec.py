@@ -85,8 +85,9 @@ def _code(value, allowed):
 
 # ---------------------------------------------------------------- evidence contract (what a future trusted adapter must supply)
 EVIDENCE_KINDS = ("LABEL_OBSERVATION",)
-# CALLER_SUPPLIED: structure accepted, nothing authenticated. TRUSTED_ADAPTER is reserved for the future M4C-C read-only adapter and is
-# NOT accepted yet: no code in M4C-A can produce an authenticated Gmail response.
+# CALLER_SUPPLIED: structure accepted, nothing authenticated; it is the only source ordinary `Evidence` supports. TRUSTED_ADAPTER is accepted only for a
+# genuine, unused exec_evidence.TrustedObservation (a separate validation branch below). No production executor or CLI path uses trusted observations yet,
+# and an observation shows an observed mailbox state, never who made a change.
 EVIDENCE_SOURCES = ("CALLER_SUPPLIED", "TRUSTED_ADAPTER")
 ACCEPTED_EVIDENCE_SOURCES = ("CALLER_SUPPLIED",)  # for ordinary `Evidence` ONLY. It must never list TRUSTED_ADAPTER (that would let a caller type it).
 CALLER_EVIDENCE_SOURCE = "CALLER_SUPPLIED"  # the only source ordinary `Evidence` can ever be stored with (a constant, never read from the evidence object)
@@ -119,8 +120,8 @@ class Evidence:
     What this does and does not establish (kept deliberately separate):
       * structure accepted        - the library validated the shape and its consistency with the recorded intent;
       * desired state observed    - the labels equal the previous labels minus INBOX;
-      * trusted Gmail response    - NOT established here: `source` is CALLER_SUPPLIED and nothing is authenticated; a future M4C-C
-                                    adapter would be the only producer of TRUSTED_ADAPTER evidence;
+      * trusted Gmail response    - NOT established by `Evidence`: its source is always CALLER_SUPPLIED and nothing is authenticated; only an
+                                    adapter-issued `exec_evidence.TrustedObservation` (a different type) can be stored as TRUSTED_ADAPTER;
       * attributed to the executor - NEVER established: another client or the owner may have archived the message.
     """
     kind: str
@@ -142,10 +143,13 @@ def _check_evidence(ev, item, now, account=None, require_source=None):
     seen = labels = source = None
     if trusted:
         source = TRUSTED_EVIDENCE_SOURCE
-        t_account, t_mid, t_present, t_labels, t_seen = ev.account, ev.message_id, ev.present, ev.labels, ev.observed_at  # one read each (a snapshot)
-        ok = (isinstance(account, str) and t_account == account.strip().lower() and t_mid == item["message_id"]
-              and (not t_present or bool(t_labels) or _expects_no_labels(item))  # an EXPLICIT empty tuple is valid only when the expected state is empty
-              and exec_evidence.is_pending(ev))
+        try:  # an uninitialised or half-built observation (its slots unset) is malformed evidence, not a programming error
+            t_account, t_mid, t_present, t_labels, t_seen = ev.account, ev.message_id, ev.present, ev.labels, ev.observed_at  # one read each (a snapshot)
+            ok = (isinstance(account, str) and t_account == account.strip().lower() and t_mid == item["message_id"]
+                  and (not t_present or bool(t_labels) or _expects_no_labels(item))  # an EXPLICIT empty tuple is valid only when the expected state is empty
+                  and exec_evidence.is_pending(ev))
+        except AttributeError:
+            ok = False
         if ok:
             seen = t_seen
             labels = sorted(set(t_labels)) if t_present else None

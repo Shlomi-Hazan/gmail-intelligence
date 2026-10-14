@@ -200,12 +200,12 @@ elapsed time against someone who deliberately manipulates it.
 **No unverifiable "success"; four things stay distinct.** (1) *Evidence structure accepted*: the library validated the shape of a caller-supplied
 `Evidence` (kind `LABEL_OBSERVATION`, message id, labels, `observed_at`, `source`). (2) *Desired Gmail state observed*: the labels equal the previous labels
 minus `INBOX` (`APPLIED`, code `APPLIED`; or on reconciliation `RECONCILED_OBSERVED_ARCHIVED`); an observation equal to the previous labels gives
-`NOT_APPLIED`/`RECONCILED_UNMODIFIED` and anything else `CONFLICT`. (3) *Response from a trusted Gmail adapter*: **not established in M4C-A**. The only
-accepted `evidence_source` is `CALLER_SUPPLIED`; `TRUSTED_ADAPTER` is reserved in the schema for the future M4C-C read-only adapter and is rejected today, so a
-caller cannot claim it. (4) *Mutation attributed to our executor*: **never established**; another client or the owner may have archived the message, so
+`NOT_APPLIED`/`RECONCILED_UNMODIFIED` and anything else `CONFLICT`. (3) *Response from a trusted Gmail adapter*: established only by a genuine, unused, adapter-issued `TrustedObservation` (see "Trusted observations" below), which the library accepts through a
+separate validation branch and stores with the source `TRUSTED_ADAPTER`. Ordinary `Evidence` supports `CALLER_SUPPLIED` only, so a caller cannot claim the trusted source. No production executor
+or CLI path uses trusted observations yet. (4) *Mutation attributed to our executor*: **never established**; another client or the owner may have archived the message, so
 `APPLIED` means "recorded with evidence-consistent archived state", not proof of who changed it. The column is named `evidence_checked` (not "verified") and is stored
 with `evidence_source` and `evidence_observed_at`. Callers cannot assert an outcome; `reconcile_item` derives it. **Local metadata alone cannot prove that a Gmail
-mutation occurred.** M4C-A has no Gmail client; tests construct evidence explicitly. **Empty label sets.** A message whose previous labels were exactly `INBOX` legitimately has no labels after ARCHIVE. An explicit empty observation `()` is
+mutation occurred.** The state machine has no Gmail client of its own and no production path produces trusted observations yet; tests construct evidence explicitly or use a fake adapter. **Empty label sets.** A message whose previous labels were exactly `INBOX` legitimately has no labels after ARCHIVE. An explicit empty observation `()` is
 accepted only for such an item (expected archived state empty; it then yields `APPLIED` / `RECONCILED_OBSERVED_ARCHIVED` like any other matching
 observation). For any item whose expected state is non-empty an empty observation is rejected (`BAD_EVIDENCE`), and a non-empty observation of an
 item that expects none is a mismatch / `CONFLICT`. Source, timestamp and chronology checks are unchanged. A missing evidence object, a `None`

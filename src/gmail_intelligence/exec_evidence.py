@@ -139,18 +139,22 @@ def is_pending(obs):
     """True if this observation's token is still unused AND was minted by the issuer it names. Does not consume."""
     if type(obs) is not TrustedObservation:
         return False
-    issuer = obs._issuer
+    issuer, nonce = getattr(obs, "_issuer", None), getattr(obs, "_nonce", None)
+    if issuer is None or nonce is None:  # an uninitialised observation (built without __init__) is never pending
+        return False
     with issuer._lock:
-        return obs._nonce in issuer._pending
+        return nonce in issuer._pending
 
 
 def consume(obs):
     """Atomically use the token once. Returns True for exactly one caller; every later or forged attempt returns False."""
     if type(obs) is not TrustedObservation:
         return False
-    issuer = obs._issuer
+    issuer, nonce = getattr(obs, "_issuer", None), getattr(obs, "_nonce", None)
+    if issuer is None or nonce is None:
+        return False
     with issuer._lock:
-        if obs._nonce not in issuer._pending:
+        if nonce not in issuer._pending:
             return False
-        issuer._pending.discard(obs._nonce)
+        issuer._pending.discard(nonce)
         return True

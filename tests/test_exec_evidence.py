@@ -726,6 +726,29 @@ class TrustedEvidenceTests(TCE.ExecBase):
             self.assertEqual(tuple(row), (state, "CALLER_SUPPLIED" if state == "APPLIED" else None))
             self.assertNotIn("obs", self.last_item_meta())
 
+    def test_a_malformed_uninitialised_observation_is_bad_evidence_and_changes_nothing(self):
+        for mode in ("record_outcome", "reconcile_item"):
+            self.setUp()
+            ex, a = self.intent() if mode == "record_outcome" else self.unknown_item()
+            real, _ = self.observe(a, at=self.t + timedelta(seconds=1))
+            raw = ee.TrustedObservation.__new__(ee.TrustedObservation)  # no __init__: every slot unset
+            half = ee.TrustedObservation.__new__(ee.TrustedObservation)  # some slots set, the issuer and nonce missing
+            for name in ("account", "message_id", "present", "labels", "observed_at"):
+                object.__setattr__(half, name, getattr(real, name))
+            before = self.snapshot()
+            for bad in (raw, half):
+                for require in (None, "TRUSTED_ADAPTER"):
+                    with self.assertRaises(ce.ExecError, msg=(mode, require)) as ctx:
+                        if mode == "record_outcome":
+                            ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, a, "APPLIED", evidence=bad, now=self.tick(), require_source=require)
+                        else:
+                            ce.reconcile_item(self.index, ACCT, ex["exec_id"], a, bad, now=self.tick(), require_source=require)
+                    self.assertEqual(ctx.exception.code, "BAD_EVIDENCE")
+                    self.assertNotIn("Trusted", str(ctx.exception))
+            self.assertEqual(self.snapshot(), before)
+            self.assertTrue(ee.is_pending(real))  # no genuine token was touched; and none was consumed
+            self.assertFalse(ee.consume(raw))
+
     # ---- require_source and compatibility
     def test_require_source_only_restricts_and_never_selects_the_stored_source(self):
         ex, a = self.intent()
