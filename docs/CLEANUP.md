@@ -200,12 +200,12 @@ elapsed time against someone who deliberately manipulates it.
 **No unverifiable "success"; four things stay distinct.** (1) *Evidence structure accepted*: the library validated the shape of a caller-supplied
 `Evidence` (kind `LABEL_OBSERVATION`, message id, labels, `observed_at`, `source`). (2) *Desired Gmail state observed*: the labels equal the previous labels
 minus `INBOX` (`APPLIED`, code `APPLIED`; or on reconciliation `RECONCILED_OBSERVED_ARCHIVED`); an observation equal to the previous labels gives
-`NOT_APPLIED`/`RECONCILED_UNMODIFIED` and anything else `CONFLICT`. (3) *Response from a trusted Gmail adapter*: **not established in M4C-A**. The only
-accepted `evidence_source` is `CALLER_SUPPLIED`; `TRUSTED_ADAPTER` is reserved in the schema for the future M4C-C read-only adapter and is rejected today, so a
-caller cannot claim it. (4) *Mutation attributed to our executor*: **never established**; another client or the owner may have archived the message, so
+`NOT_APPLIED`/`RECONCILED_UNMODIFIED` and anything else `CONFLICT`. (3) *Response from a trusted Gmail adapter*: established only by a genuine, unused, adapter-issued `TrustedObservation` (see "Trusted observations" below), which the library accepts through a
+separate validation branch and stores with the source `TRUSTED_ADAPTER`. Ordinary `Evidence` supports `CALLER_SUPPLIED` only, so a caller cannot claim the trusted source. No production executor
+or CLI path uses trusted observations yet. (4) *Mutation attributed to our executor*: **never established**; another client or the owner may have archived the message, so
 `APPLIED` means "recorded with evidence-consistent archived state", not proof of who changed it. The column is named `evidence_checked` (not "verified") and is stored
 with `evidence_source` and `evidence_observed_at`. Callers cannot assert an outcome; `reconcile_item` derives it. **Local metadata alone cannot prove that a Gmail
-mutation occurred.** M4C-A has no Gmail client; tests construct evidence explicitly. **Empty label sets.** A message whose previous labels were exactly `INBOX` legitimately has no labels after ARCHIVE. An explicit empty observation `()` is
+mutation occurred.** The state machine has no Gmail client of its own and no production path produces trusted observations yet; tests construct evidence explicitly or use a fake adapter. **Empty label sets.** A message whose previous labels were exactly `INBOX` legitimately has no labels after ARCHIVE. An explicit empty observation `()` is
 accepted only for such an item (expected archived state empty; it then yields `APPLIED` / `RECONCILED_OBSERVED_ARCHIVED` like any other matching
 observation). For any item whose expected state is non-empty an empty observation is rejected (`BAD_EVIDENCE`), and a non-empty observation of an
 item that expects none is a mismatch / `CONFLICT`. Source, timestamp and chronology checks are unchanged. A missing evidence object, a `None`
@@ -222,6 +222,37 @@ identical). A database trigger repeats the ordering check for direct SQL.
 
 **Evidence is immutable once accepted.** Triggers refuse any change that sets `evidence_checked` back to 0 or alters the stored source or observation time,
 and `APPLIED` cannot exist without checked evidence (table `CHECK`). Direct SQL by someone who can edit the file remains outside the guarantee (see M4B limits).
+
+**Trusted observations (M4C-C1; contract only, no executor yet).** A `TrustedObservation` (module `exec_evidence`) is the only way evidence can be recorded with the
+source `TRUSTED_ADAPTER`. It can only be issued by an archive adapter that has verified the account, through the existing minimal message read (no new endpoint or
+scope): either a PRESENT message with an explicit labels tuple (an omitted `labelIds` in an otherwise complete answer is the explicit empty tuple, valid only where an empty
+archived state was expected) or a message definitively ABSENT (only for an unambiguous Gmail not-found document). The state machine accepts it only if it has the exact type, is
+bound to this account and this message, was issued by an adapter that still holds its verification, is unused, is not older than five minutes and satisfies the same strict
+chronology as other evidence. Ordinary `Evidence(source="TRUSTED_ADAPTER")` is rejected, and `ACCEPTED_EVIDENCE_SOURCES` still lists only `CALLER_SUPPLIED`.
+`require_source` can only RESTRICT which kind a call accepts; it never selects the stored source. After full validation the one-time token is consumed BEFORE persistence: if the
+database write then fails, the token stays consumed (in memory, for the life of its adapter; nothing claims it survives a restart) and a new observation is needed. A trusted
+observation of an absent message reconciles to `CONFLICT`, never to `APPLIED`. Reports state per evidence source what an "applied" record does and does not establish.
+**Ordinary evidence is the exact `Evidence` type only (C1 correction).** A subclass is refused: it could compute `source` (or any field) differently on each read. Fields of ordinary
+evidence are read once into a snapshot and validated; the stored source is the constant `CALLER_SUPPLIED`, never an attribute of the evidence object.
+**Audit completeness for trusted reconciliations.** The item row keeps `evidence_source` and `evidence_observed_at` for every valid trusted observation; `evidence_checked` stays 0
+unless the item is `APPLIED` (schema rule, unchanged). The `ITEM_TRANSITION` audit event adds flat metadata `obs` (`ARCHIVED`, `PREVIOUS`, `OTHER_LABELS` or `ABSENT`), `src` and `seen`.
+So an observed absence and an observed change of labels, which share the item code `RECONCILED_CONFLICT`, remain distinguishable in the audit history. No message ids or label names
+are recorded, no schema or vocabulary changed, and caller-supplied evidence keeps exactly its historical storage. `obs` describes what was observed, not who acted.
+**Clock and execution-context assumptions.** The observation time and the five-minute freshness check rest on the clock injected into the adapter. That clock is trusted
+infrastructure supplied by the executor or the test harness: a wrong or malicious clock undermines the freshness assertions, and freshness is never cryptographic. Production
+executor code must use a controlled UTC clock, not a caller-selected one; injected clocks are for deterministic synthetic tests and carefully controlled internal use.
+An observation is bound to its issuing adapter, the verified account, one message id, its observation time and a one-time nonce. It is NOT bound to an execution id or plan id;
+strict chronology (not earlier than the item's intent or UNKNOWN transition) and one-time consumption limit accidental reuse. **C2 design requirement:** the executor must prevent
+cross-execution observation reuse and accept only observations made inside its own active, verified execution context.
+**What this does not establish:** the guard is an in-process capability boundary against accidents and ordinary callers, not a cryptographic guarantee against code in the same
+process, and an observed desired state never proves that this tool made the change.
+
+**Dispatch metadata (M4C-C1).** Every transport exception carries `dispatched`. It is `False` ONLY where it is raised explicitly before any transmission could begin (policy
+refusal, unverified account, request budget, missing or expired credentials); otherwise it is true or unknown, and unknown is treated as possibly sent. It is never inferred
+from a counter, an exception class or a received status code. A complete HTTP error answer to a POST (even a well-formed Gmail error document) is NOT proof that the mutation had no
+effect, so a future executor must record such an outcome as `UNKNOWN` and reconcile; nothing is retried automatically. The vocabulary and the database are unchanged: the code
+`REJECTED` is not reinterpreted, its description now states that it records the recorder's assertion and that this library cannot show whether anything was sent, and
+existing records keep that uncertainty.
 
 **ARCHIVE needs `INBOX`.** `record_intent` refuses previous labels without `INBOX` before anything is stored, and the schema repeats it (a `CHECK` on
 `prev_label_ids` and the intent trigger). Other labels, including private user labels, are preserved exactly as recorded (sorted JSON array).
