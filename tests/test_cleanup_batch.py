@@ -157,6 +157,65 @@ class SkipTests(BatchBase):
         self.assertEqual(res.execution_state, "FAILED")  # nothing was applied: the existing rule ends the execution
 
 
+class SameThreadTests(BatchBase):
+    """Two approved messages in ONE thread (plus an unapproved third message in it): earlier archived changes made by this execution are legitimate."""
+    A, B, C = HEX[0], HEX[1], HEX[5]  # A and B are approved; C shares the thread but is not part of the plan
+    TID = THREADS[0]
+
+    def messages(self):
+        base = [dict(msg(i, sender=f"s{i}@shop.example.test"), id=HEX[i - 1], thread_id=THREADS[i - 1]) for i in range(3, 6)]
+        thread = [dict(msg(i, sender=f"s{i}@shop.example.test"), id=HEX[j], thread_id=self.TID) for i, j in ((1, 0), (2, 1), (6, 5))]
+        return thread + base
+
+    def state(self, c_labels=LABELS):
+        st = {HEX[i]: (THREADS[i], list(LABELS)) for i in range(2, 5)}
+        st[self.A], st[self.B], st[self.C] = (self.TID, list(LABELS)), (self.TID, list(LABELS)), (self.TID, list(c_labels))
+        return st
+
+    def start(self, script=(), c_labels=LABELS, ids=None):
+        ex = self.execution(ids=tuple(ids or (self.A, self.B)))
+        return ex, fm.FakeMailbox(ACCT, self.state(c_labels), clock=self.clock(), script=script)
+
+    def test_a_later_item_is_not_skipped_because_an_earlier_item_of_the_same_batch_was_archived(self):
+        ex, mb = self.start()
+        res = self.run_batch(ex, mb)
+        self.assertEqual([r.item_state for _, r in res.items], ["APPLIED", "APPLIED"])
+        self.assertEqual((res.execution_state, res.posts), ("EXECUTED", 2))
+        self.assertEqual(mb.service.messages[self.C][1], set(LABELS))  # the unapproved sibling is never touched
+
+    def test_the_exemption_is_exact_it_covers_only_inbox_removal_by_this_execution(self):
+        cases = (("an unapproved sibling changed", [Step("GET_THREAD", nth=2, before=lambda f: f.set_labels(self.C, list(AFTER)))]),
+                 ("an unapproved sibling gained a label", [Step("GET_THREAD", nth=2, before=lambda f: f.set_labels(self.C, list(LABELS) + ["STARRED"]))]),
+                 ("the archived sibling gained a label afterwards", [Step("GET_THREAD", nth=2, before=lambda f: f.set_labels(self.A, list(AFTER) + ["STARRED"]))]),
+                 ("the archived sibling returned to the inbox", [Step("GET_THREAD", nth=2, before=lambda f: f.set_labels(self.A, list(LABELS)))]),  # not its recorded state
+                 ("the archived sibling lost a label other than INBOX", [Step("GET_THREAD", nth=2, before=lambda f: f.set_labels(self.A, []))]),
+                 ("a new message joined the thread", [Step("GET_THREAD", nth=2, before=lambda f: f.add_message(HEX[6], self.TID, ["INBOX"]))]))
+        for label, script in cases:
+            with self.subTest(label):
+                self.setUp()
+                ex, mb = self.start(script)
+                res = self.run_batch(ex, mb)
+                self.assertEqual([r.item_state for _, r in res.items], ["APPLIED", "SKIPPED_DRIFT"], label)
+                self.assertEqual(self.item(self.B)["error_code"], "THREAD_CHANGED")
+                self.assertEqual(len(self.posted(mb)), 1)
+
+    def test_a_sibling_that_was_not_archived_by_this_execution_is_never_exempt(self):
+        # the approved sibling was skipped (not APPLIED): any change to it is still drift for the next item
+        ex, mb = self.start([Step("GET_MESSAGE", nth=1, before=lambda f: f.set_labels(self.A, list(LABELS) + ["STARRED"]))])
+        res = self.run_batch(ex, mb)
+        self.assertEqual([r.item_state for _, r in res.items], ["SKIPPED_DRIFT", "SKIPPED_DRIFT"])
+        self.assertEqual(self.posted(mb), [])
+
+    def test_a_protected_label_on_an_archived_sibling_is_not_ignored(self):
+        ex, mb = self.start([Step("GET_THREAD", nth=2, before=lambda f: f.set_labels(self.A, list(AFTER) + ["STARRED"]))])
+        res = self.run_batch(ex, mb)
+        self.assertEqual([r.item_state for _, r in res.items], ["APPLIED", "SKIPPED_DRIFT"])
+        # and directly: even an archived sibling in its exact recorded state is refused if its labels include a protected one
+        cleanup_protect.add(self.index, ACCT, label="CATEGORY_PROMOTIONS")
+        thread = ((self.A, tuple(AFTER)), (self.B, tuple(LABELS)), (self.C, tuple(LABELS)))
+        self.assertEqual(cx._thread_problem(self.index, ACCT, self.B, self.TID, thread, {self.A: set(AFTER)}), "THREAD_CHANGED")
+
+
 class StopTests(BatchBase):
     def test_partial_success_followed_by_an_unknown_post_stops_the_batch_and_reconciles_later(self):
         ex = self.batch_execution()

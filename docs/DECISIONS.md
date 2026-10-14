@@ -89,6 +89,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D83 | **One slice per call.** The batch ends the slice through `end_slice` and never crosses a slice boundary: continuation needs the owner's typed confirmation and a new lease. |
 | D84 | **No resume, no retry.** The batch refuses to start while an item is `INTENT`, `UNKNOWN` or `CONFLICT`; ambiguity, an unverifiable account, a failed read or a lost guarantee stops the execution; crash recovery is the existing `recover_interrupted`. |
 | D85 | **Batch scope.** Fake mailbox only, no CLI, no scheduler or worker, no live Gmail. The account is verified once per batch; the request budget (500 per transport) bounds a slice. |
+| D86 | **Same-thread batches.** A sibling archived by this execution (APPLIED, checked evidence) must match its exact recorded archived state; all other sibling checks, the membership check and the protected-label check are unchanged. Found by the final batch check: a later approved item in the same thread was needlessly skipped. |
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
 

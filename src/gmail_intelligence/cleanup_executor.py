@@ -18,6 +18,7 @@ Safety boundaries, enforced rather than promised:
   * An unexpected exception around the mailbox is never a clean "not applied". Persistence failures after the POST leave the item open (INTENT),
     which lease expiry turns into UNKNOWN (`recover_interrupted`) for reconciliation.
 """
+import json
 from dataclasses import dataclass
 from datetime import timezone
 
@@ -98,8 +99,20 @@ def _protected_label(index, account, labels):
     return False
 
 
-def _thread_problem(index, account, message_id, thread_id, thread):
-    """A reason code (THREAD_CHANGED / LABELS_CHANGED) when the live thread differs from the indexed one in any way, else None."""
+def _archived_by_this_execution(index, account, exec_id):
+    """{message_id: exact labels it must have now} for the items this execution recorded as APPLIED with checked evidence: the indexed labels minus INBOX."""
+    out = {}
+    for r in index._q("SELECT message_id, prev_label_ids FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='APPLIED' AND evidence_checked=1 "
+                      "AND prev_label_ids IS NOT NULL", account, exec_id):
+        out[r["message_id"]] = set(json.loads(r["prev_label_ids"])) - {"INBOX"}
+    return out
+
+
+def _thread_problem(index, account, message_id, thread_id, thread, archived=None):
+    """THREAD_CHANGED when the live thread differs from the indexed one in any way, else None.
+
+    The only legitimate difference is a sibling that THIS execution already archived (APPLIED with checked evidence): it must now be in exactly its recorded
+    archived state. Any other sibling must still equal its indexed labels, and no sibling may carry a protected label, archived or not."""
     live = dict(thread)
     local = {r["id"] for r in index._q("SELECT id FROM messages WHERE account=? AND thread_id=?", account, thread_id)}
     if message_id not in live or set(live) != local:
@@ -110,7 +123,8 @@ def _thread_problem(index, account, message_id, thread_id, thread):
     for mid, labels in live.items():
         if mid == message_id:
             continue
-        if set(labels) != indexed.get(mid, set()) or _protected_label(index, account, labels):
+        want = (archived or {}).get(mid)
+        if set(labels) != (want if want is not None else indexed.get(mid, set())) or _protected_label(index, account, labels):
             return "THREAD_CHANGED"  # a sibling changed since the scan, or carries a protected label
     return None
 
@@ -157,7 +171,7 @@ def _process_item(index, account, exec_id, token, message_id, mailbox, single, v
         thread = mailbox.thread_state(state.thread_id)
     except Exception as exc:  # noqa: BLE001
         return _stop(index, account, exec_id, token, message_id, mailbox, _stop_reason(exc)), False
-    why = _thread_problem(index, account, message_id, state.thread_id, thread)
+    why = _thread_problem(index, account, message_id, state.thread_id, thread, _archived_by_this_execution(index, account, exec_id))
     if why:
         return _skip(index, account, exec_id, token, message_id, mailbox, "SKIPPED_DRIFT", why), True
 

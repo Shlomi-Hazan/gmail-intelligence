@@ -276,6 +276,7 @@ locked against later identity or authorization problems. APPLIED and clearly ski
 remaining targets become `NEVER_ATTEMPTED` and nothing is retried. The batch refuses to start while any item is `INTENT`, `UNKNOWN` or `CONFLICT`, handles only one slice per call, and
 finishes the slice through `end_slice`: the next slice needs the owner's typed continuation and a new lease. A crash or lost lease is recovered by the existing `recover_interrupted`
 (possibly dispatched items become `UNKNOWN`, untouched ones `NEVER_ATTEMPTED`); the batch never resumes anything. Results carry sequence numbers, never message ids.
+**Several approved items in one thread.** A sibling that this execution already archived (recorded `APPLIED` with checked evidence) legitimately differs from the indexed labels, so it must now be in exactly its recorded archived state (its indexed labels minus `INBOX`); every other sibling must still equal its indexed labels, membership must be unchanged, and no sibling, archived or not, may carry a protected label. Any other difference is still `THREAD_CHANGED`. The current target keeps its exact preflight checks.
 **What this does not establish:** the guard is an in-process capability boundary against accidents and ordinary callers, not a cryptographic guarantee against code in the same
 process, and an observed desired state never proves that this tool made the change.
 
