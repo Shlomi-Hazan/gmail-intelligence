@@ -32,6 +32,7 @@ from test_cleanup import ACCT, OTHER, msg  # noqa: E402
 from gmail_intelligence import cleanup_exec as ce, cleanup_exec_report, cleanup_plans as cp, exec_evidence as ee, gmail_write as gw  # noqa: E402
 from gmail_intelligence import gmail_write_policy as pol, index as idx  # noqa: E402
 
+CTX = "c" * 32
 HEX = [f"18c0ffee0000{i:04x}" for i in range(1, 6)]
 THREADS = [f"28c0ffee0000{i:04x}" for i in range(1, 6)]
 NOT_FOUND = (404, json.dumps({"error": {"code": 404, "message": "Requested entity was not found.", "errors": [{"reason": "notFound"}], "status": "NOT_FOUND"}}).encode())
@@ -46,7 +47,7 @@ class FakeClock:
 
 
 def make_adapter(net, account=ACCT, clock=None, verify=True, creds=None):
-    ad = gw.ArchiveAdapter(gw._Transport(creds or TWA.WCreds(), net), account, clock=clock)
+    ad = gw.ArchiveAdapter(gw._Transport(creds or TWA.WCreds(), net), account, _clock=clock)
     if verify:
         ad.verify_account()
     return ad
@@ -66,7 +67,7 @@ class ContractTests(AuthBase):
 
     def test_a_trusted_observation_cannot_be_built_without_the_private_mint(self):
         issuer = self.issuer()
-        kwargs = dict(account=ACCT.lower(), message_id=HEX[0], present=True, labels=(), observed_at=datetime(2027, 1, 1, tzinfo=timezone.utc), issuer=issuer, nonce="n" * 32)
+        kwargs = dict(account=ACCT.lower(), message_id=HEX[0], present=True, labels=(), observed_at=datetime(2027, 1, 1, tzinfo=timezone.utc), context=CTX, issuer=issuer, nonce="n" * 32)
         with self.assertRaises(TypeError):
             ee.TrustedObservation(**kwargs)
         with self.assertRaises(TypeError):
@@ -79,7 +80,7 @@ class ContractTests(AuthBase):
     def test_the_type_is_final_immutable_uncopyable_and_leaks_nothing_in_its_repr(self):
         with self.assertRaises(TypeError):
             type("Impostor", (ee.TrustedObservation,), {})
-        obs = make_adapter(TWT.Net(TWT.ok(emailAddress=ACCT), present_answer(0, ["INBOX"])), clock=lambda: datetime.now(timezone.utc)).observe(HEX[0])
+        obs = make_adapter(TWT.Net(TWT.ok(emailAddress=ACCT), present_answer(0, ["INBOX"])), clock=lambda: datetime.now(timezone.utc)).observe(HEX[0], context=CTX)
         for name in ("labels", "present", "message_id", "account", "observed_at", "_nonce"):
             with self.assertRaises(AttributeError):
                 setattr(obs, name, "x")
@@ -96,7 +97,7 @@ class ContractTests(AuthBase):
         at = datetime(2027, 1, 1, tzinfo=timezone.utc)
 
         def build(**over):
-            kw = dict(account=ACCT.lower(), message_id=HEX[0], present=True, labels=("INBOX",), observed_at=at, issuer=issuer, nonce="n" * 32)
+            kw = dict(account=ACCT.lower(), message_id=HEX[0], present=True, labels=("INBOX",), observed_at=at, context=CTX, issuer=issuer, nonce="n" * 32)
             kw.update(over)
             return ee.TrustedObservation(_mint=ee._MINT, **kw)
         build()
@@ -120,7 +121,7 @@ class ContractTests(AuthBase):
             ee.claim_adapter_seal()  # already claimed by gmail_write at import time
         ad = make_adapter(TWT.Net(TWT.ok(emailAddress=ACCT), present_answer(0, ["INBOX"])), clock=lambda: datetime(2027, 1, 1))  # naive clock
         with self.assertRaises(gw.ReadFailure):
-            ad.observe(HEX[0])  # the issuer refuses a naive clock; the adapter reports an unusable read, never an observation
+            ad.observe(HEX[0], context=CTX)  # the issuer refuses a naive clock; the adapter reports an unusable read, never an observation
 
     def test_the_first_claimant_of_the_seal_makes_the_adapter_module_refuse_to_load(self):
         code = (f"import sys; sys.path.insert(0, {str(SRC)!r})\n"
@@ -131,7 +132,7 @@ class ContractTests(AuthBase):
         self.assertEqual(out, "REFUSED")
 
     def test_a_token_is_used_exactly_once_even_under_concurrent_attempts(self):
-        obs = make_adapter(TWT.Net(TWT.ok(emailAddress=ACCT), present_answer(0, ["INBOX"])), clock=lambda: datetime.now(timezone.utc)).observe(HEX[0])
+        obs = make_adapter(TWT.Net(TWT.ok(emailAddress=ACCT), present_answer(0, ["INBOX"])), clock=lambda: datetime.now(timezone.utc)).observe(HEX[0], context=CTX)
         self.assertTrue(ee.is_pending(obs))
         wins, barrier = [], threading.Barrier(16)
 
@@ -154,10 +155,10 @@ class ContractTests(AuthBase):
     def test_an_observation_from_an_unregistered_issuer_or_with_a_forged_token_is_not_pending(self):
         stranger = ee.ObservationIssuer(_mint=ee._MINT, account=ACCT.lower(), clock=lambda: datetime.now(timezone.utc))  # not created through the sealed path
         forged = ee.TrustedObservation(_mint=ee._MINT, account=ACCT.lower(), message_id=HEX[0], present=True, labels=("INBOX",),
-                                       observed_at=datetime.now(timezone.utc), issuer=stranger, nonce="f" * 32)
+                                       observed_at=datetime.now(timezone.utc), context=CTX, issuer=stranger, nonce="f" * 32)
         self.assertFalse(ee.is_pending(forged))
         self.assertFalse(ee.consume(forged))
-        real = make_adapter(TWT.Net(TWT.ok(emailAddress=ACCT), present_answer(0, ["INBOX"])), clock=lambda: datetime.now(timezone.utc)).observe(HEX[0])
+        real = make_adapter(TWT.Net(TWT.ok(emailAddress=ACCT), present_answer(0, ["INBOX"])), clock=lambda: datetime.now(timezone.utc)).observe(HEX[0], context=CTX)
         object.__setattr__(real, "_nonce", "0" * 32)  # tampering with the token of a genuine observation
         self.assertFalse(ee.is_pending(real))
         self.assertFalse(ee.consume(real))
@@ -165,9 +166,9 @@ class ContractTests(AuthBase):
     def test_the_pending_set_is_bounded(self):
         issuer = self.issuer()
         for _ in range(ee.MAX_PENDING):
-            issuer.issue(HEX[0], True, ())
+            issuer.issue(HEX[0], True, (), CTX)
         with self.assertRaises(ee.ObservationError):
-            issuer.issue(HEX[0], True, ())
+            issuer.issue(HEX[0], True, (), CTX)
 
 
 # ====================================================================== the adapter's observe()
@@ -183,24 +184,24 @@ class ObserveTests(AuthBase):
     def test_an_unverified_adapter_cannot_observe_and_nothing_is_sent(self):
         net = TWT.Net()
         with self.assertRaises(gw.AccountNotVerified) as ctx:
-            make_adapter(net, verify=False).observe(HEX[0])
+            make_adapter(net, verify=False).observe(HEX[0], context=CTX)
         self.assertTrue(gw.definitely_not_dispatched(ctx.exception))
         net_none = TWT.Net()
         no_account = make_adapter(net_none, account=None, verify=False)  # an adapter with no expected account has no issuer and can never observe
         no_account._verified = True
         with self.assertRaises(gw.AccountNotVerified):
-            no_account.observe(HEX[0])
+            no_account.observe(HEX[0], context=CTX)
         self.assertEqual((net.opened, net.log, net_none.opened, net_none.log), (0, [], 0, []))
 
     def test_a_present_message_yields_an_explicit_sorted_labels_tuple_stamped_by_the_clock_after_the_read(self):
         ad, net = self.adapter(TWT.ok(id=HEX[0], threadId=THREADS[0], labelIds=["Label_9", "INBOX", "Label_9"]))
-        obs = ad.observe(HEX[0])
+        obs = ad.observe(HEX[0], context=CTX)
         self.assertEqual((obs.present, obs.labels, obs.message_id, obs.account, obs.observed_at), (True, ("INBOX", "Label_9"), HEX[0], ACCT.lower(), self.now))
         self.assertEqual([(r["method"], r["target"]) for r in net.log][1:], [("GET", f"/gmail/v1/users/me/messages/{HEX[0]}?format=minimal&fields=id,threadId,labelIds")])
         self.assertEqual(pol.check_request("GET", f"{pol.BASE}/gmail/v1/users/me/messages/{HEX[0]}?format=minimal&fields=id,threadId,labelIds"), "MESSAGE_GET")  # the existing GET
 
     def test_omitted_label_ids_in_a_complete_answer_is_the_explicit_empty_tuple(self):
-        obs = self.adapter(present_answer(0, ()))[0].observe(HEX[0])
+        obs = self.adapter(present_answer(0, ()))[0].observe(HEX[0], context=CTX)
         self.assertEqual((obs.present, obs.labels), (True, ()))
 
     def test_incomplete_or_contradictory_answers_are_errors_never_observations(self):
@@ -210,19 +211,19 @@ class ObserveTests(AuthBase):
         for answer in cases:
             ad, _ = self.adapter(answer)
             with self.assertRaises(gw.ReadFailure, msg=answer):
-                ad.observe(HEX[0])
+                ad.observe(HEX[0], context=CTX)
             self.assertEqual(ad._issuer._pending, set())
 
     def test_a_404_is_absence_only_when_the_body_unambiguously_says_not_found(self):
-        obs = self.adapter(NOT_FOUND)[0].observe(HEX[0])
+        obs = self.adapter(NOT_FOUND)[0].observe(HEX[0], context=CTX)
         self.assertEqual((obs.present, obs.labels), (False, None))
         alt = (404, json.dumps({"error": {"code": 404, "message": "x", "status": "NOT_FOUND"}}).encode())
-        self.assertFalse(self.adapter(alt)[0].observe(HEX[0]).present)
+        self.assertFalse(self.adapter(alt)[0].observe(HEX[0], context=CTX).present)
         for answer in (TWT.gerr(404), (404, b"<html>not found</html>"), (404, b""), (404, b"{}"), (404, json.dumps({"error": {"code": 500, "message": "x", "status": "NOT_FOUND"}}).encode()),
                        (404, json.dumps({"error": {"code": 404, "message": "x", "errors": [{"reason": "other"}]}}).encode()), (404, b'{"error":"not found"}')):
             ad, _ = self.adapter(answer)
             with self.assertRaises(gw.ReadFailure, msg=answer):
-                ad.observe(HEX[0])
+                ad.observe(HEX[0], context=CTX)
             self.assertEqual(ad._issuer._pending, set())
 
     def test_other_errors_produce_typed_errors_and_no_observation(self):
@@ -230,23 +231,23 @@ class ObserveTests(AuthBase):
                             ((500, b"{}"), gw.ReadFailure)):
             ad, _ = self.adapter(answer)
             with self.assertRaises(cls):
-                ad.observe(HEX[0])
+                ad.observe(HEX[0], context=CTX)
             self.assertEqual(ad._issuer._pending, set())
         ad, _ = self.adapter(TWT.gerr(401), present_answer(0, ["INBOX"]))
         with self.assertRaises(gw.WriteAuthError):
-            ad.observe(HEX[0])
+            ad.observe(HEX[0], context=CTX)
         with self.assertRaises(gw.AccountNotVerified):  # an authorization problem also removed the verification
-            ad.observe(HEX[0])
+            ad.observe(HEX[0], context=CTX)
 
     def test_losing_the_verification_invalidates_every_unused_observation(self):
         ad, _ = self.adapter(present_answer(0, ["INBOX"]), present_answer(1, ["INBOX"]))
-        first, second = ad.observe(HEX[0]), ad.observe(HEX[1])
+        first, second = ad.observe(HEX[0], context=CTX), ad.observe(HEX[1], context=CTX)
         self.assertTrue(ee.is_pending(first) and ee.is_pending(second))
         ad._verified = False
         self.assertFalse(ee.is_pending(first) or ee.is_pending(second))
         self.assertFalse(ee.consume(first))
         with self.assertRaises(gw.AccountNotVerified):  # a verification lost while an answer was being read
-            ad._issue(HEX[0], True, ())
+            ad._issue(HEX[0], True, (), CTX)
 
     def test_invalid_ids_are_refused_before_any_request_and_are_marked_not_dispatched(self):
         net = TWT.Net()
@@ -254,13 +255,13 @@ class ObserveTests(AuthBase):
         ad._verified = True  # skip the profile read to prove no request is made for a bad id
         for bad in ("", "../x", HEX[0].upper(), None, 5, "g" * 5):
             with self.assertRaises(pol.Denied) as ctx:
-                ad.observe(bad)
+                ad.observe(bad, context=CTX)
             self.assertTrue(gw.definitely_not_dispatched(ctx.exception))
         self.assertEqual((net.opened, net.log), (0, []))
 
     def test_the_default_clock_is_aware_utc_and_the_adapter_surface_is_still_narrow(self):
         ad = make_adapter(TWT.Net(TWT.ok(emailAddress=ACCT), present_answer(0, ["INBOX"])))
-        obs = ad.observe(HEX[0])
+        obs = ad.observe(HEX[0], context=CTX)
         self.assertIsNotNone(obs.observed_at.tzinfo)
         self.assertLess(abs(datetime.now(timezone.utc) - obs.observed_at), timedelta(seconds=30))
         self.assertEqual({n for n in dir(gw.ArchiveAdapter) if not n.startswith("_")}, {"verify_account", "message_state", "thread_state", "observe", "archive_message"})
@@ -268,10 +269,10 @@ class ObserveTests(AuthBase):
     def test_no_new_endpoint_scope_or_network(self):
         self.assertEqual([(k, m) for k, m, _ in pol._ROUTES], [("PROFILE", "GET"), ("MESSAGE_GET", "GET"), ("THREAD_GET", "GET"), ("MESSAGE_MODIFY", "POST")])
         ad, net = self.adapter(present_answer(0, ["INBOX"]))
-        ad.observe(HEX[0])
+        ad.observe(HEX[0], context=CTX)
         self.assertEqual({r["method"] for r in net.log}, {"GET"})
         with mock.patch.object(gw, "_default_connection", side_effect=AssertionError("real connection")):
-            self.adapter(present_answer(0, ["INBOX"]))[0].observe(HEX[0])
+            self.adapter(present_answer(0, ["INBOX"]))[0].observe(HEX[0], context=CTX)
 
 
 # ====================================================================== dispatch metadata on the transport's outcomes
@@ -410,11 +411,18 @@ class TrustedEvidenceTests(TCE.ExecBase):
         ce.record_intent(self.index, ACCT, ex["exec_id"], self.token, a, labels or self.LABELS, now=self.tick())
         return ex, a
 
+    def ctx_for(self, mid):
+        """The context the state machine expects for the latest execution: reconciliation if the item is UNKNOWN, otherwise the post-read."""
+        exec_id = self.index._q("SELECT exec_id FROM cleanup_execution ORDER BY created_at DESC, exec_id DESC LIMIT 1")[0][0]
+        if self.index._q("SELECT state FROM cleanup_exec_item WHERE exec_id=? AND message_id=?", exec_id, mid)[0][0] == "UNKNOWN":
+            return ce.reconcile_context(self.index, ACCT, exec_id, mid)
+        return ce.postread_context(self.index, ACCT, exec_id, self.token, mid)
+
     def observe(self, mid, labels=None, absent=False, at=None, account=ACCT):
         i = HEX.index(mid)
         net = TWT.Net(TWT.ok(emailAddress=account), NOT_FOUND if absent else present_answer(i, labels if labels is not None else self.AFTER))
         ad = make_adapter(net, account=account, clock=FakeClock(at if at is not None else self.t))
-        return ad.observe(mid), ad
+        return ad.observe(mid, context=self.ctx_for(mid)), ad
 
     def last_item_meta(self):
         row = self.index._q("SELECT meta FROM cleanup_audit WHERE event_type='ITEM_TRANSITION' ORDER BY seq DESC LIMIT 1")[0]
@@ -470,7 +478,7 @@ class TrustedEvidenceTests(TCE.ExecBase):
     def test_a_forged_observation_from_an_unregistered_issuer_is_refused(self):
         ex, a = self.intent()
         stranger = ee.ObservationIssuer(_mint=ee._MINT, account=ACCT.lower(), clock=lambda: self.t)
-        forged = stranger.issue(a, True, self.AFTER)  # structurally perfect, but its issuer was never sealed to an adapter... and it is "pending" in its own set
+        forged = stranger.issue(a, True, self.AFTER, CTX)  # structurally perfect, but its issuer was never sealed to an adapter... and it is "pending" in its own set
         object.__setattr__(forged, "_issuer", ee.ObservationIssuer(_mint=ee._MINT, account=ACCT.lower(), clock=lambda: self.t))  # swap in an issuer that never issued it
         before = self.snapshot()
         with self.assertRaises(ce.ExecError) as ctx:
@@ -805,7 +813,7 @@ class ReportTests(TCE.ExecBase):
                 evidence = self.ev(mid, self.AFTER)
             else:
                 i = HEX.index(mid)
-                evidence = make_adapter(TWT.Net(TWT.ok(emailAddress=ACCT), present_answer(i, self.AFTER)), clock=FakeClock(self.t)).observe(mid)
+                evidence = make_adapter(TWT.Net(TWT.ok(emailAddress=ACCT), present_answer(i, self.AFTER)), clock=FakeClock(self.t)).observe(mid, context=ce.postread_context(self.index, ACCT, ex["exec_id"], self.token, mid))
             ce.record_outcome(self.index, ACCT, ex["exec_id"], self.token, mid, "APPLIED", evidence=evidence, now=self.tick())
         return ex
 
@@ -903,7 +911,7 @@ class BoundaryTests(unittest.TestCase):
         for name in ("record_outcome", "reconcile_item", "observe", "TrustedObservation", "exec_evidence", "reserve_execution", "archive_message"):
             self.assertNotIn(name, cli)
         for fname, text in self.sources().items():
-            if fname not in ("gmail_write.py", "cli.py", "gmail_write_policy.py", "oauth_write.py", "keystore_write.py"):
+            if fname not in ("gmail_write.py", "cli.py", "gmail_write_policy.py", "oauth_write.py", "keystore_write.py", "cleanup_executor.py", "exec_fake_mailbox.py"):
                 self.assertNotIn("archive_message", text, fname)
 
     def test_no_new_scope_and_the_real_index_is_not_touched(self):

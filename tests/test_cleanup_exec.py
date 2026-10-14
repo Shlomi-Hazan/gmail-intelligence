@@ -1794,7 +1794,7 @@ class SourceGuards(unittest.TestCase):
                     names = [node.module or ""] + [f"{node.module}.{a.name}" for a in node.names]
                 if any(n.split(".")[-1] in ("cleanup_exec", "cleanup_exec_report") for n in names):
                     importers.append(path.name)
-        self.assertEqual(sorted(set(importers)), ["cli.py"])
+        self.assertEqual(sorted(set(importers)), ["cleanup_executor.py", "cli.py"])  # the fake-only single-item executor (M4C-C2) is the only other importer
 
 
 if __name__ == "__main__":

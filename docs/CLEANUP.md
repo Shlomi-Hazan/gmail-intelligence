@@ -242,8 +242,26 @@ are recorded, no schema or vocabulary changed, and caller-supplied evidence keep
 infrastructure supplied by the executor or the test harness: a wrong or malicious clock undermines the freshness assertions, and freshness is never cryptographic. Production
 executor code must use a controlled UTC clock, not a caller-selected one; injected clocks are for deterministic synthetic tests and carefully controlled internal use.
 An observation is bound to its issuing adapter, the verified account, one message id, its observation time and a one-time nonce. It is NOT bound to an execution id or plan id;
-strict chronology (not earlier than the item's intent or UNKNOWN transition) and one-time consumption limit accidental reuse. **C2 design requirement:** the executor must prevent
+strict chronology (not earlier than the item's intent or UNKNOWN transition) and one-time consumption limit accidental reuse. **C2 requirement (implemented below for the fake boundary):** the executor must prevent
 cross-execution observation reuse and accept only observations made inside its own active, verified execution context.
+
+**Execution binding and the executor's clock (M4C-C2).** A `TrustedObservation` now carries a mandatory `context`: an opaque SHA-256 over the account, execution, plan, plan hash,
+approval nonce, message, phase (`POSTREAD` for the read after the archive attempt, `RECONCILE` for reconciliation) and, for `POSTREAD`, the lease. The adapter's `observe(message_id,
+*, context)` requires it, and `record_outcome` / `reconcile_item` recompute the expected context from the stored execution row and refuse any other (an observation made for another
+execution, plan, account, message, phase or lease is `BAD_EVIDENCE` and is not consumed). The context binds identity, not secrecy: anyone who can read the database can compute it.
+The executor owns its time: it reads `mailbox.clock()` fresh for every library call and has no clock or `now` parameter; `open_archive_adapter` no longer accepts a clock and the
+adapter's keyword-only `_clock` is passed only by the fake-only mailbox (a static test enforces it). This restricts the supported surfaces; it does not stop code in the same process from
+building an adapter by hand.
+
+**Single-item executor (M4C-C2; library only, fake mailbox only, no CLI).** `cleanup_executor.execute_one` processes ONE approved archive item of a reserved and started
+execution that has exactly one item in one slice (anything larger is refused before any change). It accepts only `exec_fake_mailbox.FakeMailbox`, a final type that takes no
+credentials, connection factory or transport and answers from memory (a real `ArchiveAdapter`, a mock or any look-alike is refused before anything is read). Flow: local checks and a
+live lease; account identity; local revalidation of the plan, protections and mixed threads (drift is skipped, never attempted); live read of the message and the WHOLE thread (exact
+label equality with the plan, exact thread membership, siblings unchanged and without a protected label); durable `INTENT` with the previous labels; lease recheck; at most ONE archive
+POST; an independent trusted post-read bound to this execution; `APPLIED` only for exactly the previous labels minus `INBOX`, otherwise `UNKNOWN` and reconciliation. A failure proven
+to be before any transmission is `NOT_APPLIED`/`REJECTED`; anything that may have been sent (every HTTP error, timeout, redirect, malformed answer or unexpected exception) is `UNKNOWN`
+and the execution stops (`RECONCILIATION_REQUIRED`). A read failure before the intent stops safely with no POST. Persistence errors propagate and leave an open intent that lease expiry
+turns into `UNKNOWN` (`INTERRUPTED`), which a trusted observation reconciles. Nothing is retried; no new status code, audit event or schema was added.
 **What this does not establish:** the guard is an in-process capability boundary against accidents and ordinary callers, not a cryptographic guarantee against code in the same
 process, and an observed desired state never proves that this tool made the change.
 
