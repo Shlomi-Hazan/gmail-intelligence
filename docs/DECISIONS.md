@@ -85,6 +85,10 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D79 | **C2 failure policy.** Intent is committed before the single POST; exact label equality at preflight and post-read; a provably undispatched refusal is `NOT_APPLIED`/`REJECTED`; anything possibly sent is `UNKNOWN`; a read failure before the intent stops with no POST; persistence failures leave an open intent that lease expiry recovers as `UNKNOWN`. No retry of a mutation. |
 | D80 | **C2 scope.** No canary, slicing, pacing, recovery automation, reporting or release work (C3-C5), no real adapter, no OAuth or Google Cloud, no schema or vocabulary change. |
 | D81 | **Immutable fake mailbox (C2 review).** `FakeMailbox` rejects attribute assignment and deletion, and the executor re-verifies the mailbox's wiring before reading and immediately before the POST. A review reproduced `mailbox._adapter = <real adapter>` passing the exact-type check; this closes it for ordinary use. Deliberate same-process reflection is out of scope. |
+| D82 | **Batch execution reuses the single-item flow (C2b).** `execute_batch` loops the same per-item function as `execute_one` over the active slice in `seq` order; it adds no mutation path, no schema, no vocabulary and no audit event. |
+| D83 | **One slice per call.** The batch ends the slice through `end_slice` and never crosses a slice boundary: continuation needs the owner's typed confirmation and a new lease. |
+| D84 | **No resume, no retry.** The batch refuses to start while an item is `INTENT`, `UNKNOWN` or `CONFLICT`; ambiguity, an unverifiable account, a failed read or a lost guarantee stops the execution; crash recovery is the existing `recover_interrupted`. |
+| D85 | **Batch scope.** Fake mailbox only, no CLI, no scheduler or worker, no live Gmail. The account is verified once per batch; the request budget (500 per transport) bounds a slice. |
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
 

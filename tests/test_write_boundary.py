@@ -75,11 +75,11 @@ class ImportBoundaryTests(unittest.TestCase):
         self.assertEqual({c for c in self.callers("run_login_write") if c[1] != "run_login_write"}, {("cli.py", "cmd_auth_login_write")})
 
     def test_refresh_is_never_started_by_a_command_and_no_production_code_builds_the_adapter_yet(self):
-        fake_only = {"archive_message": {("cleanup_executor.py", "execute_one"), ("exec_fake_mailbox.py", "archive_message")},
-                     "verify_account": {("cleanup_executor.py", "execute_one"), ("exec_fake_mailbox.py", "verify_account")}}
+        fake_only = {"archive_message": {("cleanup_executor.py", "_process_item"), ("exec_fake_mailbox.py", "archive_message")},
+                     "verify_account": {("cleanup_executor.py", "_process_item"), ("exec_fake_mailbox.py", "verify_account")}}
         for attr in ("refresh_write_credentials", "refresh_and_store", "open_archive_adapter", "archive_message", "verify_account"):
             outside = {c for c in self.callers(attr) if c[0] not in WRITE_FILES}
-            # the only consumers are the single-item executor and the fake-only mailbox it accepts (M4C-C2); no production code builds a real adapter
+            # the only consumers are the executor's single per-item flow (shared by execute_one and execute_batch) and the fake-only mailbox it accepts (M4C-C2); no production code builds a real adapter
             self.assertEqual(outside, fake_only.get(attr, set()), attr)
         self.assertEqual({c for c in self.callers("fetch_profile_email") if c[0] == "cli.py"}, {("cli.py", "cmd_auth_login_write")})
 
