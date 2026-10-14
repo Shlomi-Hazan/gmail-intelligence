@@ -267,6 +267,16 @@ mailbox still routes to its own in-memory service (exact adapter, transport, cre
 (attribute assignment, swapping a connection factory) from routing execution to a real adapter; code in the same process that deliberately uses reflection or monkey-patching can still
 bypass any such check. The executor does not claim that the preflight and the POST are atomic against other Gmail clients: a change in between is not prevented, it is caught only by the
 exact post-read and recorded as `UNKNOWN`.
+
+**Batch execution (M4C-C2b; library only, fake mailbox only, no CLI).** `cleanup_executor.execute_batch` runs the ACTIVE slice of a started multi-item execution by repeating the
+single-item flow for each PENDING item in the plan's fixed `seq` order (there is no second mutation path: `execute_one` and `execute_batch` share one per-item function). Before each
+item it re-checks the plan, approval and lease (renewing the lease), the exact mailbox type and wiring, then revalidates locally and reads the live message and whole thread; it commits
+the intent before that item's single POST and records the outcome from an execution-bound trusted post-read. The account is verified once, before the first item; the adapter then stays
+locked against later identity or authorization problems. APPLIED and clearly skipped items (drifted, protected, gone) let the batch go on; anything else stops the execution, the
+remaining targets become `NEVER_ATTEMPTED` and nothing is retried. The batch refuses to start while any item is `INTENT`, `UNKNOWN` or `CONFLICT`, handles only one slice per call, and
+finishes the slice through `end_slice`: the next slice needs the owner's typed continuation and a new lease. A crash or lost lease is recovered by the existing `recover_interrupted`
+(possibly dispatched items become `UNKNOWN`, untouched ones `NEVER_ATTEMPTED`); the batch never resumes anything. Results carry sequence numbers, never message ids.
+**Several approved items in one thread.** A sibling that this execution already archived (recorded `APPLIED` with checked evidence) legitimately differs from the indexed labels, so it must now be in exactly its recorded archived state (its indexed labels minus `INBOX`); every other sibling must still equal its indexed labels, membership must be unchanged, and no sibling, archived or not, may carry a protected label. Any other difference is still `THREAD_CHANGED`. The current target keeps its exact preflight checks.
 **What this does not establish:** the guard is an in-process capability boundary against accidents and ordinary callers, not a cryptographic guarantee against code in the same
 process, and an observed desired state never proves that this tool made the change.
 

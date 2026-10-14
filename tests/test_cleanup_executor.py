@@ -772,7 +772,7 @@ class FakeOnlyTests(ExecutorBase):
                 names |= {node.module.split(".")[-1]} if node.module != "gmail_intelligence" else {a.name for a in node.names}
             if isinstance(node, ast.Import):
                 names |= {a.name for a in node.names}
-        self.assertEqual(names, {"cleanup_exec", "cleanup_plans", "cleanup_protect", "cleanup_audit", "exec_fake_mailbox"})
+        self.assertEqual(names, {"cleanup_exec", "cleanup_plans", "cleanup_protect", "cleanup_audit", "exec_fake_mailbox", "json"})  # json: stdlib, for the recorded previous labels
 
     def test_no_production_path_can_reach_the_executor(self):
         cli = (SRC / "gmail_intelligence" / "cli.py").read_text()
