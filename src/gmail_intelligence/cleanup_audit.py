@@ -16,7 +16,9 @@ EVENTS = ("PLAN_CREATED", "PLAN_REVIEWED", "REVIEW_REJECTED", "PLAN_APPROVED", "
           "PLAN_CANCELLED", "PLAN_EXPIRED", "APPROVAL_REVOKED", "APPROVAL_EXPIRED", "ATTEMPTS_LOCKED_OUT",
           # M4C-A: local execution lifecycle (counts/state names only; item events carry a sequence number, never a message id)
           "EXECUTION_RESERVED", "RESERVATION_REJECTED", "SLICE_CONFIRMED", "EXECUTION_TRANSITION", "SLICE_TRANSITION",
-          "ITEM_TRANSITION", "EXECUTION_INTERRUPTED")
+          "ITEM_TRANSITION", "EXECUTION_INTERRUPTED",
+          # M4D: owner-approved undo of an archived item (the audit chain is the undo ledger: it never rewrites the original execution history)
+          "UNDO_AUTHORIZED", "UNDO_REJECTED", "UNDO_INTENT", "UNDO_RESULT")
 
 
 def canonical(obj):

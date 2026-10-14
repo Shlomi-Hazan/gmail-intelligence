@@ -73,6 +73,30 @@ class _Service:
     def posts(self):
         return sum(1 for kind, _ in self.log if kind == "POST")
 
+    def undos(self):
+        return sum(1 for kind, _ in self.log if kind == "UNDO")
+
+    def undo(self, key):
+        """FAKE-ONLY inverse of the archive: put INBOX back on one message. There is no HTTP route for it and no real Gmail policy entry: it exists only in memory."""
+        self.counts["UNDO"] = n = self.counts.get("UNDO", 0) + 1
+        self.log.append(("UNDO", key))
+        step = next((s for s in self.script if s.request == "UNDO" and s.nth == n), None)
+        if step is not None and step.before:
+            step.before(self)
+        if step is not None and (step.raises is not None or step.status is not None):
+            if step.apply and key in self.messages:
+                self.messages[key][1].add("INBOX")
+            if step.raises is not None:
+                raise step.raises
+            return step.status, step.body
+        if key not in self.messages:
+            return _NOT_FOUND
+        self.messages[key][1].add("INBOX")
+        answer = self._json(200, self._message(key))
+        if step is not None and step.after:
+            step.after(self)
+        return answer
+
     def _json(self, status, obj):
         return status, json.dumps(obj).encode()
 
@@ -233,6 +257,28 @@ class FakeMailbox:
 
     def observe(self, message_id, *, context):
         return self._adapter.observe(message_id, context=context)
+
+    def restore_inbox(self, message_id):
+        """FAKE-ONLY undo of an archive (adds INBOX back to one message of the in-memory service). It never goes through the real adapter's request policy, which
+        stays archive-only, and it reports failures with the same dispatch markers: `dispatched=False` only for refusals proven to be before any transmission."""
+        adapter = self._adapter
+        if not adapter._verified:
+            raise gw._mark(gw.AccountNotVerified(), False)
+        try:
+            gw.policy.valid_id(message_id)
+        except gw.Denied as exc:
+            raise gw._mark(exc, False)
+        adapter._t._authorization()  # WriteAuthError (dispatched=False) when the credentials are not usable
+        try:
+            status, data = self._service.undo(message_id)
+        except (TimeoutError, OSError) as exc:
+            raise gw._mark(gw.UncertainOutcome("TIMEOUT" if isinstance(exc, TimeoutError) else "NETWORK_ERROR"), True) from None
+        except Exception:  # noqa: BLE001 - anything unexpected after the request began is unclear by definition
+            raise gw._mark(gw.UncertainOutcome("AMBIGUOUS_RESULT"), True) from None
+        obj = gw._interpret("MESSAGE_MODIFY", status, data)  # typed errors, all marked as possibly dispatched
+        if obj.get("id") != message_id:
+            raise gw._mark(gw.UncertainOutcome("AMBIGUOUS_RESULT"), True)
+        return gw._labels(obj.get("labelIds"))
 
     # ---- inspection and "someone else" controls for tests
     @property
