@@ -1,10 +1,10 @@
 # Product roadmap: M5-M11 (planning only)
 
-> **Status: direction approved by the owner; NOTHING in this document is implemented.** It adds product direction to the planning documents. It does
+> **Status: direction approved by the owner; NOTHING proposed in this document (M5-M11) is implemented.** It adds product direction to the planning documents. It does
 > not authorize implementing any feature, any live Gmail operation, any new OAuth scope, any new dependency or any change to an existing security
 > boundary. Every milestone below needs its own explicit owner approval to start, and every increment needs its own Draft PR and review.
-> **Authority:** this document grants no authority to implement any part of M4C (M4C-B2/B3, M4C-C, M4C-D) or M4D, or to access real Gmail, OAuth,
-> Keychain or the real index; each of those stages needs its own explicit approval. Tracking lives in GitHub Milestones and Issues; the proposals in section 6 have **not** been created there. See [ROADMAP.md](ROADMAP.md) for the
+> **Authority:** this document grants no authority to start M5-M11 or to perform any live Gmail operation. **Current M4 status (M4 closeout, [M4-CLOSEOUT.md](M4-CLOSEOUT.md)):** one owner-approved real single-message archive canary succeeded; live execution is disabled again (`LIVE_EXECUTION_ENABLED = False`); the write grant was revoked; real Gmail undo is NOT implemented; general live batch execution is NOT enabled; any future live operation needs fresh owner approval. The stage names M4C-B2/B3, M4C-C, M4C-D and M4D below are HISTORICAL: they describe how M4 was staged, not what remains.
+> Any access to real Gmail, OAuth, Keychain or the real index needs its own explicit owner approval. Tracking lives in GitHub Milestones and Issues; the proposals in section 6 have **not** been created there. See [ROADMAP.md](ROADMAP.md) for the
 > short list, [DECISIONS.md](DECISIONS.md) (D58-D65, Q15-Q19) for the decisions and [ARCHITECTURE.md](ARCHITECTURE.md) section 17 for the architecture notes.
 
 ## 1. Where the project actually stands (baseline, not aspiration)
@@ -13,10 +13,10 @@
 |---|---|---|
 | Index | Metadata only: message/thread ids, dates, size, sender address, Gmail label ids and label names, unread flag. **No subject, snippet, body, recipients or attachment information is stored.** | Content indexing of any kind |
 | Classification (M3) | Deterministic rules and user rules; an optional loopback-only local model sees only a sender domain and Gmail system labels (real inference **not verified**) | Content-aware classification |
-| Cleanup (M4A-M4C-B1) | Candidate engine and protection rules; immutable plans, typed approvals and audit; local execution state; an offline, fake-tested write-authorization and archive-only transport foundation | Any live Gmail write: the executor (M4C-C), the live canary (M4C-D), undo (M4D). `cleanup execute` is still unavailable |
+| Cleanup (M4) | Candidate engine and protection rules; immutable plans, typed approvals and audit; local execution state; an archive-only write transport; a fake-tested executor, recovery and fake-only undo; a disabled live boundary; **one owner-approved real single-message archive canary (succeeded; evidence in [M4-CLOSEOUT.md](M4-CLOSEOUT.md))** | Real Gmail undo; general live batch execution (live execution is limited to one message and is disabled again, the write grant was revoked); Trash and every other mutation class. `cleanup execute` is still unavailable. Any future live operation needs fresh owner approval |
 | Dashboard / sync | A design note only ([ARCHITECTURE.md](ARCHITECTURE.md) sections 6 and 13) | Everything |
 
-No Gmail mailbox has ever been modified by Gmail Intelligence. Nothing in M5-M11 may be described as available until it is merged, verified and
+Historically no mailbox had been modified; the only mailbox change to date is the one owner-approved real single-message archive canary (see M4-CLOSEOUT.md), after which live execution was disabled again. Nothing in M5-M11 may be described as available until it is merged, verified and
 documented as such.
 
 ## 2. Product-wide principles
@@ -172,17 +172,17 @@ API or model, no paid dependency, free-tier terms of any external service checke
 | **Execution boundary per operation class** (plan, approval, audit, recovery, allowlist, scope) | any mutation in M5 and later |
 | **Dependency review** (frontend toolchain, parsers, local models, embeddings: licenses, supply chain, cost) | M6, M10 parsers, M11 |
 | **Scheduling approval** (persistent configuration) | M7 stretch |
-| **M4 completion**, each stage separately authorized (M4C-B2/B3 client and authorization, M4C-C executor, M4C-D live canary, M4D recovery) | any execution class in M5 |
+| **M4 completion** (done in its reduced scope; historically each stage was separately authorized: M4C-B2/B3 client and authorization, M4C-C executor, M4C-D live canary, M4D recovery) | any execution class in M5 |
 
 ## 5. Dependencies and priority recommendation
 
 Numbering is kept for continuity; it is not the recommended build order.
 
-1. **Complete M4, which holds the only mutation path, under its own approvals.** Status (updated at closeout): M4 is complete in its owner-approved reduced scope (see
-   [M4-CLOSEOUT.md](M4-CLOSEOUT.md)); real Gmail undo is deferred. The historical status text that follows predates it. M4A, M4B, M4C-A and M4C-B1 were merged first. The M4C-C design was
-   complete, but its implementation had **not** yet been approved or started. M4C-B2 (client configuration) and M4C-B3 (real authorization) each need separate
-   authorization. M4C-D (live canary) and M4D (recovery and undo) are future work. Giving M4 this engineering priority does not give permission to begin
-   any of these stages, and this roadmap grants no authority to implement M4C or to access real Gmail.
+1. **M4 (the only mutation path) is complete in its owner-approved reduced scope** (see [M4-CLOSEOUT.md](M4-CLOSEOUT.md)): one real single-message archive canary succeeded under explicit
+   approval; live execution is disabled again; the write grant was revoked; real Gmail undo is NOT implemented; general live batch execution is NOT enabled; any future live operation
+   needs fresh owner approval. *Historical (kept for the record):* this item once read "complete M4 under its own approvals", when only M4A, M4B, M4C-A and M4C-B1 were merged and the
+   M4C-C implementation, the M4C-B2/B3 client and authorization, the M4C-D canary and M4D were still future work, each needing separate authorization. That has been done and is
+   superseded; this roadmap still grants no authority for any new live Gmail operation.
 2. **M7 early:** every later milestone depends on a fresh index; design the plan-anchor interaction first.
 3. **M6A (aggregate analytics) and M5A-M5C (label hygiene and recommendations):** read-only, offline, quick wins on data that already exists.
 4. **M9A and M8A:** metadata-only first releases.
@@ -190,7 +190,7 @@ Numbering is kept for continuity; it is not the recommended build order.
 6. **M6B-M6C (API and UI)** once a first useful set of reports exists.
 7. **M11 last:** it depends on the index quality and on the untrusted-content defenses built in earlier milestones.
 
-Rough dependency graph: M2/M3/M4 -> M7 -> {M5, M6, M8A, M9A} -> {M9B, M10A} -> content decision -> {M8B-M8D, M10 content} -> M11. M4 itself proceeds only through its separately approved stages.
+Rough dependency graph: M2/M3/M4 -> M7 -> {M5, M6, M8A, M9A} -> {M9B, M10A} -> content decision -> {M8B-M8D, M10 content} -> M11. M4 proceeded, and any future live use proceeds, only through separately approved stages.
 
 ## 6. Proposed GitHub tracking (NOT created)
 
