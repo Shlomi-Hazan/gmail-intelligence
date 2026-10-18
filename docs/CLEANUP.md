@@ -289,6 +289,12 @@ mailbox type: the fake-only APIs refuse a live mailbox and the live APIs refuse 
 clock. Tests flip the switch only with a patch and put the real adapter code over the in-memory fake wire. **Live undo is deferred:** `cleanup_undo` accepts only the fake mailbox and
 `LiveMailbox` has no undo operation; a real undo needs its own write-policy change and approval.
 
+**Single-message canary entry point (disabled).** `cleanup_canary.run_canary` is the one explicitly gated way to archive ONE approved message through the live boundary: it refuses as its
+very first statement while `LIVE_EXECUTION_ENABLED` is `False` (before the index, the credential store, the client file or the network are touched), then requires an `EXECUTING`
+single-target single-slice `ARCHIVE` execution under the caller's lease and the owner's separate typed canary confirmation (`canary_phrase`, recorded once per execution as
+`CANARY_CONFIRMED`; wrong phrases are `CANARY_REJECTED` and locked out), opens the write credentials locally, and hands the rest to `execute_live_batch` (no second archive path).
+No CLI, environment-variable or configuration path exists. Details, the authorization readiness and the owner approvals still needed: [CANARY.md](CANARY.md). Live undo is deferred.
+
 **Still required before any live canary (none of it is done or authorized here):** a separately approved write OAuth login and Google Cloud isolation checklist (M4C-B2); a separately
 approved, reviewed entry point and source change enabling the switch; a rehearsal against a single message of a disposable test mailbox with the owner present; verification of the real
 Gmail behaviour the fake only imitates (thread read completeness and paging for long threads, the exact not-found and error documents, label omission, quota and the 500-request

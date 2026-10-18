@@ -111,13 +111,13 @@ class DisabledByDefaultTests(LiveBase):
                 for target in ("exec_live_mailbox", "cleanup_live"):
                     if any(m.split(".")[-1] == target for m in mods):
                         importers.setdefault(target, set()).add(path.name)
-        self.assertEqual(importers, {"exec_live_mailbox": {"cleanup_executor.py"}})  # nothing imports cleanup_live at all
+        self.assertEqual(importers, {"exec_live_mailbox": {"cleanup_executor.py", "cleanup_canary.py"}, "cleanup_live": {"cleanup_canary.py"}})  # only the disabled canary imports the live modules
         callers = set()
         for path in SRC.glob("*.py"):
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) in ("_wrap", "open_live_mailbox", "execute_live_batch", "recover_live"):
                     callers.add((path.name, getattr(node.func, "id", getattr(node.func, "attr", None)), len(node.args) + len(node.keywords)))
-        self.assertEqual(callers, {("exec_live_mailbox.py", "_wrap", 2)})  # the only call in the program, without a test factory
+        self.assertEqual(callers, {("exec_live_mailbox.py", "_wrap", 2), ("cleanup_canary.py", "open_live_mailbox", 3), ("cleanup_canary.py", "execute_live_batch", 5)})  # without a test factory; canary only
 
     def test_the_public_constructor_has_no_clock_factory_or_transport_parameter(self):
         self.assertEqual(list(inspect.signature(live.open_live_mailbox).parameters), ["expected_account", "store", "client_path"])

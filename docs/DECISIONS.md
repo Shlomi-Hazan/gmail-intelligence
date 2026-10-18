@@ -102,6 +102,10 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D96 | **Live undo deferred.** `cleanup_undo` stays fake-only; the live mailbox has no undo; the real write policy stays archive-only. |
 | D97 | **Pre-canary checklist.** Write OAuth login and Cloud isolation (M4C-B2), an approved entry point and switch change, a one-message rehearsal in a disposable mailbox, verification of the real Gmail behaviours the fake imitates, recovery rehearsal and backup, final M4 audit. |
 | D98 | **Live seam hardening (review).** A `LiveMailbox` can be built only through `_wrap` (private mint), the test-factory seam accepts only the in-memory fake wire type (never a real connection factory), and every port method, reads included, re-checks the disabled switch. Found by review: the constructor was directly callable with an arbitrary factory, and reads did not check the switch. |
+| D99 | **Canary entry point (disabled).** `run_canary` is a library function behind the same `False` source constant, not a command; it adds a gate and a separate owner confirmation and reuses `execute_live_batch`, so there is no second archive path. |
+| D100 | **Gate before everything.** While disabled it refuses before touching the index, the credential store, the client file or the network; no environment variable, configuration value or option enables it. |
+| D101 | **Confirmation semantics.** A distinct typed phrase (`CANARY ARCHIVE 1 <execution> <plan hash prefix>`), recorded durably once per execution before any request, wrong phrases recorded and locked out; a credential problem does not consume it. Exactly one target in one slice. |
+| D102 | **Authorization readiness is documentation only.** `docs/CANARY.md` states the Google Cloud configuration, scope, credential separation, identity checks and the owner approvals still required; nothing was done or requested. |
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
 
