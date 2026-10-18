@@ -911,7 +911,7 @@ class BoundaryTests(unittest.TestCase):
         for name in ("record_outcome", "reconcile_item", "observe", "TrustedObservation", "exec_evidence", "reserve_execution", "archive_message"):
             self.assertNotIn(name, cli)
         for fname, text in self.sources().items():
-            if fname not in ("gmail_write.py", "cli.py", "gmail_write_policy.py", "oauth_write.py", "keystore_write.py", "cleanup_executor.py", "exec_fake_mailbox.py"):
+            if fname not in ("gmail_write.py", "cli.py", "gmail_write_policy.py", "oauth_write.py", "keystore_write.py", "cleanup_executor.py", "exec_fake_mailbox.py", "exec_live_mailbox.py"):
                 self.assertNotIn("archive_message", text, fname)
 
     def test_no_new_scope_and_the_real_index_is_not_touched(self):

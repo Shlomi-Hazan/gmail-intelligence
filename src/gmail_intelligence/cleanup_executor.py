@@ -24,6 +24,7 @@ from datetime import timezone
 
 from gmail_intelligence import cleanup_exec as ce, cleanup_plans as cp, cleanup_protect
 from gmail_intelligence.cleanup_audit import canonical, sha256
+from gmail_intelligence import exec_live_mailbox as live
 from gmail_intelligence.exec_fake_mailbox import FakeMailbox, wiring_is_fake
 
 TRUSTED = ce.TRUSTED_EVIDENCE_SOURCE
@@ -37,6 +38,21 @@ class ItemResult:
     code: str
     execution_state: str
     posts: int  # archive requests made by this call: 0 or 1, never more
+
+
+def _gate(mailbox, allow):
+    """The one mailbox check, used at the start and again right before every POST. `allow` is "FAKE" (the public fake-only entry points) or "LIVE" (only the entry points of
+    `cleanup_live`): each accepts exactly its own final mailbox type with intact wiring and refuses the other. The live type additionally needs the build's enabled switch."""
+    if allow == "FAKE":
+        ok = type(mailbox) is FakeMailbox and wiring_is_fake(mailbox)
+    elif allow == "LIVE":
+        if type(mailbox) is live.LiveMailbox and live.LIVE_EXECUTION_ENABLED is not True:
+            raise ce.ExecError("LIVE_DISABLED", "live Gmail execution is disabled in this build; nothing was read or changed")
+        ok = type(mailbox) is live.LiveMailbox and live.live_wiring_ok(mailbox)
+    else:
+        ok = False
+    if not ok:
+        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "this mailbox is not accepted by this entry point; nothing was read or changed")
 
 
 def _now(mailbox):
@@ -129,11 +145,10 @@ def _thread_problem(index, account, message_id, thread_id, thread, archived=None
     return None
 
 
-def _process_item(index, account, exec_id, token, message_id, mailbox, single, verify=True):
+def _process_item(index, account, exec_id, token, message_id, mailbox, single, verify=True, allow="FAKE"):
     """The one per-item flow. Returns (ItemResult, proceed): proceed is True only when the item is final and harmless (APPLIED or a skip) and the execution is
     still EXECUTING, so a batch may go on; False means the execution was stopped (or the item is UNKNOWN) and nothing further may be attempted."""
-    if type(mailbox) is not FakeMailbox or not wiring_is_fake(mailbox):
-        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "only the fake test mailbox is accepted in this version; nothing was read or changed")
+    _gate(mailbox, allow)
     plan = _preconditions(index, account, exec_id, token, message_id, mailbox, single)
 
     # ---- account identity (a live profile read through the mailbox). A batch verifies once, before its first item; the adapter then stays locked against
@@ -181,8 +196,7 @@ def _process_item(index, account, exec_id, token, message_id, mailbox, single, v
 
     # ---- the single archive attempt: never retried. Nothing makes the preflight and this request atomic against other Gmail clients: a change in
     # between is caught only by the exact post-read (UNKNOWN), never prevented.
-    if not wiring_is_fake(mailbox):  # re-checked at the last moment: the intent stays open for recovery, no request is made
-        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "the mailbox is no longer wired to the fake service; no request was made")
+    _gate(mailbox, allow)  # re-checked at the last moment (wiring and, for live, the enabled switch): the intent stays open for recovery, no request is made
     try:
         mailbox.archive_message(message_id)
     except Exception as exc:  # noqa: BLE001 - only a provable pre-dispatch refusal is a clean "not applied"
@@ -238,6 +252,11 @@ class BatchResult:
 
 
 def execute_batch(index, account, exec_id, token, mailbox):
+    """Fake-only batch entry point: see `_execute_batch`."""
+    return _execute_batch(index, account, exec_id, token, mailbox, "FAKE")
+
+
+def _execute_batch(index, account, exec_id, token, mailbox, allow):
     """Run the ACTIVE slice of a started multi-item execution item by item, in the plan's fixed (seq) order, and finish the slice through the state machine.
 
     Every item goes through `_process_item`, i.e. the same account check, local revalidation, live message and thread reads, durable intent, single POST and
@@ -245,8 +264,7 @@ def execute_batch(index, account, exec_id, token, mailbox):
     execution (the remaining targets become NEVER_ATTEMPTED). Refuses to start while any item of the execution is INTENT or UNKNOWN. When the slice ends, the
     execution is AWAITING_CONTINUATION (the owner must confirm the next slice and obtain a new lease) or finished. Nothing is retried.
     """
-    if type(mailbox) is not FakeMailbox or not wiring_is_fake(mailbox):
-        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "only the fake test mailbox is accepted in this version; nothing was read or changed")
+    _gate(mailbox, allow)
     ex = ce.get_execution(index, account, exec_id)
     if ex["state"] != "EXECUTING":
         raise ce.ExecError("BAD_STATE", f"execution is {ex['state']}; the executor needs an EXECUTING execution")
@@ -263,7 +281,7 @@ def execute_batch(index, account, exec_id, token, mailbox):
                        account, exec_id, slice_no)
         if not nxt:
             break
-        res, proceed = _process_item(index, account, exec_id, token, nxt[0]["message_id"], mailbox, single=False, verify=not results)
+        res, proceed = _process_item(index, account, exec_id, token, nxt[0]["message_id"], mailbox, single=False, verify=not results, allow=allow)
         results.append((nxt[0]["seq"], res))
         posts += res.posts
         if not proceed:

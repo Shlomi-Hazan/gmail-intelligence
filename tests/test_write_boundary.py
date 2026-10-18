@@ -45,6 +45,9 @@ class ImportBoundaryTests(unittest.TestCase):
             hits = {n.split(".")[-1] for n, _ in imported_names(tree) if n.split(".")[-1] in WRITE_MODULES}
             if path.name in WRITE_FILES:
                 continue
+            if path.name == "exec_live_mailbox.py":  # the DISABLED real-execution boundary wraps the genuine adapter class; only gmail_write, not the policy or OAuth modules
+                self.assertEqual(hits, {"gmail_write"})
+                continue
             if path.name == "exec_fake_mailbox.py":  # the fake-only test mailbox wraps the real adapter CLASS over an in-memory connection (M4C-C2)
                 self.assertEqual(hits, {"gmail_write", "gmail_write_policy"})
                 continue
@@ -77,7 +80,9 @@ class ImportBoundaryTests(unittest.TestCase):
     def test_refresh_is_never_started_by_a_command_and_no_production_code_builds_the_adapter_yet(self):
         fake_only = {"archive_message": {("cleanup_executor.py", "_process_item"), ("exec_fake_mailbox.py", "archive_message")},
                      "verify_account": {("cleanup_executor.py", "_process_item"), ("exec_fake_mailbox.py", "verify_account"), ("cleanup_undo.py", "undo_item"),
-                                        ("cleanup_undo.py", "reconcile_undo"), ("cleanup_recovery.py", "recover")}}
+                                        ("cleanup_undo.py", "reconcile_undo"), ("cleanup_recovery.py", "_recover"), ("exec_live_mailbox.py", "verify_account")}}
+        fake_only["archive_message"] |= {("exec_live_mailbox.py", "archive_message")}
+        fake_only["open_archive_adapter"] = {("exec_live_mailbox.py", "open_live_mailbox")}  # reachable only through the disabled switch; nothing calls it
         for attr in ("refresh_write_credentials", "refresh_and_store", "open_archive_adapter", "archive_message", "verify_account"):
             outside = {c for c in self.callers(attr) if c[0] not in WRITE_FILES}
             # the only consumers are the executor's single per-item flow (shared by execute_one and execute_batch) and the fake-only mailbox it accepts (M4C-C2); no production code builds a real adapter
