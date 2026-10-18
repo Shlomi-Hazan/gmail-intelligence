@@ -90,7 +90,7 @@ class DisabledByDefaultTests(LiveBase):
         adapter = gw.ArchiveAdapter(gw._Transport(svc.creds, factory), ACCT)
         with self.assertRaises(live.LiveExecutionDisabled):
             live._wrap(adapter, ACCT, factory)
-        lm = live.LiveMailbox(_adapter=adapter, _account=ACCT, _test_factory=factory)  # built by hand, bypassing the switch
+        lm = live.LiveMailbox(_mint=live._MINT, _adapter=adapter, _account=ACCT, _test_factory=factory)  # built by hand with the private mint, bypassing the switch
         for call in (lambda: cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm), lambda: cl.recover_live(self.index, ACCT, lm)):
             with self.assertRaises(ce.ExecError) as ctx:
                 call()
@@ -121,12 +121,68 @@ class DisabledByDefaultTests(LiveBase):
 
     def test_the_public_constructor_has_no_clock_factory_or_transport_parameter(self):
         self.assertEqual(list(inspect.signature(live.open_live_mailbox).parameters), ["expected_account", "store", "client_path"])
-        self.assertEqual(list(inspect.signature(live.LiveMailbox.__init__).parameters), ["self", "_adapter", "_account", "_test_factory"])
+        self.assertEqual(list(inspect.signature(live.LiveMailbox.__init__).parameters), ["self", "_mint", "_adapter", "_account", "_test_factory"])
         self.assertEqual(list(inspect.signature(cl.execute_live_batch).parameters), ["index", "account", "exec_id", "token", "mailbox"])
         self.assertEqual(list(inspect.signature(cl.recover_live).parameters), ["index", "account", "mailbox"])
         now = live._utcnow()
         self.assertEqual(now.utcoffset(), timedelta(0))
         self.assertLess(abs(datetime.now(timezone.utc) - now), timedelta(seconds=5))
+
+
+class SeamTests(LiveBase):
+    """The private constructor, the test-factory seam and the points where the disabled switch is checked."""
+
+    def adapter_on_fake_wire(self):
+        svc = fm._Service(ACCT, self.fake_state(), ())
+        factory = fm._Factory(svc)
+        return gw.ArchiveAdapter(gw._Transport(svc.creds, factory), ACCT), factory, svc
+
+    def test_an_ordinary_caller_cannot_construct_a_live_mailbox_or_choose_its_wiring(self):
+        self.enable()
+        adapter, factory, svc = self.adapter_on_fake_wire()
+        for kwargs in (dict(_adapter=adapter, _account=ACCT), dict(_adapter=adapter, _account=ACCT, _test_factory=factory), dict(_mint=object(), _adapter=adapter, _account=ACCT)):
+            with self.assertRaises(TypeError):
+                live.LiveMailbox(**kwargs)
+
+    def test_the_test_seam_accepts_only_the_in_memory_fake_wire_never_a_real_connection_factory(self):
+        self.enable()
+        net = TWT.Net(TWT.ok(emailAddress=ACCT))
+        svc_creds = fm._FakeCreds()
+        for factory in (net, gw._default_connection, lambda: None, object()):
+            adapter = gw.ArchiveAdapter(gw._Transport(svc_creds, factory), ACCT)
+            if factory is gw._default_connection:
+                live._wrap(adapter, ACCT)  # the production wiring is accepted
+                continue
+            with self.assertRaises(ValueError):
+                live._wrap(adapter, ACCT, factory)
+            minted = live.LiveMailbox(_mint=live._MINT, _adapter=adapter, _account=ACCT, _test_factory=factory)  # even a hand-minted one is not wired acceptably
+            self.assertFalse(live.live_wiring_ok(minted))
+            ex = self.batch_execution()
+            with self.assertRaises(ce.ExecError) as ctx:
+                cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, minted)
+            self.assertEqual(ctx.exception.code, "MAILBOX_NOT_ALLOWED")
+            self.assertEqual((net.opened, net.log), (0, []))
+            self.setUp()
+            self.enable()
+
+    def test_while_disabled_no_port_method_of_a_live_mailbox_can_reach_the_wire(self):
+        adapter, factory, svc = self.adapter_on_fake_wire()
+        minted = live.LiveMailbox(_mint=live._MINT, _adapter=adapter, _account=ACCT, _test_factory=factory)  # hand-minted while the switch is off
+        for call in (lambda: minted.verify_account(), lambda: minted.message_state(HEX[0]), lambda: minted.thread_state(HEX[0]), lambda: minted.archive_message(HEX[0]),
+                     lambda: minted.observe(HEX[0], context="c" * 32)):
+            with self.assertRaises(live.LiveExecutionDisabled):
+                call()
+        self.assertEqual(svc.log, [])
+
+    def test_only_the_disabled_live_entry_points_pass_the_live_selector(self):
+        users = set()
+        for path in SRC.glob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Call) and any(isinstance(a, ast.Constant) and a.value == "LIVE" for a in list(node.args) + [k.value for k in node.keywords]):
+                    users.add(path.name)
+        self.assertEqual(users, {"cleanup_live.py"})
+        for public in (cx.execute_one, cx.execute_batch, cr.recover):
+            self.assertNotIn("allow", inspect.signature(public).parameters)
 
 
 class TypeIsolationTests(LiveBase):

@@ -17,9 +17,10 @@ Like every in-process guard this is a barrier against mistakes and ordinary call
 """
 from datetime import datetime, timezone
 
-from gmail_intelligence import gmail_write as gw
+from gmail_intelligence import exec_fake_mailbox as fm, gmail_write as gw
 
 LIVE_EXECUTION_ENABLED = False
+_MINT = object()  # module-private: only `_wrap` holds it, so an ordinary caller cannot construct a LiveMailbox directly (and so cannot choose its wiring)
 
 
 class LiveExecutionDisabled(Exception):
@@ -46,7 +47,9 @@ class LiveMailbox:
     def __init_subclass__(cls, **kwargs):
         raise TypeError("LiveMailbox is final")
 
-    def __init__(self, *, _adapter, _account, _test_factory=None):
+    def __init__(self, *, _mint, _adapter, _account, _test_factory=None):
+        if _mint is not _MINT:
+            raise TypeError("a LiveMailbox can only be built by open_live_mailbox")
         for name, value in (("_adapter", _adapter), ("_account", _account), ("_test_factory", _test_factory)):
             object.__setattr__(self, name, value)
 
@@ -68,12 +71,15 @@ class LiveMailbox:
         return self._account
 
     def verify_account(self):
+        _require_enabled()
         return self._adapter.verify_account()
 
     def message_state(self, message_id):
+        _require_enabled()
         return self._adapter.message_state(message_id)
 
     def thread_state(self, thread_id):
+        _require_enabled()
         return self._adapter.thread_state(thread_id)
 
     def archive_message(self, message_id):
@@ -81,17 +87,21 @@ class LiveMailbox:
         return self._adapter.archive_message(message_id)
 
     def observe(self, message_id, *, context):
+        _require_enabled()
         return self._adapter.observe(message_id, context=context)
 
 
 def live_wiring_ok(mailbox):
     """True only if the mailbox still wraps the adapter it was built with: exact adapter and transport types, the adapter's own default HTTPS connection (or, for offline
-    tests only, the one fake factory it was built with), and the expected account. Does not check the enabled switch."""
+    tests only, the in-memory fake wire `exec_fake_mailbox._Factory` it was built with: a factory of any other type is never accepted, so a real connection cannot be
+    substituted through the test seam), and the expected account. Does not check the enabled switch."""
     try:
         adapter = mailbox._adapter
         transport = adapter._t
         factory = transport._factory
         expected_factory = mailbox._test_factory if mailbox._test_factory is not None else gw._default_connection
+        if mailbox._test_factory is not None and type(mailbox._test_factory) is not fm._Factory:
+            return False
         return (type(mailbox) is LiveMailbox and type(adapter) is gw.ArchiveAdapter and type(transport) is gw._Transport and factory is expected_factory
                 and isinstance(mailbox._account, str) and adapter._expected == mailbox._account)
     except AttributeError:
@@ -103,9 +113,9 @@ def _wrap(adapter, expected_account, test_factory=None):
     _require_enabled()
     if type(adapter) is not gw.ArchiveAdapter or not isinstance(expected_account, str) or not expected_account.strip() or adapter._expected != expected_account:
         raise ValueError("a live mailbox needs a genuine archive adapter for the expected account")
-    box = LiveMailbox(_adapter=adapter, _account=expected_account, _test_factory=test_factory)
+    box = LiveMailbox(_mint=_MINT, _adapter=adapter, _account=expected_account, _test_factory=test_factory)
     if not live_wiring_ok(box):
-        raise ValueError("the archive adapter is not wired to the default transport")
+        raise ValueError("the archive adapter is not wired to the default transport (or, in offline tests, the in-memory fake wire)")
     return box
 
 

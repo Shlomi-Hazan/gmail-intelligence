@@ -101,6 +101,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D95 | **One mutation path.** The live entry points reuse the exact per-item flow and recovery of the fake-only executor; the live mailbox adds no behaviour. Time is the process UTC clock; the public constructor takes no clock, factory or transport. |
 | D96 | **Live undo deferred.** `cleanup_undo` stays fake-only; the live mailbox has no undo; the real write policy stays archive-only. |
 | D97 | **Pre-canary checklist.** Write OAuth login and Cloud isolation (M4C-B2), an approved entry point and switch change, a one-message rehearsal in a disposable mailbox, verification of the real Gmail behaviours the fake imitates, recovery rehearsal and backup, final M4 audit. |
+| D98 | **Live seam hardening (review).** A `LiveMailbox` can be built only through `_wrap` (private mint), the test-factory seam accepts only the in-memory fake wire type (never a real connection factory), and every port method, reads included, re-checks the disabled switch. Found by review: the constructor was directly callable with an arbitrary factory, and reads did not check the switch. |
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
 
