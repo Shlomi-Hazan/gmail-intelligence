@@ -213,6 +213,65 @@ class RefusalTests(CanaryBase):
                 self.assertEqual((res.item_state, res.code, res.posts, self.svc.posts()), (expected[0], expected[1], 0, 0))
 
 
+class RaceTests(CanaryBase):
+    """Anything that changes between the first local checks and the durable confirmation must be caught IN the confirmation transaction."""
+
+    def changing_store(self, change):
+        class Store(RecordingStore):
+            def load(inner):
+                change()  # the world changes exactly while the credentials are being opened
+                return super().load()
+        return Store(self.blob())
+
+    def assert_refused_without_confirmation(self, ex, code, phrase=None):
+        with self.assertRaises(ce.ExecError) as ctx:
+            self.canary(ex, phrase=phrase)
+        self.assertEqual(ctx.exception.code, code)
+        self.assertEqual((self.events("CANARY_CONFIRMED"), self.svc.log), ([], []))  # no misleading authorization, no request
+
+    def test_a_lease_that_is_lost_while_credentials_are_opened_records_no_confirmation(self):
+        ex = self.prepare()
+        normal, late = live._utcnow, {"on": False}
+        later = normal() + ce.LEASE_TTL + timedelta(seconds=30)
+
+        def lose_the_lease():
+            late["on"] = True  # time jumps past the lease while the credentials are being opened, and a recovery runs
+            ce.recover_interrupted(self.index, ACCT, now=later)
+        self.store = self.changing_store(lose_the_lease)
+        with mock.patch.object(live, "_utcnow", lambda: later + timedelta(seconds=1) if late["on"] else normal()):
+            self.assert_refused_without_confirmation(ex, "LEASE_LOST")
+        self.assertEqual(self.exec_state(ex["exec_id"]), "FAILED")
+
+    def test_an_execution_that_stops_or_is_taken_over_while_credentials_are_opened_records_no_confirmation(self):
+        ex = self.prepare()
+        self.store = self.changing_store(lambda: ce.stop_execution(self.index, ACCT, ex["exec_id"], self.token, "OWNER_REQUEST", now=live._utcnow()))
+        self.assert_refused_without_confirmation(ex, "LEASE_LOST")
+
+    def test_plan_or_approval_changes_while_credentials_are_opened_record_no_confirmation(self):
+        flag = {}
+        real_integrity, real_q = cp.integrity_problems, self.index._q
+        ex = self.prepare()
+        self.store = self.changing_store(lambda: flag.update(plan=True))
+        with mock.patch.object(cp, "integrity_problems", side_effect=lambda plan: ["PLAN_HASH_MISMATCH"] if flag.get("plan") else real_integrity(plan)):
+            self.assert_refused_without_confirmation(ex, "PLAN_CHANGED")
+        self.setUp()
+        ex = self.prepare()
+        self.store = self.changing_store(lambda: flag.update(approval=True))
+        real_q = self.index._q  # of the NEW index
+        phrase = self.phrase(ex)
+        with mock.patch.object(self.index, "_q", side_effect=lambda sql, *a, **kw: [] if flag.get("approval") and "FROM cleanup_approval" in sql else real_q(sql, *a, **kw)):
+            self.assert_refused_without_confirmation(ex, "APPROVAL_NOT_CONSUMED", phrase)
+
+    def test_two_callers_racing_for_the_confirmation_record_exactly_one(self):
+        ex = self.prepare()
+        second = []
+        self.store = self.changing_store(lambda: second.append(cc.run_canary(self.index, ACCT, ex["exec_id"], self.token, self.phrase(ex),
+                                                                              RecordingStore(self.blob()), self.client_path)) if not second else None)
+        with self.assertRaises(ce.ExecError):
+            self.canary(ex)  # the first caller finds the execution already finished by the second one
+        self.assertEqual((len(self.events("CANARY_CONFIRMED")), self.svc.posts(), second[0].item_state), (1, 1, "APPLIED"))
+
+
 class ExecutionTests(CanaryBase):
     def test_a_confirmed_canary_archives_exactly_one_message_through_the_shared_live_flow(self):
         seen = {}

@@ -106,6 +106,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D100 | **Gate before everything.** While disabled it refuses before touching the index, the credential store, the client file or the network; no environment variable, configuration value or option enables it. |
 | D101 | **Confirmation semantics.** A distinct typed phrase (`CANARY ARCHIVE 1 <execution> <plan hash prefix>`), recorded durably once per execution before any request, wrong phrases recorded and locked out; a credential problem does not consume it. Exactly one target in one slice. |
 | D102 | **Authorization readiness is documentation only.** `docs/CANARY.md` states the Google Cloud configuration, scope, credential separation, identity checks and the owner approvals still required; nothing was done or requested. |
+| D103 | **The canary re-validates inside the confirmation transaction (final check).** The state, lease, plan, approval, lockout and phrase checks run again inside the transaction that records `CANARY_CONFIRMED`, after the credentials were opened. Found by review: a lease lost, an execution stopped or a plan or approval altered in that gap was recorded as a confirmation (consuming the one-per-execution confirmation) although the executor would then refuse. The executor's own checks already prevented any archive. |
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
 
