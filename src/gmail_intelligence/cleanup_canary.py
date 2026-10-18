@@ -46,8 +46,8 @@ def canary_plan_phrase(account, message_id):
 
 
 def describe_candidate(index, account, message_id):
-    """Read-only: how the ordinary rules and the canary exception judge ONE message, as reason codes only (never ids, senders or labels). Disabled in this build."""
-    _require_enabled()
+    """Read-only: how the ordinary rules and the canary exception judge ONE message, as reason codes only (never ids, senders or labels). Local preparation only: it
+    touches the index and nothing else, so it does not need the live switch."""
     if not cp.valid_id(message_id):
         raise cp.PlanError("BAD_INPUT", "a message id may only contain letters, digits, '-' and '_' (max 64 characters)")
     now_ms = cp._ms(live._utcnow())
@@ -69,8 +69,8 @@ def create_canary_plan(index, account, message_id, confirmation):
     The exception waives only the age rule and the classification-type rules (`cleanup_candidates.CANARY_WAIVED`) for that one message. Everything else still applies and
     the message must come out ELIGIBLE under it: in particular SENT (a message sent from this very account), protected labels, user protection rules, unread, important,
     not-in-inbox, mixed threads and missing or stale classification still refuse it, and nothing is trimmed or widened. The plan then goes through the ordinary review,
-    approval, reservation and execution safeguards. Disabled in this build."""
-    _require_enabled()
+    approval, reservation and execution safeguards. Local preparation only (the index, no Gmail, no credentials, no mutation of any mailbox): creating the plan does not need
+    the live switch, because nothing can be executed live without it; it needs the owner's typed phrase."""
     if not isinstance(message_id, str) or not cp.valid_id(message_id):
         raise cp.PlanError("BAD_INPUT", "give exactly one valid message id (letters, digits, '-' and '_', max 64 characters)")
     if (confirmation or "").strip() != canary_plan_phrase(account, message_id):

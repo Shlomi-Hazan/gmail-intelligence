@@ -63,16 +63,20 @@ address) to the primary one, open and read it once (unread is also refused), and
 **Live execution is only this canary.** `cleanup_live.execute_live_batch` refuses every caller except `run_canary` (a private permit), any execution that is not exactly one target in one
 slice, and any execution without the owner's recorded `CANARY_CONFIRMED`. Recovery stays read-only (fresh observations, no mutation). There is no second archive implementation.
 
-**Owner-operated entry point (disabled).** `python -m gmail_intelligence.cleanup_canary_cli` (`describe`, `plan`, `run`), separate from the ordinary CLI. While
-`LIVE_EXECUTION_ENABLED` is `False` it refuses as its first statement (no parsing, index, credential or network). It takes the account explicitly, prints only counts and codes, and has no
-environment or configuration path.
+**Owner-operated entry point.** `python -m gmail_intelligence.cleanup_canary_cli` (`describe`, `plan`, `run`), separate from the ordinary CLI. Preparation and execution are
+separated: `describe` and `plan` are LOCAL (the index only: no Gmail, no OAuth, no Keychain, no network, no mailbox change) and work while `LIVE_EXECUTION_ENABLED` is `False`, because
+nothing can be executed without the switch; `plan` still needs the typed phrase and the plan still needs the ordinary review and approval. `run` is execution: while the switch is `False` it
+refuses right after the arguments are parsed, before the index, a reservation or any credential store. The account is always explicit, only counts and codes are printed, and there is no
+environment or configuration path. (Opening the real index with this build upgrades a v4 index to v5 after an automatic verified backup, like every other command; back it up first.)
 
 **Eventual sequence (each step needs the owner's separate approval; none is done):**
-1. A short-lived reviewed commit sets `LIVE_EXECUTION_ENABLED = True`; back up the index first (see the backup procedure in the preflight notes); after the run a second commit sets it back to `False`.
-2. `mailbox scan --limit 50`, then `classify run` (ordinary read-only commands).
+Steps 1-5 are local and need NO live switch; only step 7 does.
+1. Back up the index (it is also upgraded v4 to v5 on first open, after an automatic verified backup).
+2. `mailbox scan --limit 50`, then `classify run` (ordinary read-only commands; the first one talks to Gmail read-only).
 3. `python -m gmail_intelligence.cleanup_canary_cli describe --account EMAIL --message-id ID` (must show `canary: ELIGIBLE...` and `SENT protection: not triggered`).
 4. `python -m gmail_intelligence.cleanup_canary_cli plan --account EMAIL --message-id ID` (type the printed phrase).
 5. `cleanup plan review PLAN_ID`, then `cleanup approve PLAN_ID` (ordinary commands).
-6. `auth login-write --expect-account EMAIL` shortly before, then `auth status-write` (the access token needs at least ten minutes of life; nothing refreshes it).
-7. `python -m gmail_intelligence.cleanup_canary_cli run --account EMAIL --plan-id PLAN_ID` (type the execution phrase, then the canary phrase).
+6. A short-lived reviewed commit sets `LIVE_EXECUTION_ENABLED = True` (and a second one reverts it after the run).
+7. `auth login-write --expect-account EMAIL` shortly before, then `auth status-write` (the access token needs at least ten minutes of life; nothing refreshes it); then
+   `python -m gmail_intelligence.cleanup_canary_cli run --account EMAIL --plan-id PLAN_ID` (type the execution phrase, then the canary phrase).
 8. Verify (`cleanup exec show`, `cleanup audit verify`, and the mailbox itself), then revert the switch and decide whether to `auth logout-write` / `auth revoke-write`.

@@ -1,12 +1,16 @@
 """Owner-operated entry point for the single-message canary (M4): DISABLED, separate from the ordinary command line, never exercised against Gmail.
 
 Run as `python -m gmail_intelligence.cleanup_canary_cli <describe|plan|run> ...`. It is NOT reachable through `gmail-intelligence cleanup execute` (which stays disabled) and the
-ordinary CLI never imports it. While `exec_live_mailbox.LIVE_EXECUTION_ENABLED` is False (this build) `main` refuses as its very first statement: it parses nothing, opens no
-index, reads no credential and uses no network. No environment variable, configuration value or option enables it; it only adds typed-phrase prompts on top of the library:
+ordinary CLI never imports it. Preparation and execution are separated:
 
-  describe  read-only: how the ordinary rules and the canary exception judge ONE message (reason codes only, never ids, senders or labels)
-  plan      creates the one-message canary plan after a typed phrase; review and approval then use the ordinary `cleanup plan review` and `cleanup approve` commands
-  run       reserves the approved plan (typed execution phrase), starts it, and calls `run_canary` (typed canary phrase)
+  describe  LOCAL and read-only: how the ordinary rules and the canary exception judge ONE message (reason codes only, never ids, senders or labels)
+  plan      LOCAL: creates the one-message canary plan after a typed phrase; review and approval then use the ordinary `cleanup plan review` and `cleanup approve` commands
+  run       EXECUTION: reserves the approved plan (typed execution phrase), starts it, and calls `run_canary` (typed canary phrase)
+
+`describe` and `plan` use the local index only: no Gmail call, no OAuth, no Keychain, no network and no mailbox mutation, so they work while live execution is disabled (they
+change nothing that can be executed without the switch). `run` is disabled while `exec_live_mailbox.LIVE_EXECUTION_ENABLED` is False (this build): it refuses right after the
+arguments are parsed (pure string handling), BEFORE the index is opened, an execution is reserved or any credential store is created. No environment variable, configuration value or
+option enables it.
 
 The account is always given explicitly (nothing is looked up in the Keychain to choose it). Everything it prints is counts and codes.
 """
@@ -28,9 +32,6 @@ def _typed(input_fn, out, what, expected):
 
 
 def main(argv=None, *, input_fn=input, out=print, store_factory=None):
-    if live.LIVE_EXECUTION_ENABLED is not True:  # the very first statement
-        out("The single-message canary is disabled in this build; nothing was read or changed.")
-        return 2
     parser = argparse.ArgumentParser(prog="cleanup_canary_cli", description="owner-operated single-message canary (see the module docstring)")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("describe", "plan"):
@@ -41,6 +42,9 @@ def main(argv=None, *, input_fn=input, out=print, store_factory=None):
     q.add_argument("--account", required=True, metavar="EMAIL")
     q.add_argument("--plan-id", required=True, metavar="PLAN_ID")
     args = parser.parse_args(argv)
+    if args.command == "run" and live.LIVE_EXECUTION_ENABLED is not True:  # execution is disabled: refuse before the index, a reservation or any credential store
+        out("Live execution of the single-message canary is disabled in this build; nothing was read or changed.")
+        return 2
     try:
         with idx.Index(create=False) as index:
             if args.command == "describe":

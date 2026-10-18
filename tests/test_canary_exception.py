@@ -76,18 +76,89 @@ class ExceptionBase(TC.CanaryBase):
 
 
 class DisabledTests(ExceptionBase):
-    def test_the_exception_and_the_entry_point_are_unavailable_while_the_switch_is_off(self):
+    def clock_only(self):
+        """A controlled clock, and NOTHING else: the live switch stays off, no wire, no credentials."""
+        self.clk = self.step_clock = TC.TL.LazyStepClock(self)
+        for target, name in ((live, "_utcnow"), (gw, "_utcnow")):
+            patcher = mock.patch.object(target, name, self.clk)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def forbid_everything_live(self):
+        """Any attempt to reach credentials, OAuth, the network or the archive path fails the test."""
+        boom = AssertionError("a live resource was reached while preparing locally")
+        from gmail_intelligence import keystore_write, oauth_write
+        for target, name in ((keystore_write, "WriteTokenStore"), (gw, "_default_connection"), (gw, "open_archive_adapter"), (oauth_write, "refresh_write_credentials"),
+                             (live, "open_live_mailbox"), (cc, "run_canary")):
+            patcher = mock.patch.object(target, name, side_effect=boom)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_cli(self, argv, typed=()):
+        said, inputs = [], list(typed)
+        code = cli.main(argv, input_fn=lambda _: inputs.pop(0), out=said.append, store_factory=lambda: self.fail("a credential store was created"))
+        return code, "\n".join(said)
+
+    def test_run_is_refused_while_disabled_before_the_index_a_reservation_or_any_credential_store(self):
         self.assertIs(live.LIVE_EXECUTION_ENABLED, False)
-        for call in (lambda: cc.describe_candidate(TC.BombIndex(), ACCT, CM), lambda: cc.create_canary_plan(TC.BombIndex(), ACCT, CM, cc.canary_plan_phrase(ACCT, CM))):
-            with self.assertRaises(ce.ExecError) as ctx:
-                call()
-            self.assertEqual(ctx.exception.code, "LIVE_DISABLED")
-        said = []
-        with mock.patch.object(idx, "Index", side_effect=AssertionError("the index was opened")), mock.patch.object(sys, "argv", ["x", "run"]):
-            self.assertEqual(cli.main(["run", "--account", ACCT, "--plan-id", "plan-1"], input_fn=lambda _: self.fail("prompted"), out=said.append), 2)
-            self.assertEqual(cli.main(["not", "even", "valid", "arguments"], out=said.append), 2)  # not even parsed
-        self.assertEqual(len(said), 2)
+        with mock.patch.object(idx, "Index", side_effect=AssertionError("the index was opened")), mock.patch.object(ce, "reserve_execution", side_effect=AssertionError("reserved")), \
+                mock.patch.object(ce, "start_slice", side_effect=AssertionError("started")):
+            code, text = self.run_cli(["run", "--account", ACCT, "--plan-id", "plan-1"])
+        self.assertEqual(code, 2)
+        self.assertIn("disabled", text)
+        self.assertEqual((self.count("cleanup_plan"), self.count("cleanup_execution")), (0, 0))
+        with self.assertRaises(ce.ExecError) as ctx:  # the library entry point refuses first as well
+            cc.run_canary(TC.BombIndex(), ACCT, "exec-00000000", "t" * 40, "x", TC.RecordingStore(self.blob()), self.tmp / "none.json")
+        self.assertEqual(ctx.exception.code, "LIVE_DISABLED")
+        with self.assertRaises(SystemExit):  # arguments are validated first (pure string handling), then nothing runs
+            with mock.patch("sys.stderr"):
+                cli.main(["not", "valid"], out=lambda _: None)
+
+    def test_describe_and_plan_work_while_live_execution_is_disabled_and_touch_nothing_live(self):
+        self.assertIs(live.LIVE_EXECUTION_ENABLED, False)
+        self.clock_only()
+        self.forbid_everything_live()
+        code, text = self.run_cli(["describe", "--account", ACCT, "--message-id", CM])
+        self.assertEqual(code, 0)
+        self.assertIn("canary: ELIGIBLE_FOR_ARCHIVE_RECOMMENDATION", text)
+        code, text = self.run_cli(["plan", "--account", ACCT, "--message-id", CM], ["wrong"])
+        self.assertEqual((code, self.count("cleanup_plan")), (1, 0))  # the typed phrase is still required
+        code, text = self.run_cli(["plan", "--account", ACCT, "--message-id", CM], [cc.canary_plan_phrase(ACCT, CM)])
+        self.assertEqual((code, self.count("cleanup_plan")), (0, 1))
+        plan = cp.get_plan(self.index, ACCT, self.index._q("SELECT plan_id FROM cleanup_plan")[0][0])
+        self.assertIs(cp.snapshot_of(plan)["policy"]["canary_exception"], True)
+        self.t = max(self.t, self.clk.at)  # review and approval use the ordinary commands and keep every approval requirement
+        plan = cp.mark_reviewed(self.index, ACCT, plan["plan_id"], cp.review_phrase(plan), now=self.tick())
+        with self.assertRaises(cp.PlanError):
+            cp.approve(self.index, ACCT, plan["plan_id"], "wrong phrase", now=self.tick())
+        cp.approve(self.index, ACCT, plan["plan_id"], cp.approval_phrase(plan), now=self.tick())
+        self.assertEqual(cp.get_plan(self.index, ACCT, plan["plan_id"])["state"], "APPROVED")
+        self.assertEqual(self.count("cleanup_execution"), 0)  # preparing never reserves or executes anything
+        # and the prepared plan still cannot run live while the switch is off
+        code, text = self.run_cli(["run", "--account", ACCT, "--plan-id", plan["plan_id"]])
+        self.assertEqual((code, self.count("cleanup_execution")), (2, 0))
+
+    def test_preparation_keeps_every_protection_while_disabled(self):
+        self.canary_labels = ("INBOX", "SENT")
+        self.setUp()
+        self.clock_only()
+        self.forbid_everything_live()
+        code, text = self.run_cli(["describe", "--account", ACCT, "--message-id", CM])
+        self.assertIn("SENT", text)
+        self.assertIn("will NOT apply", text)
+        with self.assertRaises(cp.PlanError) as ctx:
+            cc.create_canary_plan(self.index, ACCT, CM, cc.canary_plan_phrase(ACCT, CM))
+        self.assertEqual(ctx.exception.code, "CANARY_SELF_SENT")
         self.assertEqual(self.count("cleanup_plan"), 0)
+        self.canary_labels = ONLY
+
+    def test_the_entry_point_itself_makes_no_gmail_call_and_no_archive_of_its_own(self):
+        tree = ast.parse((SRC / "cleanup_canary_cli.py").read_text())
+        called = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        for forbidden in ("archive_message", "verify_account", "message_state", "thread_state", "observe", "open_archive_adapter", "open_live_mailbox", "execute_live_batch",
+                          "record_intent", "record_outcome", "restore_inbox", "refresh_write_credentials"):
+            self.assertNotIn(forbidden, called)
+        self.assertIn("run_canary", called)  # the only way it reaches a live mailbox
 
     def test_nothing_in_the_canary_code_reads_the_environment_or_enables_the_switch(self):
         for name in ("cleanup_canary.py", "cleanup_canary_cli.py"):
