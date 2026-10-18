@@ -129,9 +129,11 @@ def _facts(index, account, ids):
     return out
 
 
-def _policy(min_age_days):
-    return {"cleanup_policy": cc.POLICY_VERSION, "min_age_days": min_age_days, "approved_types": sorted(cc.APPROVED_TYPES),
-            "plan_format": FORMAT_VERSION}
+def _policy(min_age_days, canary=False):
+    policy = {"cleanup_policy": cc.POLICY_VERSION, "min_age_days": min_age_days, "approved_types": sorted(cc.APPROVED_TYPES), "plan_format": FORMAT_VERSION}
+    if canary:  # a canary plan only: its single message is exempt from the age and classification-type rules (see cleanup_candidates.CANARY_WAIVED). Ordinary plans are byte-for-byte unchanged.
+        policy["canary_exception"] = True
+    return policy
 
 
 def _anchor(index, account):
@@ -140,10 +142,10 @@ def _anchor(index, account):
     return {"completeness": state, "last_full_scan": scans[0]["finished_at"] if scans else None}
 
 
-def _snapshot(plan_id, version, parent, account, created, expires, min_age_days, ruleset, protection, anchor, items):
+def _snapshot(plan_id, version, parent, account, created, expires, min_age_days, ruleset, protection, anchor, items, canary=False):
     return {"format": FORMAT_VERSION, "plan_id": plan_id, "version": version,
             "parent": parent, "account": account, "action": ACTION, "created_at": created, "expires_at": expires,
-            "policy": _policy(min_age_days), "classification_ruleset": ruleset, "protection_digest": protection,
+            "policy": _policy(min_age_days, canary), "classification_ruleset": ruleset, "protection_digest": protection,
             "index": anchor, "items": sorted(items, key=lambda i: i["id"])}
 
 
@@ -183,6 +185,8 @@ def integrity_problems(plan):
         problems.append("COLUMN_MISMATCH")
     if len(snap.get("items", [])) != plan["item_count"]:
         problems.append("COLUMN_MISMATCH")
+    if "canary_exception" in snap["policy"] and (snap["policy"]["canary_exception"] is not True or len(snap["items"]) != 1 or snap["version"] != 1):
+        problems.append("CANARY_SHAPE")  # the exception exists only on a first-version plan of exactly ONE message
     table = {i["message_id"]: (i["thread_id"], i["item_digest"]) for i in plan["items"]}
     want = {i["id"]: (i["thread_id"], sha256(canonical(i))) for i in snap.get("items", [])}
     if table != want:
@@ -235,7 +239,8 @@ def revalidate(index, account, plan, now=None, _out=None, only_ids=None):
     if now < _parse(plan["created_at"]) - CLOCK_TOLERANCE:
         bad("PLAN_FROM_THE_FUTURE")
     min_age = snap["policy"]["min_age_days"]
-    if snap["policy"] != _policy(min_age):
+    canary = snap["policy"].get("canary_exception") is True
+    if snap["policy"] != _policy(min_age, canary):
         bad("POLICY_CHANGED")
     if snap["classification_ruleset"] != classifier.current_hash(index, account):
         bad("CLASSIFICATION_RULES_CHANGED")
@@ -249,7 +254,8 @@ def revalidate(index, account, plan, now=None, _out=None, only_ids=None):
     wanted = None if only_ids is None else set(only_ids)  # continuation checks only the not-yet-executed targets
     ids = [i["id"] for i in snap["items"] if wanted is None or i["id"] in wanted]
     facts = _facts(index, account, ids)
-    res = cc.evaluate_all(index, account, now_ms=_ms(now), min_age_days=min_age)
+    res = cc.evaluate_all(index, account, now_ms=_ms(now), min_age_days=min_age,
+                          canary_ids=frozenset(i["id"] for i in snap["items"]) if canary and len(snap["items"]) == 1 else frozenset())
     decisions = {d.message_id: d for d in res.decisions}
     if _out is not None:
         _out["decisions"] = decisions
@@ -314,11 +320,13 @@ def expire_due(index, account, now=None):
     return len(due)
 
 
-def _insert_plan(index, account, ids, min_age_days, now, parent=None):
+def _insert_plan(index, account, ids, min_age_days, now, parent=None, canary=False):
     """Validate and insert a new DRAFT plan inside the caller's transaction. Returns the plan id."""
     at = _iso(now)
     ids = sorted(set(ids))
-    res = cc.evaluate_all(index, account, now_ms=_ms(now), min_age_days=min_age_days)
+    if canary and (len(ids) != 1 or parent is not None):
+        raise PlanError("BAD_INPUT", "a canary exception covers exactly one message and is never revised")
+    res = cc.evaluate_all(index, account, now_ms=_ms(now), min_age_days=min_age_days, canary_ids=frozenset(ids) if canary else frozenset())
     decisions = {d.message_id: d for d in res.decisions}
     unknown = [i for i in ids if i not in decisions]
     if unknown:
@@ -342,7 +350,7 @@ def _insert_plan(index, account, ids, min_age_days, now, parent=None):
     version = 1 if parent is None else parent["version"] + 1
     snap = _snapshot(plan_id, version, None if parent is None else {"plan_id": parent["plan_id"], "hash": parent["plan_hash"]},
                      account, at, _iso(now + PLAN_TTL), min_age_days, classifier.current_hash(index, account),
-                     cleanup_protect.digest(account, cleanup_protect.active(index, account)), _anchor(index, account), items)
+                     cleanup_protect.digest(account, cleanup_protect.active(index, account)), _anchor(index, account), items, canary)
     if snap["index"]["completeness"] != "complete":
         raise PlanError("INDEX_NOT_COMPLETE", "the local index is not complete (no finished full scan); nothing was created")
     text = canonical(snap)
@@ -355,7 +363,7 @@ def _insert_plan(index, account, ids, min_age_days, now, parent=None):
                            [(account, plan_id, i["id"], i["thread_id"], sha256(canonical(i))) for i in items])
     audit.append(index, account, plan_id, "PLAN_CREATED", at,
                  {"action": ACTION, "items": len(items), "plan_hash": plan_hash, "version": version,
-                  "parent": None if parent is None else parent["plan_id"]})
+                  "parent": None if parent is None else parent["plan_id"], **({"canary_exception": 1} if canary else {})})
     return plan_id
 
 

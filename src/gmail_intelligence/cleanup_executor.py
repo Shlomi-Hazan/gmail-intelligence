@@ -256,7 +256,7 @@ def execute_batch(index, account, exec_id, token, mailbox):
     return _execute_batch(index, account, exec_id, token, mailbox, "FAKE")
 
 
-def _execute_batch(index, account, exec_id, token, mailbox, allow):
+def _execute_batch(index, account, exec_id, token, mailbox, allow, canary_ok=False):
     """Run the ACTIVE slice of a started multi-item execution item by item, in the plan's fixed (seq) order, and finish the slice through the state machine.
 
     Every item goes through `_process_item`, i.e. the same account check, local revalidation, live message and thread reads, durable intent, single POST and
@@ -268,6 +268,14 @@ def _execute_batch(index, account, exec_id, token, mailbox, allow):
     ex = ce.get_execution(index, account, exec_id)
     if ex["state"] != "EXECUTING":
         raise ce.ExecError("BAD_STATE", f"execution is {ex['state']}; the executor needs an EXECUTING execution")
+    if allow == "LIVE":  # live execution is ONLY the approved single-message canary, entered through run_canary
+        if not canary_ok:
+            raise ce.ExecError("CANARY_ONLY", "live execution is only available through the single-message canary entry point; nothing was changed")
+        if ex["item_count"] != 1 or ex["slice_count"] != 1:
+            raise ce.ExecError("NOT_A_CANARY", "live execution handles exactly one target in one slice; nothing was changed")
+        if not any(json.loads(r["meta"]).get("exec") == exec_id for r in index._q(
+                "SELECT meta FROM cleanup_audit WHERE account=? AND event_type='CANARY_CONFIRMED'", account)):
+            raise ce.ExecError("CANARY_NOT_CONFIRMED", "the owner's canary confirmation is not recorded for this execution; nothing was changed")
     active = [s["slice_no"] for s in ce.slices(index, account, exec_id) if s["state"] == "ACTIVE"]
     if len(active) != 1:
         raise ce.ExecError("INVARIANT_BROKEN", "the execution has no single active slice; nothing was changed")

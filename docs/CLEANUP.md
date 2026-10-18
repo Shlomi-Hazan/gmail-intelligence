@@ -295,6 +295,11 @@ single-target single-slice `ARCHIVE` execution under the caller's lease and the 
 `CANARY_CONFIRMED`; wrong phrases are `CANARY_REJECTED` and locked out), opens the write credentials locally, and hands the rest to `execute_live_batch` (no second archive path).
 No CLI, environment-variable or configuration path exists. Details, the authorization readiness and the owner approvals still needed: [CANARY.md](CANARY.md). Live undo is deferred.
 
+**Canary exception and live restriction (disabled).** A one-message plan can carry a narrow, hashed `canary_exception` (waiving only the age and classification-type rules for that message; `SENT`,
+protections, unread, important, user labels, mixed threads, missing classification and every executor check still apply); the ordinary policy and commands are unchanged. Live execution is
+only the single approved canary: `execute_live_batch` refuses every caller but `run_canary`, anything but one target in one slice, and anything without the recorded canary confirmation.
+Owner entry point: `cleanup_canary_cli`: `describe` and `plan` are local preparation (no Gmail, credentials or network) and work while the switch is off; `run` is disabled with the switch. See [CANARY.md](CANARY.md) section 5.
+
 **Still required before any live canary (none of it is done or authorized here):** a separately approved write OAuth login and Google Cloud isolation checklist (M4C-B2); a separately
 approved, reviewed entry point and source change enabling the switch; a rehearsal against a single message of a disposable test mailbox with the owner present; verification of the real
 Gmail behaviour the fake only imitates (thread read completeness and paging for long threads, the exact not-found and error documents, label omission, quota and the 500-request

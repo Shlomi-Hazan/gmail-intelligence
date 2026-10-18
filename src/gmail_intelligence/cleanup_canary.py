@@ -17,7 +17,7 @@ Undo is not part of the canary (deferred). Like every in-process guard this stop
 import json
 from dataclasses import dataclass
 
-from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, cleanup_live as cl, cleanup_plans as cp, exec_live_mailbox as live
+from gmail_intelligence import cleanup_audit as audit, cleanup_candidates as cc, cleanup_exec as ce, cleanup_live as cl, cleanup_plans as cp, exec_live_mailbox as live
 from gmail_intelligence.cleanup_audit import sha256
 
 
@@ -32,6 +32,59 @@ class CanaryResult:
 def canary_phrase(plan, exec_id):
     """What the owner must type to confirm the live canary of ONE message. A different prefix and shape from the approval, execution and undo phrases."""
     return f"CANARY ARCHIVE 1 {exec_id} {cp.short(plan['plan_hash'])}"
+
+
+def _require_enabled():
+    if live.LIVE_EXECUTION_ENABLED is not True:  # nothing below is reachable while the switch is off
+        raise ce.ExecError("LIVE_DISABLED", "live Gmail execution is disabled in this build; nothing was read or changed")
+
+
+def canary_plan_phrase(account, message_id):
+    """What the owner must type to request the canary EXCEPTION for ONE message. It is derived from the account and the message id, so it only has meaning for that
+    message, and it differs from every other phrase. (A deliberate confirmation, not a secret.)"""
+    return "CANARY PLAN " + sha256(account.strip().lower() + "|" + message_id)[:12]
+
+
+def describe_candidate(index, account, message_id):
+    """Read-only: how the ordinary rules and the canary exception judge ONE message, as reason codes only (never ids, senders or labels). Local preparation only: it
+    touches the index and nothing else, so it does not need the live switch."""
+    if not cp.valid_id(message_id):
+        raise cp.PlanError("BAD_INPUT", "a message id may only contain letters, digits, '-' and '_' (max 64 characters)")
+    now_ms = cp._ms(live._utcnow())
+    out = {}
+    for name, ids in (("ordinary", frozenset()), ("canary", frozenset({message_id}))):
+        decisions = {d.message_id: d for d in cc.evaluate_all(index, account, now_ms=now_ms, canary_ids=ids).decisions}
+        if message_id not in decisions:
+            raise cp.PlanError("UNKNOWN_IDS", "that message id is not in this account's local index")
+        d = decisions[message_id]
+        out[name] = {"outcome": d.outcome, "reasons": d.codes}
+    out["self_sent"] = "SENT" in out["canary"]["reasons"]
+    out["phrase"] = canary_plan_phrase(account, message_id)
+    return out
+
+
+def create_canary_plan(index, account, message_id, confirmation):
+    """Create a DRAFT plan for exactly ONE explicitly named message under the canary exception, after the owner's separate typed confirmation.
+
+    The exception waives only the age rule and the classification-type rules (`cleanup_candidates.CANARY_WAIVED`) for that one message. Everything else still applies and
+    the message must come out ELIGIBLE under it: in particular SENT (a message sent from this very account), protected labels, user protection rules, unread, important,
+    not-in-inbox, mixed threads and missing or stale classification still refuse it, and nothing is trimmed or widened. The plan then goes through the ordinary review,
+    approval, reservation and execution safeguards. Local preparation only (the index, no Gmail, no credentials, no mutation of any mailbox): creating the plan does not need
+    the live switch, because nothing can be executed live without it; it needs the owner's typed phrase."""
+    if not isinstance(message_id, str) or not cp.valid_id(message_id):
+        raise cp.PlanError("BAD_INPUT", "give exactly one valid message id (letters, digits, '-' and '_', max 64 characters)")
+    if (confirmation or "").strip() != canary_plan_phrase(account, message_id):
+        raise cp.PlanError("BAD_CONFIRMATION", "canary plan confirmation did not match; nothing was created")
+    now = live._utcnow()
+    cp.expire_due(index, account, now)
+    with cp._txn(index):
+        cp._check_clock(index, account, now)
+        verdict = describe_candidate(index, account, message_id)
+        if verdict["self_sent"]:
+            raise cp.PlanError("CANARY_SELF_SENT", "this message carries the SENT label (it was sent from this account); the SENT protection is never bypassed. "
+                               "Send the test message from a DIFFERENT account")
+        plan_id = cp._insert_plan(index, account, [message_id], cc.MIN_AGE_DAYS, now, canary=True)
+    return cp.get_plan(index, account, plan_id)
 
 
 def _confirmations(index, account, exec_id):
@@ -71,8 +124,7 @@ def _local_checks(index, account, exec_id, token, confirmation, now):
 
 def run_canary(index, account, exec_id, token, confirmation, store, client_path):
     """Archive the ONE approved message of a started single-target execution through the live boundary. See the module docstring. Disabled in this build."""
-    if live.LIVE_EXECUTION_ENABLED is not True:  # the very first statement: nothing below is reachable while the switch is off
-        raise ce.ExecError("LIVE_DISABLED", "live Gmail execution is disabled in this build; nothing was read or changed")
+    _require_enabled()  # the very first statement: nothing below is reachable while the switch is off
     now = live._utcnow()
     err, plan_id = None, None
     try:
@@ -90,6 +142,6 @@ def run_canary(index, account, exec_id, token, confirmation, store, client_path)
     with cp._txn(index):  # the confirmation is recorded durably, once, before anything is requested, after re-validating EVERYTHING in the same transaction
         _local_checks(index, account, exec_id, token, confirmation, now)
         audit.append(index, account, plan_id, "CANARY_CONFIRMED", cp._iso(now), {"exec": exec_id, "phrase_sha256": sha256(confirmation.strip() + exec_id)})
-    res = cl.execute_live_batch(index, account, exec_id, token, mailbox)
+    res = cl.execute_live_batch(index, account, exec_id, token, mailbox, _permit=live._CANARY_PERMIT)
     (_, item), = res.items
     return CanaryResult(item.item_state, item.code, res.execution_state, res.posts)
