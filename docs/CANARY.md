@@ -1,7 +1,8 @@
 # Live canary readiness (M4)
 
-**Status: prepared offline; live access and execution are NOT approved.** Nothing in this document has been done: no Google Cloud change, no OAuth consent, no Keychain item, no
-Gmail request. `LIVE_EXECUTION_ENABLED` is `False` and nothing changes it. A canary archives **one** message the owner chose, once.
+**Status: the canary was executed ONCE under the owner's explicit approval and succeeded (evidence summary in [M4-CLOSEOUT.md](M4-CLOSEOUT.md)); live execution is NOT approved for
+anything further.** `LIVE_EXECUTION_ENABLED` is `False` in the repository and nothing changes it. The procedure below is kept as the required process for any future live use, which needs a
+new written owner approval. A canary archives **one** message the owner chose, once.
 
 ## 1. The entry point (code, disabled)
 `cleanup_canary.run_canary(index, account, exec_id, token, confirmation, store, client_path)` is a library function, not a command. It is not reachable from the CLI (`cleanup execute`

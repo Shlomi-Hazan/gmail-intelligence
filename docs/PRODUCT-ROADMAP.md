@@ -178,8 +178,9 @@ API or model, no paid dependency, free-tier terms of any external service checke
 
 Numbering is kept for continuity; it is not the recommended build order.
 
-1. **Complete M4, which holds the only mutation path, under its own approvals.** Status: M4A, M4B, M4C-A and M4C-B1 are merged. The M4C-C design is
-   complete, but its implementation has **not** been approved or started. M4C-B2 (client configuration) and M4C-B3 (real authorization) each need separate
+1. **Complete M4, which holds the only mutation path, under its own approvals.** Status (updated at closeout): M4 is complete in its owner-approved reduced scope (see
+   [M4-CLOSEOUT.md](M4-CLOSEOUT.md)); real Gmail undo is deferred. The historical status text that follows predates it. M4A, M4B, M4C-A and M4C-B1 were merged first. The M4C-C design was
+   complete, but its implementation had **not** yet been approved or started. M4C-B2 (client configuration) and M4C-B3 (real authorization) each need separate
    authorization. M4C-D (live canary) and M4D (recovery and undo) are future work. Giving M4 this engineering priority does not give permission to begin
    any of these stages, and this roadmap grants no authority to implement M4C or to access real Gmail.
 2. **M7 early:** every later milestone depends on a fresh index; design the plan-anchor interaction first.
