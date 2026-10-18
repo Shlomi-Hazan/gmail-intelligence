@@ -278,7 +278,7 @@ finishes the slice through `end_slice`: the next slice needs the owner's typed c
 (possibly dispatched items become `UNKNOWN`, untouched ones `NEVER_ATTEMPTED`); the batch never resumes anything. Results carry sequence numbers, never message ids.
 **Several approved items in one thread.** A sibling that this execution already archived (recorded `APPLIED` with checked evidence) legitimately differs from the indexed labels, so it must now be in exactly its recorded archived state (its indexed labels minus `INBOX`); every other sibling must still equal its indexed labels, membership must be unchanged, and no sibling, archived or not, may carry a protected label. Any other difference is still `THREAD_CHANGED`. The current target keeps its exact preflight checks.
 
-**Real-execution boundary (disabled; offline-tested only).** `exec_live_mailbox.LiveMailbox` is a final, immutable port over a genuine `ArchiveAdapter` (archive-only request policy) that
+**Real-execution boundary (disabled; tested offline, and exercised live once for the owner-approved canary, see M4-CLOSEOUT.md).** `exec_live_mailbox.LiveMailbox` is a final, immutable port over a genuine `ArchiveAdapter` (archive-only request policy) that
 exposes exactly what the executor already uses (`clock`, `account`, `verify_account`, `message_state`, `thread_state`, `archive_message`, `observe`) and nothing else: no undo, no delete, no
 Trash, no send, no label creation. `cleanup_live.execute_live_batch` and `recover_live` are the only functions that accept it; they run the very same per-item flow and recovery as the
 fake-only API (approval and plan integrity, lease, account verification, local revalidation, live message and whole-thread checks, durable intent before each POST, at most one POST per
@@ -300,7 +300,7 @@ protections, unread, important, user labels, mixed threads, missing classificati
 only the single approved canary: `execute_live_batch` refuses every caller but `run_canary`, anything but one target in one slice, and anything without the recorded canary confirmation.
 Owner entry point: `cleanup_canary_cli`: `describe` and `plan` are local preparation (no Gmail, credentials or network) and work while the switch is off; `run` is disabled with the switch. See [CANARY.md](CANARY.md) section 5.
 
-**Still required before any live canary (none of it is done or authorized here):** a separately approved write OAuth login and Google Cloud isolation checklist (M4C-B2); a separately
+**Historical checklist (written before the canary; the single owner-approved canary has since been executed, see [M4-CLOSEOUT.md](M4-CLOSEOUT.md), and live execution is disabled again; every item is required again before any future live operation, which needs fresh owner approval):** a separately approved write OAuth login and Google Cloud isolation checklist (M4C-B2); a separately
 approved, reviewed entry point and source change enabling the switch; a rehearsal against a single message of a disposable test mailbox with the owner present; verification of the real
 Gmail behaviour the fake only imitates (thread read completeness and paging for long threads, the exact not-found and error documents, label omission, quota and the 500-request
 transport budget per adapter); a recovery rehearsal and an index backup; and the final M4 security audit.
