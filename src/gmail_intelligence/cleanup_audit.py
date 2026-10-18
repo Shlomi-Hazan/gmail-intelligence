@@ -18,7 +18,9 @@ EVENTS = ("PLAN_CREATED", "PLAN_REVIEWED", "REVIEW_REJECTED", "PLAN_APPROVED", "
           "EXECUTION_RESERVED", "RESERVATION_REJECTED", "SLICE_CONFIRMED", "EXECUTION_TRANSITION", "SLICE_TRANSITION",
           "ITEM_TRANSITION", "EXECUTION_INTERRUPTED",
           # M4D: owner-approved undo of an archived item (the audit chain is the undo ledger: it never rewrites the original execution history)
-          "UNDO_AUTHORIZED", "UNDO_REJECTED", "UNDO_INTENT", "UNDO_RESULT")
+          "UNDO_AUTHORIZED", "UNDO_REJECTED", "UNDO_INTENT", "UNDO_RESULT",
+          # M4 canary: the owner's separate confirmation to archive ONE message live (the entry point is disabled in this build)
+          "CANARY_CONFIRMED", "CANARY_REJECTED")
 
 
 def canonical(obj):

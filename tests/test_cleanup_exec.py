@@ -1794,7 +1794,7 @@ class SourceGuards(unittest.TestCase):
                     names = [node.module or ""] + [f"{node.module}.{a.name}" for a in node.names]
                 if any(n.split(".")[-1] in ("cleanup_exec", "cleanup_exec_report") for n in names):
                     importers.append(path.name)
-        self.assertEqual(sorted(set(importers)), ["cleanup_executor.py", "cleanup_recovery.py", "cleanup_undo.py", "cli.py"])  # only the fake-only executor, undo and recovery (M4C-C2, M4D) besides the CLI
+        self.assertEqual(sorted(set(importers)), ["cleanup_canary.py", "cleanup_executor.py", "cleanup_recovery.py", "cleanup_undo.py", "cli.py"])  # only the executor, undo, recovery and the disabled canary besides the CLI
 
 
 if __name__ == "__main__":
