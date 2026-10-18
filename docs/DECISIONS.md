@@ -96,6 +96,11 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D90 | **Fake-only undo (M4D).** The inverse exists only in the fake mailbox's memory; the real adapter, write policy, scopes and endpoints stay archive-only. A real undo needs its own reviewed change. |
 | D91 | **Undo uncertainty (M4D).** Intent before mutation, one attempt, independent bound post-read, anything unclear `UNKNOWN`, resolved only by a fresh observation. |
 | D92 | **Review corrections (M4D).** Recovery verifies the account before any local transition when there is work to do (an unverifiable account changes nothing; `status_report` needs no live access), and the undo ledger is a strict state machine: any unsupported or inconsistent event sequence is `INCONSISTENT`, authorizes nothing and is reported. Found by review: the first version accepted an authorization while an attempt was open. |
+| D93 | **A separate, disabled real-execution boundary.** `LiveMailbox` (final, immutable, archive-only port over the genuine adapter) and `cleanup_live` entry points are added beside, not instead of, the fake-only APIs; each side refuses the other's mailbox type. The fake boundary is not weakened. |
+| D94 | **Disabled by source, not by configuration.** `LIVE_EXECUTION_ENABLED` is a `False` constant that nothing changes; enabling it is a source change needing the owner's separate approval. Re-read at construction, at every item and right before every POST. No CLI, environment variable or runtime switch. |
+| D95 | **One mutation path.** The live entry points reuse the exact per-item flow and recovery of the fake-only executor; the live mailbox adds no behaviour. Time is the process UTC clock; the public constructor takes no clock, factory or transport. |
+| D96 | **Live undo deferred.** `cleanup_undo` stays fake-only; the live mailbox has no undo; the real write policy stays archive-only. |
+| D97 | **Pre-canary checklist.** Write OAuth login and Cloud isolation (M4C-B2), an approved entry point and switch change, a one-message rehearsal in a disposable mailbox, verification of the real Gmail behaviours the fake imitates, recovery rehearsal and backup, final M4 audit. |
 | D47 | **Retention.** Execution, intent and audit records are local and never deleted automatically (compatible with M4B and a later undo). |
 
 

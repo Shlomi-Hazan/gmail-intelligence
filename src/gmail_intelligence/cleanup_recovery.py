@@ -11,8 +11,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import timezone
 
-from gmail_intelligence import cleanup_exec as ce, cleanup_plans as cp, cleanup_undo as cu
-from gmail_intelligence.exec_fake_mailbox import FakeMailbox, wiring_is_fake
+from gmail_intelligence import cleanup_exec as ce, cleanup_executor as cx, cleanup_plans as cp, cleanup_undo as cu
 
 _STOP_CODES = ("AUTH_PROBLEM", "ACCOUNT_MISMATCH", "ACCOUNT_NOT_VERIFIED")
 
@@ -78,11 +77,15 @@ def status_report(index, account):
 
 
 def recover(index, account, mailbox):
+    """Fake-only entry point: see `_recover`."""
+    return _recover(index, account, mailbox, "FAKE")
+
+
+def _recover(index, account, mailbox, allow):
     """Recover and reconcile everything that can be resolved from fresh evidence. See the module docstring. Raises ExecError (and changes nothing) only for a refused
     mailbox or another account; every other failure is reported and leaves the item unresolved. When anything needs recovery the account is verified BEFORE any local
     transition is made, so an unverifiable account changes nothing."""
-    if type(mailbox) is not FakeMailbox or not wiring_is_fake(mailbox):
-        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "only the fake test mailbox is accepted in this version; nothing was read or changed")
+    cx._gate(mailbox, allow)
     if mailbox.account.strip().lower() != account.strip().lower():
         raise ce.ExecError("ACCOUNT_MISMATCH", "the mailbox belongs to another account; nothing was changed")
     stopped, interrupted, resolved, notes, undos_resolved = "", [], {}, {}, 0
@@ -124,7 +127,7 @@ def recover(index, account, mailbox):
                             break
                 if stopped:
                     break
-        if not stopped:
+        if not stopped and allow == "FAKE":  # undo exists only for the fake mailbox; a live undo is deferred
             for exec_id, seq, _ in undo_open:
                 try:
                     cu.reconcile_undo(index, account, exec_id, seq, mailbox)

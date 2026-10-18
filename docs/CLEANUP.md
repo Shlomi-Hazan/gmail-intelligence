@@ -278,6 +278,22 @@ finishes the slice through `end_slice`: the next slice needs the owner's typed c
 (possibly dispatched items become `UNKNOWN`, untouched ones `NEVER_ATTEMPTED`); the batch never resumes anything. Results carry sequence numbers, never message ids.
 **Several approved items in one thread.** A sibling that this execution already archived (recorded `APPLIED` with checked evidence) legitimately differs from the indexed labels, so it must now be in exactly its recorded archived state (its indexed labels minus `INBOX`); every other sibling must still equal its indexed labels, membership must be unchanged, and no sibling, archived or not, may carry a protected label. Any other difference is still `THREAD_CHANGED`. The current target keeps its exact preflight checks.
 
+**Real-execution boundary (disabled; offline-tested only).** `exec_live_mailbox.LiveMailbox` is a final, immutable port over a genuine `ArchiveAdapter` (archive-only request policy) that
+exposes exactly what the executor already uses (`clock`, `account`, `verify_account`, `message_state`, `thread_state`, `archive_message`, `observe`) and nothing else: no undo, no delete, no
+Trash, no send, no label creation. `cleanup_live.execute_live_batch` and `recover_live` are the only functions that accept it; they run the very same per-item flow and recovery as the
+fake-only API (approval and plan integrity, lease, account verification, local revalidation, live message and whole-thread checks, durable intent before each POST, at most one POST per
+item, independent execution-bound trusted post-read, UNKNOWN and stop on any ambiguity, no retry, one slice per call), with no second mutation path. Each entry point accepts only its own
+mailbox type: the fake-only APIs refuse a live mailbox and the live APIs refuse a fake mailbox, a raw adapter or any look-alike. **Disabled by default:** `LIVE_EXECUTION_ENABLED` is a
+`False` constant in `exec_live_mailbox.py` that nothing in the program changes; construction and every step (including right before each POST) re-read it, so every live function raises
+`LIVE_DISABLED` before reading or writing anything. There is no CLI path, no clock, connection-factory or transport parameter on the public constructor, and time is the process's UTC
+clock. Tests flip the switch only with a patch and put the real adapter code over the in-memory fake wire. **Live undo is deferred:** `cleanup_undo` accepts only the fake mailbox and
+`LiveMailbox` has no undo operation; a real undo needs its own write-policy change and approval.
+
+**Still required before any live canary (none of it is done or authorized here):** a separately approved write OAuth login and Google Cloud isolation checklist (M4C-B2); a separately
+approved, reviewed entry point and source change enabling the switch; a rehearsal against a single message of a disposable test mailbox with the owner present; verification of the real
+Gmail behaviour the fake only imitates (thread read completeness and paging for long threads, the exact not-found and error documents, label omission, quota and the 500-request
+transport budget per adapter); a recovery rehearsal and an index backup; and the final M4 security audit.
+
 **Recovery (M4D; library only, fake mailbox only, no CLI).** `cleanup_recovery.recover(index, account, mailbox)` only composes existing primitives: `recover_interrupted` turns executions
 whose lease expired into UNKNOWN work (never resumed), every UNKNOWN item is reconciled with `reconcile_item` from a FRESH trusted observation bound to that item's UNKNOWN episode, and
 every uncertain undo is reconciled the same way. It performs no mutation (no archive, no undo, no retry). It fails closed: another account raises before anything changes; when anything needs recovery the account is verified BEFORE any local transition, so an

@@ -772,7 +772,7 @@ class FakeOnlyTests(ExecutorBase):
                 names |= {node.module.split(".")[-1]} if node.module != "gmail_intelligence" else {a.name for a in node.names}
             if isinstance(node, ast.Import):
                 names |= {a.name for a in node.names}
-        self.assertEqual(names, {"cleanup_exec", "cleanup_plans", "cleanup_protect", "cleanup_audit", "exec_fake_mailbox", "json"})  # json: stdlib, for the recorded previous labels
+        self.assertEqual(names, {"cleanup_exec", "cleanup_plans", "cleanup_protect", "cleanup_audit", "exec_fake_mailbox", "exec_live_mailbox", "json"})  # json: stdlib, for the recorded previous labels
 
     def test_no_production_path_can_reach_the_executor(self):
         cli = (SRC / "gmail_intelligence" / "cli.py").read_text()
@@ -785,7 +785,7 @@ class FakeOnlyTests(ExecutorBase):
                 mods = [a.name for a in node.names] if isinstance(node, ast.Import) else ([node.module or ""] + [a.name for a in node.names] if isinstance(node, ast.ImportFrom) else [])
                 if any(m.split(".")[-1] in ("cleanup_executor", "exec_fake_mailbox") for m in mods):
                     importers.append(path.name)
-        self.assertEqual(sorted(set(importers)), ["cleanup_executor.py", "cleanup_recovery.py", "cleanup_undo.py"])  # the fake-only library modules; never the CLI
+        self.assertEqual(sorted(set(importers)), ["cleanup_executor.py", "cleanup_live.py", "cleanup_recovery.py", "cleanup_undo.py"])  # library modules (cleanup_live only imports the executor); never the CLI
 
 
 if __name__ == "__main__":
