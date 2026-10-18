@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from gmail_intelligence import exec_fake_mailbox as fm, gmail_write as gw
 
 LIVE_EXECUTION_ENABLED = False
+_CANARY_PERMIT = object()  # module-private capability: only `cleanup_canary.run_canary` passes it to the live batch entry point (a static test enforces it)
 _MINT = object()  # module-private: only `_wrap` holds it, so an ordinary caller cannot construct a LiveMailbox directly (and so cannot choose its wiring)
 
 

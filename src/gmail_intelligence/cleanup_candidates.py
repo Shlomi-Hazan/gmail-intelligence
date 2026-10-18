@@ -16,6 +16,10 @@ from gmail_intelligence import classifier, classify, cleanup_protect, report
 POLICY_VERSION = 1
 MIN_AGE_DAYS = 90  # default AND lower bound (the user may only be stricter)
 DAY_MS = 86_400_000
+# The ONLY reasons a canary exception may waive, and only for the ONE message of a canary plan (never for ordinary cleanup): the age rule and the classification-type rules.
+# Hard protections (including SENT), unsafe data, missing or stale classification, not-in-inbox, important/unread/user-label/attention/AI signals, protection rules and
+# mixed threads are never waived.
+CANARY_WAIVED = frozenset({"TOO_RECENT", "UNKNOWN_TYPE", "RISKY_TYPE", "TYPE_NOT_APPROVED", "WEAK_EVIDENCE", "AMBIGUOUS_TYPES"})
 APPROVED_TYPES = frozenset({"PROMOTIONAL", "SOCIAL", "NEWSLETTER"})
 COMPANION_TYPES = frozenset({"AUTOMATED_NOTIFICATION"})  # may accompany an approved type, never suffices alone
 RISKY_TYPES = frozenset({"PERSONAL", "FINANCIAL", "TRANSACTIONAL", "EDUCATIONAL"})
@@ -53,7 +57,7 @@ class Result:
     summary: dict = field(default_factory=dict)
 
 
-def _self_reasons(m, rows, current, protect_rules, now_ms, min_age_days):
+def _self_reasons(m, rows, current, protect_rules, now_ms, min_age_days, canary=False):
     """Reasons for one message in isolation (thread context is applied afterwards). Returns (reasons, evidence)."""
     out = []
     add = lambda code, cat, detail="": out.append(Reason(code, cat, detail))  # noqa: E731
@@ -112,11 +116,16 @@ def _self_reasons(m, rows, current, protect_rules, now_ms, min_age_days):
             evidence = [(r["value"], r["confidence"], r["rule_id"]) for r in strong]
         if classify._conflicting(known):
             add("AMBIGUOUS_TYPES", RISK)
+    if canary:  # the explicit, narrow canary exception: waive ONLY the listed age/classification reasons of this one message; evidence never counts
+        out = [r for r in out if r.code not in CANARY_WAIVED]
+        evidence = []
     return out, tuple(evidence)
 
 
-def evaluate_all(index, account, now_ms=None, min_age_days=MIN_AGE_DAYS):
-    """Evaluate every indexed message of `account`. Read-only. Raises ValueError for a weaker-than-default age."""
+def evaluate_all(index, account, now_ms=None, min_age_days=MIN_AGE_DAYS, canary_ids=frozenset()):
+    """Evaluate every indexed message of `account`. Read-only. Raises ValueError for a weaker-than-default age.
+
+    `canary_ids` is empty for all ordinary cleanup. A canary plan passes its single message id: for that message only, the reasons in CANARY_WAIVED are waived."""
     if min_age_days < MIN_AGE_DAYS:
         raise ValueError(f"--min-age-days must be at least {MIN_AGE_DAYS} (you may only be stricter)")
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
@@ -145,7 +154,7 @@ def evaluate_all(index, account, now_ms=None, min_age_days=MIN_AGE_DAYS):
              "user_label": any(l.startswith("Label_") or names.get(l, ("", ""))[1] == "user" for l in labs)}
         rows = cls.get(r["id"], [])
         current = None if not rows else all(x["ruleset_hash"] == cur_hash and x["msg_scan_id"] == r["scan_id"] for x in rows)
-        own[r["id"]], evid[r["id"]] = _self_reasons(m, rows, current, protect, now_ms, min_age_days)
+        own[r["id"]], evid[r["id"]] = _self_reasons(m, rows, current, protect, now_ms, min_age_days, r["id"] in canary_ids)
         info[r["id"]] = m
         if m["thread_id"]:
             threads.setdefault(m["thread_id"], []).append(r["id"])

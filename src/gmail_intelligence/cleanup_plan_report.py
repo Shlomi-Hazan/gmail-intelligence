@@ -35,7 +35,9 @@ def plan_show_text(plan, problems, decisions, approvals, page=None, page_size=cp
     try:
         snap = cp.snapshot_of(plan)
         policy_line = (f"  policy: cleanup v{snap['policy']['cleanup_policy']}, archive >= {snap['policy']['min_age_days']} days; "
-                       f"message-level only (no thread expansion)")
+                       f"message-level only (no thread expansion)"
+                       + ("; CANARY EXCEPTION: this one message is exempt from the age and classification-type rules only (every other protection applies)"
+                          if snap["policy"].get("canary_exception") else ""))
     except cp.PlanError:
         policy_line = "  policy: (snapshot unreadable: this plan cannot be used; cancel it and create a new one)"
     out = [f"Plan {plan['plan_id']} (version {plan['version']}" + (f", revises {plan['parent_id']}" if plan["parent_id"] else "") + ")",

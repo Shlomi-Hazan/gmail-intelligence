@@ -43,3 +43,36 @@ stays disabled and the CLI never imports the module), and no environment variabl
 ## 4. Remaining blockers before a live canary
 Items 1, 3 and 6 above; verification of real Gmail behaviour the offline fake only imitates (thread read completeness and paging for long threads, exact not-found and error documents,
 label omission, quotas); and the weekly refresh-token expiry of an unpublished OAuth app (owner decision on publishing status, Q8).
+
+## 5. The canary exception and the owner entry point (this version; still disabled)
+**Why an exception.** The ordinary cleanup policy needs a message at least 90 days old with an approved, MEDIUM+ rules classification, so a fresh test message can never be planned. A
+narrow exception exists for exactly ONE explicitly named message: `cleanup_canary.create_canary_plan` (after the owner's separate typed phrase `CANARY PLAN <12 hex>`, derived from the
+account and the message id). It waives ONLY `TOO_RECENT` and the classification-type reasons (`UNKNOWN_TYPE`, `RISKY_TYPE`, `TYPE_NOT_APPROVED`, `WEAK_EVIDENCE`, `AMBIGUOUS_TYPES`)
+for that message (`cleanup_candidates.CANARY_WAIVED`). It never changes `cleanup candidates` or `cleanup plan create`, whose output is identical with or without it. The plan records
+`canary_exception` in its hashed snapshot (one message, version 1, enforced by the integrity check); every later check (review, approval, reservation, per-item revalidation) honours
+the same marker for that one message and nothing else.
+
+**What still refuses it (never waived):** `SENT`, `STARRED`, `DRAFT`, `TRASH`, `SPAM`, user protection rules, not-in-inbox, `IMPORTANT`, unread, user labels, attention and AI signals,
+missing or stale classification (run `classify run` first), unsafe data, and a mixed thread (a risky sibling). The live preflight (exact labels, whole-thread membership, siblings
+unchanged, no protected label) and every executor safeguard apply as for any item.
+
+**The SENT complication (assessed, not bypassed).** A message you sent from the SAME account carries the `SENT` label, a hard protection. The exception does not waive it:
+`create_canary_plan` refuses with `CANARY_SELF_SENT` and `describe` says so. **A self-sent test message cannot be used.** Send the disposable message from a DIFFERENT account (any other
+address) to the primary one, open and read it once (unread is also refused), and do not touch it between the scan and the run.
+
+**Live execution is only this canary.** `cleanup_live.execute_live_batch` refuses every caller except `run_canary` (a private permit), any execution that is not exactly one target in one
+slice, and any execution without the owner's recorded `CANARY_CONFIRMED`. Recovery stays read-only (fresh observations, no mutation). There is no second archive implementation.
+
+**Owner-operated entry point (disabled).** `python -m gmail_intelligence.cleanup_canary_cli` (`describe`, `plan`, `run`), separate from the ordinary CLI. While
+`LIVE_EXECUTION_ENABLED` is `False` it refuses as its first statement (no parsing, index, credential or network). It takes the account explicitly, prints only counts and codes, and has no
+environment or configuration path.
+
+**Eventual sequence (each step needs the owner's separate approval; none is done):**
+1. A short-lived reviewed commit sets `LIVE_EXECUTION_ENABLED = True`; back up the index first (see the backup procedure in the preflight notes); after the run a second commit sets it back to `False`.
+2. `mailbox scan --limit 50`, then `classify run` (ordinary read-only commands).
+3. `python -m gmail_intelligence.cleanup_canary_cli describe --account EMAIL --message-id ID` (must show `canary: ELIGIBLE...` and `SENT protection: not triggered`).
+4. `python -m gmail_intelligence.cleanup_canary_cli plan --account EMAIL --message-id ID` (type the printed phrase).
+5. `cleanup plan review PLAN_ID`, then `cleanup approve PLAN_ID` (ordinary commands).
+6. `auth login-write --expect-account EMAIL` shortly before, then `auth status-write` (the access token needs at least ten minutes of life; nothing refreshes it).
+7. `python -m gmail_intelligence.cleanup_canary_cli run --account EMAIL --plan-id PLAN_ID` (type the execution phrase, then the canary phrase).
+8. Verify (`cleanup exec show`, `cleanup audit verify`, and the mailbox itself), then revert the switch and decide whether to `auth logout-write` / `auth revoke-write`.

@@ -23,7 +23,7 @@ from test_cleanup import ACCT, OTHER  # noqa: E402
 from test_cleanup_batch import Crash, IDS  # noqa: E402
 from test_cleanup_executor import AFTER, HEX, LABELS, StepClock, gerr  # noqa: E402
 
-from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, cleanup_executor as cx, cleanup_live as cl, cleanup_recovery as cr, cleanup_undo as cu  # noqa: E402
+from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, cleanup_executor as cx, cleanup_live as cl, cleanup_plans as cp, cleanup_recovery as cr, cleanup_undo as cu  # noqa: E402
 from gmail_intelligence import exec_fake_mailbox as fm, exec_live_mailbox as live, gmail_write as gw, gmail_write_policy as pol  # noqa: E402
 
 Step = fm.Step
@@ -56,9 +56,19 @@ class LiveBase(TR.RecoveryBase):
         adapter = gw.ArchiveAdapter(gw._Transport(svc.creds, factory), account)
         return live._wrap(adapter, account, factory), svc
 
+    def single(self):
+        return self.batch_execution(ids=(IDS[0],))
+
+    def confirm(self, ex):
+        """Record the owner's canary confirmation exactly as run_canary does before it hands over to the live batch."""
+        with cp._txn(self.index):
+            audit.append(self.index, ACCT, ex["plan_id"], "CANARY_CONFIRMED", cp._iso(live._utcnow()), {"exec": ex["exec_id"], "phrase_sha256": "0" * 64})
+
     def run_live(self, ex, lm, svc, token=None):
         try:
-            return cl.execute_live_batch(self.index, ACCT, ex["exec_id"], token or self.token, lm)
+            if not any(json.loads(r["meta"]).get("exec") == ex["exec_id"] for r in self.index._q("SELECT meta FROM cleanup_audit WHERE event_type='CANARY_CONFIRMED'")):
+                self.confirm(ex)
+            return cl.execute_live_batch(self.index, ACCT, ex["exec_id"], token or self.token, lm, _permit=live._CANARY_PERMIT)
         finally:
             keys = [k for kind, k in svc.log if kind == "POST"]
             self.assertEqual(len(keys), len(set(keys)))  # never two POSTs for one message
@@ -111,18 +121,18 @@ class DisabledByDefaultTests(LiveBase):
                 for target in ("exec_live_mailbox", "cleanup_live"):
                     if any(m.split(".")[-1] == target for m in mods):
                         importers.setdefault(target, set()).add(path.name)
-        self.assertEqual(importers, {"exec_live_mailbox": {"cleanup_executor.py", "cleanup_canary.py"}, "cleanup_live": {"cleanup_canary.py"}})  # only the disabled canary imports the live modules
+        self.assertEqual(importers, {"exec_live_mailbox": {"cleanup_executor.py", "cleanup_canary.py", "cleanup_live.py", "cleanup_canary_cli.py"}, "cleanup_live": {"cleanup_canary.py"}})  # the live modules are imported only by the disabled canary code
         callers = set()
         for path in SRC.glob("*.py"):
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) in ("_wrap", "open_live_mailbox", "execute_live_batch", "recover_live"):
                     callers.add((path.name, getattr(node.func, "id", getattr(node.func, "attr", None)), len(node.args) + len(node.keywords)))
-        self.assertEqual(callers, {("exec_live_mailbox.py", "_wrap", 2), ("cleanup_canary.py", "open_live_mailbox", 3), ("cleanup_canary.py", "execute_live_batch", 5)})  # without a test factory; canary only
+        self.assertEqual(callers, {("exec_live_mailbox.py", "_wrap", 2), ("cleanup_canary.py", "open_live_mailbox", 3), ("cleanup_canary.py", "execute_live_batch", 6)})  # without a test factory; canary only
 
     def test_the_public_constructor_has_no_clock_factory_or_transport_parameter(self):
         self.assertEqual(list(inspect.signature(live.open_live_mailbox).parameters), ["expected_account", "store", "client_path"])
         self.assertEqual(list(inspect.signature(live.LiveMailbox.__init__).parameters), ["self", "_mint", "_adapter", "_account", "_test_factory"])
-        self.assertEqual(list(inspect.signature(cl.execute_live_batch).parameters), ["index", "account", "exec_id", "token", "mailbox"])
+        self.assertEqual(list(inspect.signature(cl.execute_live_batch).parameters), ["index", "account", "exec_id", "token", "mailbox", "_permit"])
         self.assertEqual(list(inspect.signature(cl.recover_live).parameters), ["index", "account", "mailbox"])
         now = live._utcnow()
         self.assertEqual(now.utcoffset(), timedelta(0))
@@ -233,22 +243,23 @@ class TypeIsolationTests(LiveBase):
 
 
 class LiveBatchTests(LiveBase):
-    def test_a_live_batch_runs_the_very_same_flow_over_the_genuine_adapter(self):
+    """The live path now runs ONLY the single approved canary item; these tests drive it exactly as `run_canary` does (confirmation recorded, permit passed)."""
+
+    def test_a_live_run_executes_the_very_same_flow_over_the_genuine_adapter(self):
         self.enable()
-        ex = self.batch_execution()
+        ex = self.single()
         lm, svc = self.live_mailbox()
         boom = AssertionError("the default real connection path was used")
         with mock.patch.object(gw, "_default_connection", side_effect=boom):
             res = self.run_live(ex, lm, svc)
-        self.assertEqual((res.execution_state, res.posts, res.stopped), ("EXECUTED", 4, False))
-        self.assertEqual([r.item_state for _, r in res.items], ["APPLIED"] * 4)
-        self.assertEqual([k for kind, k in svc.log if kind == "POST"], sorted(IDS))
+        self.assertEqual((res.execution_state, res.posts, res.stopped), ("EXECUTED", 1, False))
+        self.assertEqual([r.item_state for _, r in res.items], ["APPLIED"])
+        self.assertEqual([k for kind, k in svc.log if kind == "POST"], [IDS[0]])
         self.assertEqual({k for k, _ in svc.log}, {"PROFILE", "GET_MESSAGE", "GET_THREAD", "POST"})
-        self.assertEqual([k for k, _ in svc.log].count("PROFILE"), 1)
-        for mid in IDS:
-            self.assertEqual(svc.messages[mid][1], set(AFTER))
-            self.assertEqual((self.item(mid)["evidence_checked"], self.item(mid)["evidence_source"]), (1, "TRUSTED_ADAPTER"))
-        self.assertEqual(svc.messages[HEX[4]][1], set(LABELS))  # outside the approved plan: untouched
+        self.assertEqual(svc.messages[IDS[0]][1], set(AFTER))
+        self.assertEqual((self.item(IDS[0])["evidence_checked"], self.item(IDS[0])["evidence_source"]), (1, "TRUSTED_ADAPTER"))
+        for other in HEX[1:5]:
+            self.assertEqual(svc.messages[other][1], set(LABELS))  # nothing else is touched
         self.assertEqual(svc.undos(), 0)
         self.assertTrue(live.live_wiring_ok(lm))
 
@@ -262,84 +273,148 @@ class LiveBatchTests(LiveBase):
                       and isinstance(n.func.value, ast.Attribute) and n.func.value.attr == "_adapter"}
             self.assertLessEqual(called, {"verify_account", "message_state", "thread_state", "archive_message", "observe"}, name)
 
-    def test_intent_is_durable_before_each_post_and_an_unknown_post_stops_the_batch_without_retry(self):
+    def test_intent_is_durable_before_the_post_and_an_unknown_post_stops_without_retry(self):
         self.enable()
-        ex = self.batch_execution()
+        ex = self.single()
         seen = {}
-        script = [Step("POST", nth=1, before=lambda f: seen.setdefault("first", self.states())), Step("POST", nth=3, raises=TimeoutError(), apply=True)]
-        lm, svc = self.live_mailbox(script)
+        lm, svc = self.live_mailbox([Step("POST", nth=1, before=lambda f: seen.setdefault("state", self.item(IDS[0])["state"]), raises=TimeoutError(), apply=True)])
         res = self.run_live(ex, lm, svc)
-        self.assertEqual(seen["first"], ["INTENT", "PENDING", "PENDING", "PENDING"])
-        self.assertEqual(self.states(), ["APPLIED", "APPLIED", "UNKNOWN", "NOT_APPLIED"])
-        self.assertEqual((res.execution_state, res.posts, res.stopped, svc.posts()), ("RECONCILIATION_REQUIRED", 3, True, 3))
+        self.assertEqual(seen["state"], "INTENT")
+        self.assertEqual(self.item(IDS[0])["state"], "UNKNOWN")
+        self.assertEqual((res.execution_state, res.posts, res.stopped, svc.posts()), ("RECONCILIATION_REQUIRED", 1, True, 1))
         with self.assertRaises(ce.ExecError) as ctx:
-            cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm)
-        self.assertEqual((ctx.exception.code, svc.posts()), ("BAD_STATE", 3))
+            self.run_live(ex, lm, svc)
+        self.assertEqual((ctx.exception.code, svc.posts()), ("BAD_STATE", 1))
 
-    def test_each_kind_of_failure_stops_the_live_batch_where_it_happens(self):
-        cases = (("rate limit on a post", Step("POST", nth=2, status=429, body=gerr(429)[1]), ["APPLIED", "UNKNOWN", "NOT_APPLIED", "NOT_APPLIED"], 2),
-                 ("server error on a post", Step("POST", nth=1, status=503, body=b"x"), ["UNKNOWN", "NOT_APPLIED", "NOT_APPLIED", "NOT_APPLIED"], 1),
-                 ("a refused post proven to be before dispatch", Step("GET_THREAD", nth=2, after=lambda f: setattr(f.creds, "live", False)),
-                  ["APPLIED", "NOT_APPLIED", "NOT_APPLIED", "NOT_APPLIED"], 1),
-                 ("a read timeout before an intent", Step("GET_THREAD", nth=3, raises=TimeoutError()), ["APPLIED", "APPLIED", "NOT_APPLIED", "NOT_APPLIED"], 2),
-                 ("a drifted item is skipped and the batch goes on", Step("GET_MESSAGE", nth=3, before=lambda f: f.set_labels(sorted(IDS)[1], list(LABELS) + ["STARRED"])),
-                  ["APPLIED", "SKIPPED_DRIFT", "APPLIED", "APPLIED"], 3))
-        for label, step, states, posts in cases:
+    def test_each_kind_of_failure_stops_the_live_run_where_it_happens(self):
+        cases = (("rate limit on the post", Step("POST", nth=1, status=429, body=gerr(429)[1]), "UNKNOWN", 1),
+                 ("server error on the post", Step("POST", nth=1, status=503, body=b"x"), "UNKNOWN", 1),
+                 ("a refused post proven to be before dispatch", Step("GET_THREAD", nth=1, after=lambda f: setattr(f.creds, "live", False)), "NOT_APPLIED", 0),
+                 ("a read timeout before the intent", Step("GET_THREAD", nth=1, raises=TimeoutError()), "NOT_APPLIED", 0),
+                 ("a drifted item is skipped", Step("GET_MESSAGE", nth=1, before=lambda f: f.set_labels(IDS[0], list(LABELS) + ["STARRED"])), "SKIPPED_DRIFT", 0))
+        for label, step, state, posts in cases:
             with self.subTest(label):
                 self.setUp()
                 self.enable()
-                ex = self.batch_execution()
+                ex = self.single()
                 lm, svc = self.live_mailbox([step])
                 res = self.run_live(ex, lm, svc)
-                self.assertEqual(self.states(), states)
+                self.assertEqual(self.item(IDS[0])["state"], state)
                 self.assertEqual((res.posts, svc.posts()), (posts, posts))
 
     def test_account_mismatch_and_a_bad_lease_change_nothing(self):
         self.enable()
-        ex = self.batch_execution()
+        ex = self.single()
         wrong, svc = self.live_mailbox([Step("PROFILE", status=200, body=json.dumps({"emailAddress": OTHER}).encode())])
-        res = cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, wrong)
-        self.assertEqual((self.states(), res.posts, svc.posts()), (["NOT_APPLIED"] * 4, 0, 0))
+        res = self.run_live(ex, wrong, svc)
+        self.assertEqual((self.item(IDS[0])["state"], res.posts, svc.posts()), ("NOT_APPLIED", 0, 0))
         self.setUp()
         self.enable()
-        ex = self.batch_execution()
+        ex = self.single()
         lm, svc = self.live_mailbox()
         with self.assertRaises(ce.ExecError):
-            cl.execute_live_batch(self.index, ACCT, ex["exec_id"], "x" * 40, lm)
+            self.run_live(ex, lm, svc, token="x" * 40)
         other, osvc = self.live_mailbox(account=OTHER)
-        res = cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, other)
+        res = self.run_live(ex, other, osvc)
         self.assertEqual((res.posts, osvc.posts(), svc.log), (0, 0, []))
 
-    def test_switching_the_build_off_during_a_run_stops_it_before_the_next_post(self):
+    def test_switching_the_build_off_during_a_run_stops_it_before_the_post(self):
         self.enable()
-        ex = self.batch_execution()
+        ex = self.single()
         lm, svc = self.live_mailbox([Step("GET_THREAD", nth=1, after=lambda f: setattr(live, "LIVE_EXECUTION_ENABLED", False))])
         with self.assertRaises(ce.ExecError) as ctx:
-            cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm)
+            self.run_live(ex, lm, svc)
         self.assertEqual(ctx.exception.code, "LIVE_DISABLED")
-        self.assertEqual((svc.posts(), self.states()), (0, ["INTENT", "PENDING", "PENDING", "PENDING"]))  # the intent stays open for recovery; no request was made
+        self.assertEqual((svc.posts(), self.item(IDS[0])["state"]), (0, "INTENT"))  # the intent stays open for recovery; no request was made
 
     def test_a_crash_is_recovered_through_the_live_boundary_without_any_mutation(self):
         for apply in (True, False):
             with self.subTest(apply=apply):
                 self.setUp()
                 self.enable()
-                ex = self.batch_execution()
-                lm, svc = self.live_mailbox([Step("POST", nth=2, raises=Crash(), apply=apply)])
+                ex = self.single()
+                lm, svc = self.live_mailbox([Step("POST", nth=1, raises=Crash(), apply=apply)])
                 with self.assertRaises(Crash):
-                    cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm)
+                    self.run_live(ex, lm, svc)
                 posts = svc.posts()
                 self.clk.at = self.clk.at + ce.LEASE_TTL + timedelta(seconds=10)
                 lm2, svc2 = self.live_mailbox(state={m: (t, list(l)) for m, (t, l) in svc.messages.items()})
                 report = cl.recover_live(self.index, ACCT, lm2)
                 self.assertEqual(report.interrupted, (ex["exec_id"],))
-                self.assertEqual(self.item(self.mid(2))["state"], "APPLIED" if apply else "NOT_APPLIED")
+                self.assertEqual(self.item(IDS[0])["state"], "APPLIED" if apply else "NOT_APPLIED")
                 self.assertEqual((svc.posts(), svc2.posts(), svc2.undos(), posts), (posts, 0, 0, posts))
                 self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
                 wrong, wsvc = self.live_mailbox(account=OTHER)
                 with self.assertRaises(ce.ExecError) as ctx:
                     cl.recover_live(self.index, ACCT, wrong)
                 self.assertEqual(ctx.exception.code, "ACCOUNT_MISMATCH")
+
+
+class RestrictionTests(LiveBase):
+    """Live execution is only the approved single-message canary, entered through run_canary."""
+
+    def test_a_direct_call_without_the_permit_is_refused_even_with_everything_else_valid(self):
+        self.enable()
+        ex = self.single()
+        self.confirm(ex)
+        lm, svc = self.live_mailbox()
+        before = self.snapshot()
+        with self.assertRaises(ce.ExecError) as ctx:
+            cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm)
+        self.assertEqual((ctx.exception.code, self.snapshot(), svc.log), ("CANARY_ONLY", before, []))
+        for fake_permit in (object(), True, "permit", live._MINT):
+            with self.assertRaises(ce.ExecError):
+                cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm, _permit=fake_permit)
+        self.assertEqual(svc.log, [])
+
+    def test_more_than_one_target_or_no_recorded_confirmation_is_refused_even_with_the_permit(self):
+        self.enable()
+        ex = self.batch_execution()  # four targets
+        self.confirm(ex)
+        lm, svc = self.live_mailbox()
+        before = self.snapshot()
+        with self.assertRaises(ce.ExecError) as ctx:
+            cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm, _permit=live._CANARY_PERMIT)
+        self.assertEqual((ctx.exception.code, self.snapshot(), svc.log), ("NOT_A_CANARY", before, []))
+        self.setUp()
+        self.enable()
+        ex = self.single()  # one target but the owner's canary confirmation is not recorded
+        lm, svc = self.live_mailbox()
+        with self.assertRaises(ce.ExecError) as ctx:
+            cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm, _permit=live._CANARY_PERMIT)
+        self.assertEqual((ctx.exception.code, svc.log), ("CANARY_NOT_CONFIRMED", []))
+        with cp._txn(self.index):  # a confirmation recorded for ANOTHER execution does not count
+            audit.append(self.index, ACCT, ex["plan_id"], "CANARY_CONFIRMED", cp._iso(live._utcnow()), {"exec": "exec-00000000", "phrase_sha256": "0" * 64})
+        with self.assertRaises(ce.ExecError) as ctx:
+            cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm, _permit=live._CANARY_PERMIT)
+        self.assertEqual((ctx.exception.code, svc.log), ("CANARY_NOT_CONFIRMED", []))
+
+    def test_only_run_canary_holds_the_permit_and_nothing_else_can_run_the_live_batch(self):
+        users = set()
+        for path in SRC.glob("*.py"):
+            text = path.read_text()
+            if "_CANARY_PERMIT" in text:
+                users.add(path.name)
+        self.assertEqual(users, {"exec_live_mailbox.py", "cleanup_live.py", "cleanup_canary.py"})  # defined, checked, and passed (only) by run_canary
+        passers = set()
+        for path in SRC.glob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Call) and any(k.arg == "_permit" for k in node.keywords):
+                    passers.add(path.name)
+        self.assertEqual(passers, {"cleanup_canary.py"})
+        self.assertNotIn("canary_ok", inspect.signature(cl.execute_live_batch).parameters)
+
+    def test_recovery_stays_read_only_through_the_live_boundary(self):
+        self.enable()
+        ex = self.single()
+        lm, svc = self.live_mailbox([Step("POST", nth=1, raises=Crash(), apply=True)])
+        with self.assertRaises(Crash):
+            self.run_live(ex, lm, svc)
+        self.clk.at = self.clk.at + ce.LEASE_TTL + timedelta(seconds=10)
+        lm2, svc2 = self.live_mailbox(state={m: (t, list(l)) for m, (t, l) in svc.messages.items()})
+        cl.recover_live(self.index, ACCT, lm2)
+        self.assertEqual((svc2.posts(), svc2.undos()), (0, 0))
+        self.assertEqual({k for k, _ in svc2.log} - {"PROFILE", "GET_MESSAGE"}, set())  # only the profile read and observations
 
 
 class UndoDeferredTests(LiveBase):
