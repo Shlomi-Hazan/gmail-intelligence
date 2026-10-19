@@ -281,9 +281,10 @@ class Analytics:
     def organization(self):
         index, account = self.index, self.account
         h = label_hygiene.analyze(index, account)
-        rec = label_suggest.recommend(index, account)
-        rules = label_suggest.suggest_rules(index, account)
-        filt = filter_suggest.suggest(index, account)
+        groups = label_suggest.gather(index, account)  # read once and shared: recommendations, rule proposals and filter suggestions all start from the same per-group facts
+        rec = label_suggest.recommend(index, account, groups=groups)
+        rules = label_suggest.suggest_rules(index, account, groups=groups)
+        filt = filter_suggest.suggest(index, account, recommendation=rec)
         names = {lab.id: lab.name for lab in lm.load_labels(index, account)}
 
         def tally(items, key):

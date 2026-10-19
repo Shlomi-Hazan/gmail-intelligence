@@ -76,8 +76,9 @@ class FilterSuggestions:
     index_why: str
 
 
-def suggest(index, account):
-    rec = ls.recommend(index, account)
+def suggest(index, account, recommendation=None):
+    """Filter suggestions. `recommendation` may be the result of `label_suggest.recommend` for the same index and account, to avoid computing it again."""
+    rec = ls.recommend(index, account) if recommendation is None else recommendation
     out = []
     for r in rec.items:
         if r.kind != "APPLY_LABEL" or r.group[0] not in ("sender", "domain"):

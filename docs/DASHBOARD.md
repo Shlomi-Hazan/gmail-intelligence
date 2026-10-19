@@ -105,7 +105,7 @@ Findings from the rendered-UI review that were fixed in this PR: a `null` text n
 ## 11. Known limitations
 * Rendering was verified in the in-app (Chromium-based) browser only: no Safari, Firefox, real phone, VoiceOver or other screen-reader run. Increased text size was checked at 200% root font size, not browser page zoom.
 * The data are a snapshot of the last scan; the dashboard cannot know about newer mail. Classification is inferred; subjects and bodies are not indexed.
-* Heavy sections (`cleanup/summary`, `organization`) can take a few seconds on a large index; results are cached in memory while the database file is unchanged.
+* `cleanup/summary` takes a fraction of a second on a 17,000-message index. `organization` used to take about 18 s on the owner's real index (measured once, before the performance hotfix): rule proposals previewed every candidate sender/domain group against ALL messages, re-reading the labels of every message each time, and three analyses each re-read the same per-group facts. The hotfix computes the facts once per request and previews each candidate only against its own sender or domain group, with identical results (see `tests/test_organization_perf.py`). On deterministic synthetic indexes of 17,000 messages the first request now takes about 0.3 s (was 4-18 s); the real-index figure must be re-measured separately. Results are cached in memory while the database file is unchanged.
 * Safari/Firefox support for `color-mix`, `:has()` and logical properties is assumed (current versions), not tested here.
 
 ## 12. Final security and visual pass (recorded evidence)
