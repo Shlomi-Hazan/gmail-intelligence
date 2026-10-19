@@ -987,6 +987,16 @@ def cmd_cleanup_exec_list(args):
 
 
 # ---- inbox organization (M5): label hygiene, recommendations, suggestions and label-change plans. LOCAL ONLY: no Gmail call, no credential, no mailbox change ----
+def cmd_labels_recommend(args):
+    from gmail_intelligence import label_report, label_suggest
+    return _with_index(args, lambda i, a: print(label_report.recommend_text(i, a, label_suggest.recommend(i, a), args.show_names, args.show_senders)) or 0)
+
+
+def cmd_labels_suggest_rules(args):
+    from gmail_intelligence import label_report, label_suggest
+    return _with_index(args, lambda i, a: print(label_report.rules_text(i, a, label_suggest.suggest_rules(i, a), args.show_senders)) or 0)
+
+
 def cmd_labels_report(args):
     from gmail_intelligence import label_hygiene, label_report
     return _with_index(args, lambda i, a: print(label_report.hygiene_text(i, a, label_hygiene.analyze(i, a), args.show_names)) or 0)
@@ -1217,10 +1227,17 @@ def build_parser():
     q.set_defaults(func=cmd_cleanup_exec_show)
     lb = sub.add_parser("labels", help="inbox organization (M5): label hygiene, recommendations, suggestions and label-change plans; LOCAL ONLY, changes nothing in Gmail",
                              description="Inbox organization (M5). LOCAL ONLY — no Gmail changes performed: these commands read the local index and never call Gmail, edit labels or create filters.")
-    lbsub = lb.add_subparsers(dest="labels_command", required=True, metavar="{report}")
+    lbsub = lb.add_subparsers(dest="labels_command", required=True, metavar="{report,recommend,suggest-rules}")
     q = account_opt(lbsub.add_parser("report", help="label hygiene report: duplicates, unused labels, nesting problems (local, read-only)"))
     q.add_argument("--show-names", action="store_true", help="display label names (private; hidden by default)")
     q.set_defaults(func=cmd_labels_report)
+    q = account_opt(lbsub.add_parser("recommend", help="label recommendations from label usage, sender patterns and classification (local, suggestions only)"))
+    q.add_argument("--show-names", action="store_true", help="display label names (private; hidden by default)")
+    q.add_argument("--show-senders", action="store_true", help="display sender addresses and domains (private; hidden by default)")
+    q.set_defaults(func=cmd_labels_recommend)
+    q = account_opt(lbsub.add_parser("suggest-rules", help="proposed M3 classification rules with the standard preview (local; never saves a rule)"))
+    q.add_argument("--show-senders", action="store_true", help="display sender addresses and domains (private; hidden by default)")
+    q.set_defaults(func=cmd_labels_suggest_rules)
     return parser
 
 
