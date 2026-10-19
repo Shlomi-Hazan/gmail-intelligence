@@ -44,6 +44,13 @@ The project must incur zero additional financial cost. Security-relevant consequ
 - **Local logout is not revocation.** `auth logout-write` deletes only the local token; `auth revoke-write` explicitly revokes the grant at Google first. `auth status-write` is local only and never refreshes.
 - **Not independently verified:** real Google behaviour (headers, error bodies, the `modify` response), the system CA store used by the stdlib TLS context on the owner's Python, Keychain access prompts, and whether revoking one client's grant leaves another client's grant untouched. These need a separately approved live stage.
 
+## 1d. M5 inbox organization boundary (local only)
+- Every `labels` command (hygiene report, recommendations, proposed rules, filter suggestions, label-change plans, local approvals) reads and writes **only the local SQLite index**. None of them imports or calls the Gmail adapter, OAuth, the Keychain or any write module (static tests enforce this), and none requests a new OAuth scope. In particular no filter-management scope is requested: filter suggestions are text, never a filter.
+- No label plan can be executed: there is no execute function, and an approval is a local ledger record that grants nothing. `LIVE_EXECUTION_ENABLED` stays `False`.
+- Label names and sender addresses are private mailbox content: hidden by default, sanitized when shown, never written to the audit log or to GitHub.
+- Label-plan audit events share the M4 hash chain (tamper-evident, not tamper-proof, as described in `cleanup_audit`). Schema v6 is additive and migrated after an automatic verified backup.
+- Limits: a local database can be rewritten by anyone who controls the macOS account; label-plan freshness is judged against the last scan, not live Gmail; Gmail's behaviour for label create/rename/nest/merge is unverified. See [LABELS.md](LABELS.md).
+
 ## 2. Assets
 OAuth refresh/access tokens · local SQLite metadata (reveals contacts, habits, subjects) · audit logs · Google Cloud client credentials · the user's real mailbox · repository integrity.
 
