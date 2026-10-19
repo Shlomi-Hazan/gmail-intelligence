@@ -51,6 +51,11 @@ The project must incur zero additional financial cost. Security-relevant consequ
 - Label-plan audit events share the M4 hash chain (tamper-evident, not tamper-proof, as described in `cleanup_audit`). Schema v6 is additive and migrated after an automatic verified backup.
 - Limits: a local database can be rewritten by anyone who controls the macOS account; label-plan freshness is judged against the last scan, not live Gmail; Gmail's behaviour for label create/rename/nest/merge is unverified. See [LABELS.md](LABELS.md).
 
+## 1e. Dashboard server boundary (M6, local only)
+- `dashboard serve` runs a standard-library HTTP server on `127.0.0.1` only (no host option). It serves `GET`/`HEAD` only, requires a per-launch bearer token on every `/api/` request (delivered as a URL fragment, held in memory, compared in constant time, never stored or logged), validates `Host` exactly (DNS rebinding), checks `Origin` and `Sec-Fetch-Site`, sends no CORS headers and a strict CSP, and opens the index with SQLite `mode=ro` (never migrating). It imports no Gmail, OAuth, Keychain or write module and has no mutation endpoint; static tests enforce this.
+- The UI renders mailbox-derived text only as text (no `innerHTML`, no `eval`), loads nothing from the network, sets no cookie and stores only language and appearance locally. Sender addresses and label names are hidden by default.
+- Limits: local malware running as the same macOS user can read the index file and the server's memory; the token does not defend against that. See [DASHBOARD.md](DASHBOARD.md) section 4.
+
 ## 2. Assets
 OAuth refresh/access tokens · local SQLite metadata (reveals contacts, habits, subjects) · audit logs · Google Cloud client credentials · the user's real mailbox · repository integrity.
 

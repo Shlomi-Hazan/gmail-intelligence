@@ -44,7 +44,8 @@ body { margin: 0; min-block-size: 100vh; min-block-size: 100dvh; background: var
 h1, h2, h3, p, ul, ol, dl, dd, figure { margin: 0; }
 ul, ol { padding: 0; list-style: none; }
 button, input, select { font: inherit; color: inherit; }
-button { touch-action: manipulation; }
+button, a, summary, label { touch-action: manipulation; }
+.nav a, .seg label, .menu > summary, .btn, details.alt summary { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; background: var(--sunken); padding: .1em .4em; border-radius: 6px; }
 bdi { unicode-bidi: isolate; }
 a { color: var(--accent); }
@@ -68,11 +69,10 @@ a { color: var(--accent); }
 .bar { display: flex; align-items: center; gap: var(--s4); min-block-size: var(--bar-h); padding: var(--s3) var(--s7); }
 .bar h1 { flex: 1; min-inline-size: 0; font-size: var(--fs-lg); font-weight: 650; letter-spacing: -.01em; line-height: 1.25; }
 main { flex: 1; inline-size: 100%; max-inline-size: 1160px; margin-inline: auto; padding: var(--s2) var(--s7) var(--s8); outline: none; display: flex; flex-direction: column; gap: var(--s6); }
-.view { display: flex; flex-direction: column; gap: var(--s6); animation: fade var(--t-fast) var(--ease); }
-@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+.view { display: flex; flex-direction: column; gap: var(--s6); }
 
 /* ---- header controls */
-.chip { display: inline-flex; align-items: center; gap: var(--s2); min-block-size: 32px; padding: 0 var(--s3); border-radius: var(--r-pill); background: var(--sunken); color: var(--ink); font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; }
+.chip { display: inline-flex; align-items: center; gap: var(--s2); min-block-size: 32px; padding: 0 var(--s3); border-radius: var(--r-pill); background: var(--sunken); color: var(--ink); font-size: var(--fs-sm); font-weight: 500; max-inline-size: 100%; padding-block: var(--s1); line-height: 1.3; }
 .chip.ok { background: var(--ok-soft); color: var(--ok); } .chip.warn { background: var(--warn-soft); color: var(--warn); } .chip.err { background: var(--err-soft); color: var(--err); }
 .menu { position: relative; }
 .menu > summary { list-style: none; display: inline-flex; align-items: center; justify-content: center; inline-size: 44px; block-size: 44px; border-radius: var(--r-control); cursor: pointer; color: var(--ink-2); transition: background-color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease); }
@@ -111,8 +111,8 @@ main { flex: 1; inline-size: 100%; max-inline-size: 1160px; margin-inline: auto;
 .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--s5) var(--s6); }
 .kpis div { display: flex; flex-direction: column; gap: var(--s1); min-inline-size: 0; }
 .kpis dt { font-size: var(--fs-sm); color: var(--ink-2); order: 2; }
-.kpis dd { font-size: var(--fs-xl); font-weight: 650; letter-spacing: -.02em; line-height: 1.15; order: 1; }
-.kpis dd small { font-size: var(--fs-sm); font-weight: 500; color: var(--ink-2); letter-spacing: 0; margin-inline-start: var(--s1); }
+.kpis dd { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--s1); font-size: var(--fs-xl); font-weight: 650; letter-spacing: -.02em; line-height: 1.15; order: 1; }
+.kpis dd small { font-size: var(--fs-sm); font-weight: 500; color: var(--ink-2); letter-spacing: 0; white-space: nowrap; }
 
 .rank { display: flex; flex-direction: column; gap: var(--s3); counter-reset: none; }
 .rank li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s1) var(--s4); align-items: baseline; }
@@ -203,7 +203,7 @@ caption { text-align: start; color: var(--ink-2); padding-block-end: var(--s2); 
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
-  .view { animation: none; } .skeleton i { animation: none; }
+  .skeleton i { animation: none; }
 }
 @media (forced-colors: active) {
   .panel, .notice, .chip, .badge { border: 1px solid CanvasText; /* taste-skill-ignore: forced-colors mode needs real borders */ }
@@ -235,3 +235,4 @@ svg.mini { display: block; inline-size: 100%; block-size: 56px; }
   .seg label, .btn, .menu > summary, details.alt summary, .how summary { min-block-size: 44px; }
   .nav a { min-block-size: 48px; }
 }
+.kpis dd bdi { white-space: nowrap; }

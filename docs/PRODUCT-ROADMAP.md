@@ -1,6 +1,6 @@
 # Product roadmap: M5-M11 (planning only)
 
-> **Status: direction approved by the owner. M5A-M5E are implemented as local, read-only features (see [LABELS.md](LABELS.md)); M5F and M6-M11 are NOT implemented.** It adds product direction to the planning documents. It does
+> **Status: direction approved by the owner. M5A-M5E (see [LABELS.md](LABELS.md)) and M6A-M6C (see [DASHBOARD.md](DASHBOARD.md)) are implemented as local, read-only features; M5F and M7-M11 are NOT implemented.** It adds product direction to the planning documents. It does
 > not authorize implementing any feature, any live Gmail operation, any new OAuth scope, any new dependency or any change to an existing security
 > boundary. Every milestone below needs its own explicit owner approval to start, and every increment needs its own Draft PR and review.
 > **Authority:** this document grants no authority to start M5-M11 or to perform any live Gmail operation. **Current M4 status (M4 closeout, [M4-CLOSEOUT.md](M4-CLOSEOUT.md)):** one owner-approved real single-message archive canary succeeded; live execution is disabled again (`LIVE_EXECUTION_ENABLED = False`); the write grant was revoked; real Gmail undo is NOT implemented; general live batch execution is NOT enabled; any future live operation needs fresh owner approval. The stage names M4C-B2/B3, M4C-C, M4C-D and M4D below are HISTORICAL: they describe how M4 was staged, not what remains.
@@ -71,6 +71,7 @@ API or model, no paid dependency, free-tier terms of any external service checke
 - **Owner approval gates:** start of M5; plan-and-approval design (M5D); each execution class; the filter scope.
 
 ### M6 — Inbox Intelligence Dashboard (expands the original "Local Dashboard")
+- **Status:** M6A-M6C implemented (local, read-only; zero new dependencies; documented in [DASHBOARD.md](DASHBOARD.md)). The text below is the original plan; the frontend toolchain question (Q18) was resolved by D126.
 - **Goal and value:** an at-a-glance, explainable picture of the mailbox and of what cleanup achieved.
 - **MVP (M6A-M6C):** aggregate analytics library and CLI/JSON reports first; then a local API bound to `127.0.0.1` with a per-session token; then a
   read-only local web UI: inbox overview, top senders, newsletter and notification share, category and volume trends, cleanup recommendations and

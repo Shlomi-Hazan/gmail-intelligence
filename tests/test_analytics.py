@@ -307,6 +307,17 @@ class ReadOnlyTests(AnalyticsBase):
         self.assertEqual(path.read_bytes(), raw)
         self.assertEqual(list(path.parent.glob("*backup*")), [])
 
+    def test_paths_with_spaces_and_url_special_characters_open(self):
+        folder = self.tmp / "Application Support x#y?z%41 \u00e9"
+        folder.mkdir()
+        path = folder / "index.sqlite3"
+        idx.Index(str(path)).close()
+        ro = idx.ReadOnlyIndex(path)
+        self.assertEqual(ro.conn.execute("PRAGMA user_version").fetchone()[0], idx.SCHEMA_VERSION)
+        with self.assertRaises(sqlite3.OperationalError):
+            ro.conn.execute("CREATE TABLE t (a)")
+        ro.close()
+
     def test_missing_corrupt_and_future_files(self):
         with self.assertRaises(idx.IndexProblem):
             idx.ReadOnlyIndex(self.tmp / "nope.sqlite3")
