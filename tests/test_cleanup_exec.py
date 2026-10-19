@@ -1584,8 +1584,8 @@ class ReplaceBypassAndEmptyLabelTests(ExecBase):
             self.assertEqual(other.conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         finally:
             other.conn.close()
-        self.assertEqual(sum(1 for line in (SRC / "gmail_intelligence" / "index.py").read_text().splitlines() if "sqlite3.connect(" in line), 3)
-        # the two other connects only create and verify a backup copy; the one that opens the index is followed by the pragmas
+        self.assertEqual(sum(1 for line in (SRC / "gmail_intelligence" / "index.py").read_text().splitlines() if "sqlite3.connect(" in line), 4)
+        # two connects only create and verify a backup copy; the M6 ReadOnlyIndex opens with mode=ro and query_only (it can never write, so no trigger can fire); the one that opens the index is followed by the pragmas
         text = (SRC / "gmail_intelligence" / "index.py").read_text()
         self.assertLess(text.index("self.conn = sqlite3.connect(self.path)"), text.index("PRAGMA recursive_triggers = ON"))
 
