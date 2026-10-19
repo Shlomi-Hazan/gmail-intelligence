@@ -153,7 +153,7 @@ class ImportBoundaryTests(unittest.TestCase):
 
 class UnchangedBehaviourTests(Base):
     def test_m4c_a_semantics_and_schema_are_untouched(self):
-        self.assertEqual(idx.SCHEMA_VERSION, 5)
+        self.assertEqual(idx.SCHEMA_VERSION, 6)  # M5D added v6 (label plans); the M4C-A semantics below are unchanged
         self.assertEqual(cleanup_exec.ACCEPTED_EVIDENCE_SOURCES, ("CALLER_SUPPLIED",))  # TRUSTED_ADAPTER stays unavailable until M4C-C
         self.assertEqual(set(cleanup_exec.OUTCOME_CODES), {"APPLIED", "NOT_APPLIED", "UNKNOWN"})
         for module in WRITE_MODULES:
