@@ -140,13 +140,18 @@ def _sorted(items):
     return tuple(sorted(items, key=key))
 
 
-def recommend(index, account):
-    """Label recommendations. See the module docstring. Deterministic."""
+def gather(index, account):
+    """The per-group facts both `recommend` and `suggest_rules` read. Read-only; compute it once per request and pass it to both (it is never cached between requests)."""
+    return _gather(index, account)
+
+
+def recommend(index, account, groups=None):
+    """Label recommendations. See the module docstring. Deterministic. `groups` may be the result of `gather`, to avoid reading the index again."""
     state, why = report.completeness(index, account)
     complete = state == "complete"
     total = index._q("SELECT COUNT(*) FROM messages WHERE account=?", account)[0][0]
     labels = {l.id: l for l in lm.load_labels(index, account) if l.user}
-    groups = _gather(index, account)
+    groups = _gather(index, account) if groups is None else groups
     out, suppressed, considered = [], Counter(), 0
     seen = set()
     for key, g in sorted(groups.items()):
@@ -203,12 +208,13 @@ def recommend(index, account):
     return Suggestions(_sorted(out), tuple(sorted(suppressed.items())), total, considered, state, why)
 
 
-def suggest_rules(index, account):
-    """Proposed M3 classification rules. Each reuses `classify.validate_new_rule` and `classifier.preview_rule`; nothing is saved."""
+def suggest_rules(index, account, groups=None, context=None):
+    """Proposed M3 classification rules. Each reuses `classify.validate_new_rule` and the M3 preview (`classifier.PreviewContext.preview`, the single implementation behind
+    `classifier.preview_rule`); nothing is saved. `groups` (from `gather`) and `context` (a `classifier.PreviewContext`) may be passed in to avoid recomputing them."""
     state, why = report.completeness(index, account)
     complete = state == "complete"
     total = index._q("SELECT COUNT(*) FROM messages WHERE account=?", account)[0][0]
-    groups = _gather(index, account)
+    groups = _gather(index, account) if groups is None else groups
     existing = classifier.active_rules(index, account)
     out, suppressed, considered = [], Counter(), 0
     for key, g in sorted(groups.items()):
@@ -235,7 +241,9 @@ def suggest_rules(index, account):
         except classify.RuleError:
             suppressed["not a valid rule"] += 1
             continue
-        prev = classifier.preview_rule(index, account, **fields)
+        if context is None:  # built on first use, so an index with nothing to preview pays nothing
+            context = classifier.PreviewContext(index, account)
+        prev = context.preview(**fields)
         if prev["type_changes"] == 0 and prev["now_unknown"] == 0:
             suppressed["no effect: current classification already agrees"] += 1
             continue

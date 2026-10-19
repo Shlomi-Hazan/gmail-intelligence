@@ -169,28 +169,64 @@ def clear(index, account):
         return index.conn.execute("DELETE FROM message_class WHERE account=?", (account,)).rowcount
 
 
-def preview_rule(index, account, **fields):
-    """Impact of a not-yet-saved rule on the local index; read-only. Returns match/change counts."""
-    v = classify.validate_new_rule(**fields)
-    cand = Rule("preview", v["kind"], v["value"], v["confidence"], v["note"] or "candidate rule",
-                priority=v["priority"], sender=v.get("sender"), domain=v.get("domain"), label=v.get("label"),
-                unread=v.get("unread"))
-    user = active_rules(index, account)
-    rows = index._q("SELECT id, sender, unread FROM messages WHERE account=?", account)
-    out = {"messages": len(rows), "matched": 0, "type_changes": 0, "now_unknown": 0}
-    for k in range(0, len(rows), BATCH):
-        chunk = rows[k:k + BATCH]
-        feats = features_for(index, account, chunk)
-        for r in chunk:
-            f = feats[r["id"]]
+class PreviewContext:
+    """What every rule preview needs to know about one account's index, computed ONCE and reused by any number of previews (M6 performance hotfix).
+
+    The semantics are exactly those of the original single-call `preview_rule`: every indexed message is considered, a candidate "matches" by `Rule.matches`, and a match counts as a
+    type change when its sorted type or attention values differ with the candidate added to the active user rules. Only the work is organised differently: message features (labels,
+    names) are loaded once instead of once per preview, the classification of a message WITHOUT the candidate is computed once per message and remembered, and a candidate with a sender or
+    domain condition looks only at the messages of that sender or domain (the exact `Rule.matches` check still decides every one of them). One context belongs to one run of an analysis and one
+    account; it is never kept between runs.
+    """
+
+    def __init__(self, index, account):
+        self.user = active_rules(index, account)
+        rows = index._q("SELECT id, sender, unread FROM messages WHERE account=?", account)
+        feats = features_for(index, account, rows)
+        self.features = [feats[r["id"]] for r in rows]
+        self.total = len(self.features)
+        self.by_sender, self.by_domain = {}, {}
+        for i, f in enumerate(self.features):
+            self.by_sender.setdefault(f.sender, []).append(i)
+            self.by_domain.setdefault(f.domain, []).append(i)
+        self._before = {}
+
+    def _without_candidate(self, i):
+        got = self._before.get(i)
+        if got is None:
+            outcome = classify.evaluate(self.features[i], self.user)
+            got = self._before[i] = (sorted(outcome.values()), sorted(outcome.values("attention")), outcome.values() == ["UNKNOWN"])
+        return got
+
+    def preview(self, **fields):
+        """Impact of a not-yet-saved rule on the local index; read-only. Returns match/change counts."""
+        v = classify.validate_new_rule(**fields)
+        cand = Rule("preview", v["kind"], v["value"], v["confidence"], v["note"] or "candidate rule",
+                    priority=v["priority"], sender=v.get("sender"), domain=v.get("domain"), label=v.get("label"),
+                    unread=v.get("unread"))
+        if cand.sender is not None:
+            pool = self.by_sender.get(cand.sender, ())
+        elif cand.domain is not None:
+            pool = self.by_domain.get(cand.domain, ())
+        else:
+            pool = range(self.total)
+        with_candidate = [*self.user, cand]
+        out = {"messages": self.total, "matched": 0, "type_changes": 0, "now_unknown": 0}
+        for i in pool:
+            f = self.features[i]
             if not cand.matches(f):
                 continue
             out["matched"] += 1
-            before, after = classify.evaluate(f, user), classify.evaluate(f, [*user, cand])
-            out["now_unknown"] += before.values() == ["UNKNOWN"]
-            out["type_changes"] += (sorted(before.values()), sorted(before.values("attention"))) != (
-                sorted(after.values()), sorted(after.values("attention")))
-    return out
+            types, attention, unknown = self._without_candidate(i)
+            after = classify.evaluate(f, with_candidate)
+            out["now_unknown"] += unknown
+            out["type_changes"] += (types, attention) != (sorted(after.values()), sorted(after.values("attention")))
+        return out
+
+
+def preview_rule(index, account, **fields):
+    """Impact of a not-yet-saved rule on the local index; read-only. Returns match/change counts."""
+    return PreviewContext(index, account).preview(**fields)
 
 
 def counts(index, account):
