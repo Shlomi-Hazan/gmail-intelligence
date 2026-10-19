@@ -1,6 +1,6 @@
 """Plain-text rendering for the M5 label features. LOCAL ONLY. Label names and sender addresses are private: they are hidden by default and shown only when the owner passes
 the matching flag. Whatever is shown is sanitized, because a label name comes from the mailbox and is untrusted input (no control or escape characters reach the terminal)."""
-from gmail_intelligence import cleanup_protect, label_model as lm
+from gmail_intelligence import cleanup_protect, filter_suggest, label_model as lm
 
 LOCAL_ONLY = "LOCAL ONLY — no Gmail changes performed."
 CONFIDENCE_NOTE = "Confidence is the strength of the evidence, not a probability. OBSERVED = a fact computed from the local index; INFERRED = a judgement built on facts."
@@ -103,4 +103,27 @@ def rules_text(index, account, s, show_senders=False):
                 "     preview (the M3 preview, unsaved): " + ", ".join(f"{k}={v}" for k, v in p.preview), f"     existing coverage: {p.existing}",
                 "     protected mail: the group contains none; classification never overrides cleanup protection"]
     out += ["", CONFIDENCE_NOTE, "No rule was saved. To adopt one you must run `classify rules add` yourself; this command never does."]
+    return "\n".join(out)
+
+
+def filters_text(index, account, s, show_names=False, show_senders=False):
+    by_id = {lab.id: lab for lab in lm.load_labels(index, account)}
+    out = ["Gmail filter suggestions", "  " + LOCAL_ONLY, f"  account: {cleanup_protect.HIDDEN_ACCOUNT}", "  " + index_line(s.index_state, s.index_why),
+           f"  indexed messages: {s.messages_indexed}"]
+    out += [f"  suppressed: {n} group(s): {why}" for why, n in s.suppressed]
+    if not s.items:
+        out += ["", "No filter suggestions: the local evidence is too small or too mixed.", "", CONFIDENCE_NOTE]
+        return "\n".join(out)
+    out += ["", f"Suggestions: {len(s.items)}"]
+    for n, f in enumerate(s.items, 1):
+        crit = dict(f.criteria)
+        who = ", ".join(f"{k} = {safe(v)}" for k, v in crit.items()) if show_senders else f"{'/'.join(sorted(crit))} #{n} (hidden; use --show-senders)"
+        label_id = f.actions[0][1]
+        lab = by_id.get(label_id)
+        out += [f"  {n}. if the {who}", f"     then: apply the label {label_id}" + (f' "{safe(lab.name)}"' if show_names and lab else " (name hidden; use --show-names)"),
+                f"     confidence {f.confidence} · {f.basis}", f"     why: {f.reason}", "     evidence: " + ", ".join(f"{k}={v}" for k, v in f.evidence),
+                "     estimated effect on the local index: " + ", ".join(f"{k}={v}" for k, v in f.effect)]
+        out += [f"     warning: {w}" for w in f.warnings]
+    out += ["", CONFIDENCE_NOTE, "A filter is not a classification rule: it would act inside Gmail, while a rule only labels the local index.", filter_suggest.NOTHING_APPLIED,
+            "Only exact sender/domain criteria and the 'apply label' action are ever suggested; forwarding, Trash, delete, skip-Inbox and send are rejected by design."]
     return "\n".join(out)
