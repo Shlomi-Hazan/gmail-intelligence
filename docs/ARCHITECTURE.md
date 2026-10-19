@@ -190,9 +190,10 @@ Key rules **[Proposal]**:
 - Exports are explicit, local, and git-ignored.
 - See [SECURITY.md](SECURITY.md).
 
-## 13. Dashboard boundary (M6) **[Future]**
+## 13. Dashboard boundary (M6) **[Implemented; local and read-only]**
 
-- A local web SPA (React was an early direction, D5; the technology and toolchain are undecided, Q18) served locally; talks only to the local API bound to `127.0.0.1` with a per-session token and strict CORS/Origin checks (DNS-rebinding protection). The dashboard holds no Gmail tokens and cannot call Gmail directly. Rendering email-derived strings must escape/sanitize (XSS).
+- `analytics.py` (aggregate, explainable, deterministic sections over the local index) is exposed as `mailbox insights` (text/JSON) and, through `dashboard_server.py`, as a read-only JSON API plus a static single-page UI (vanilla JavaScript ES modules, hand-authored SVG, system fonts; no framework, no build step, no dependency). D5's React direction and the FastAPI proposal in section 3 are superseded for the dashboard by D119-D127.
+- The server is Python standard library only: it binds `127.0.0.1`, serves `GET`/`HEAD` only, requires a per-launch bearer token (delivered as a URL fragment), validates `Host`, `Origin` and fetch metadata (DNS-rebinding defence), sends no CORS headers, applies a strict CSP, and opens the index with `index.ReadOnlyIndex` (SQLite `mode=ro`, never migrates). It imports no Gmail, OAuth, Keychain or write module. Rendering of email-derived text is text-only. Details and tests: [DASHBOARD.md](DASHBOARD.md), [SECURITY.md](SECURITY.md) section 1e.
 
 ## 14. Zero Additional Cost constraint **[Approved — mandatory, project-wide]**
 

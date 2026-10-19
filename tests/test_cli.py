@@ -90,6 +90,7 @@ class OfflineGuarantees(unittest.TestCase):
     # Only these modules may import third-party / Google libraries (all lazily imported by the CLI).
     GOOGLE_MODULES = {"oauth.py", "gmail.py", "keystore.py", "oauth_write.py", "keystore_write.py"}  # scanner/index/report stay stdlib-only
     WRITE_TRANSPORT_MODULES = {"gmail_write.py"}  # M4C-B1: stdlib-only thin HTTPS transport; may import http.client and ssl, nothing broader
+    DASHBOARD_SERVER_MODULES = {"dashboard_server.py"}
     LOOPBACK_AI_MODULES = {"ai_http.py"}  # M3: the only stdlib-networking module; may import urllib, nothing broader
 
     def test_runtime_dependencies_are_the_reviewed_set(self):
@@ -109,6 +110,12 @@ class OfflineGuarantees(unittest.TestCase):
                     names = [node.module]
                 for name in names:
                     top = name.split(".")[0]
+                    if path.name in self.DASHBOARD_SERVER_MODULES:  # M6B: the loopback-only, read-only dashboard server may use exactly these two stdlib modules for serving and query parsing
+                        self.assertNotIn(top, {"socket", "ssl", "smtplib", "imaplib", "poplib", "ftplib", "requests", "httpx", "googleapiclient", "google"}, path.name)
+                        self.assertIn(top, stdlib, path.name)
+                        if top in ("http", "urllib"):
+                            self.assertIn(name, ("http.server", "urllib.parse"), path.name)
+                        continue
                     if path.name in self.LOOPBACK_AI_MODULES:
                         self.assertNotIn(top, {"socket", "ssl", "http", "smtplib", "imaplib", "poplib", "ftplib"}, path.name)
                         continue

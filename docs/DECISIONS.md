@@ -128,6 +128,19 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D64 | **Subscriptions are recommendation-only.** No automatic unsubscribe request, link visit, one-click POST or unsubscribe e-mail (sending stays forbidden); unsubscribe links are stored as host and presence flags only. |
 | D65 | **Scopes and scheduling.** The recommendation phases of M5-M11 request no new OAuth scope. `gmail.settings.basic` (filters) is considered only for a separately approved filter-execution phase. Scheduled analysis is opt-in persistent configuration, read-only, with no access to write credentials. |
 
+## M6 decisions (owner-approved scope M6A-M6C; implemented local and read-only)
+| ID | Decision |
+|----|----------|
+| D119 | **M6 scope.** M6A analytics (`mailbox insights`, JSON and text), M6B a loopback-only read-only API, M6C a read-only UI with Overview, Trends, Senders, Cleanup, Organization and Data screens, in one branch and one PR. No action buttons, no Gmail access, no new OAuth scope, live execution stays disabled. |
+| D120 | **Read-only index access.** `index.ReadOnlyIndex` opens SQLite with `mode=ro` and `query_only`, never creates a file, never migrates and refuses any schema other than the current one. It is the only way the dashboard server touches the database. |
+| D121 | **Session token and browser handling.** A per-launch random token, in process memory only, delivered as a URL fragment, moved into a JavaScript variable and removed from the address bar; sent as `Authorization: Bearer`, compared in constant time; never stored or logged. A URL fragment is not an access control by itself: the token check, Host validation and the absence of CORS are the controls. |
+| D122 | **Origin policy.** Same-origin only: no CORS headers at all, preflight refused, `Origin` and `Sec-Fetch-Site` checked when present; a missing `Origin` on a same-origin `GET` is allowed because the token gates every API request; strict `Host` (including port) defeats DNS rebinding. |
+| D123 | **Privacy by default.** Sender addresses and label names are hidden unless the owner starts the server with `--reveal-senders` / `--reveal-names`; domains are shown; mailbox-derived text is cleaned of control and bidirectional-override characters and rendered only as text, isolated with `<bdi>`. No account identifier is sent to the browser or stored in browser preferences. |
+| D124 | **Honest analytics.** Every aggregate states its basis (OBSERVED, INFERRED, MIXED), carries the data age and index state, and distinguishes a snapshot from live Gmail; only current classifications count; a message with two compatible types is counted once under the first in taxonomy order so breakdowns add up. |
+| D125 | **Bilingual and appearance.** English and Hebrew from v1 with full RTL, catalogs `en.json` / `he.json`, `Intl` plurals and formatting; System / Light / Dark with a manual selector (the owner approved an in-app override); only language and appearance are persisted locally. |
+| D126 | **Stack: zero dependencies.** Python standard library HTTP server, vanilla JavaScript ES modules, hand-written CSS, hand-authored SVG charts, system fonts, no build step. This resolves Q18 for the dashboard and supersedes D5's React direction and the FastAPI proposal for it; no dependency review is needed because none was added. |
+| D127 | **Design process.** The installed design skills were loaded and applied while designing and reviewing the UI; evidence (and what was not run, including the Impeccable launcher, which needs a network download) is recorded in DASHBOARD.md section 10. |
+
 ## M5 decisions (owner-approved scope M5A-M5E; implemented local and read-only)
 | ID | Decision |
 |----|----------|
@@ -207,7 +220,7 @@ Note: the row labelled `Q12 update` is a historical supplement to Q12 (billing s
 | Q15 | **Content-indexing scope** (M8, M10, M11): which data classes (subject, snippet, body, attachment text) may be indexed locally, with what consent, retention and at-rest protection (the SQLite index is not encrypted). |
 | Q16 | **Build order** of M5-M11 after M4 (a recommendation is in PRODUCT-ROADMAP.md section 5; not binding). |
 | Q17 | **Read-adapter extensions:** extra headers (`List-Unsubscribe`, `List-Id`) for M9B and attachment part metadata without body data for M10A; feasibility to be verified, each reviewed separately. |
-| Q18 | **Frontend toolchain** for M6C: every dependency free, reviewed for license and supply chain (extends Q1). |
+| Q18 | **Frontend toolchain** for M6C: every dependency free, reviewed for license and supply chain (extends Q1). **Resolved for M6 by D126: no frontend dependency exists.** |
 | Q19 | **Scheduling** of read-only analysis (M7 stretch): mechanism, consent and logging. |
 
 Resolved in this correction: Q4 → A2 (approved direction); Q11 → A4 (accepted gap, no upgrade).

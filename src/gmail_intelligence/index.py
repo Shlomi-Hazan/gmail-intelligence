@@ -6,6 +6,7 @@ classification tables, v3 = M4A protection rules, v4 = M4B plans/approvals/audit
 """
 import os
 import sqlite3
+from pathlib import Path
 from datetime import datetime, timezone
 
 from gmail_intelligence import config
@@ -635,3 +636,31 @@ class Index:
         return [dict(r) for r in self._q(
             f"SELECT {key} who, COUNT(*) n, COALESCE(SUM(unread),0) unread, COALESCE(SUM(size),0) size "
             f"FROM messages WHERE account=? {where} GROUP BY who ORDER BY n DESC, who LIMIT ?", account, limit)]
+
+
+class ReadOnlyIndex(Index):
+    """A TRUE read-only view of an existing index (M6): the file is opened with SQLite's `mode=ro` and `query_only`, so any write attempt fails inside SQLite itself.
+
+    It never creates a file, never migrates (a schema other than the current one is refused with a clear message), never changes permissions and never takes a backup.
+    The inherited write methods exist but cannot succeed on this connection. One instance belongs to one thread (a SQLite connection is not shared across threads).
+    """
+
+    def __init__(self, path):
+        self.path = os.fspath(path)
+        if not os.path.isfile(self.path):
+            raise IndexProblem("no local index yet; run `mailbox scan --limit 100` first")
+        uri = Path(os.path.abspath(self.path)).as_uri() + "?mode=ro"
+        try:
+            self.conn = sqlite3.connect(uri, uri=True)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA query_only = ON")
+            version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        except sqlite3.DatabaseError:
+            raise IndexProblem("the local index file is unreadable or corrupt; nothing was changed") from None
+        self.migrated_from = self.backup_path = None
+        if version != SCHEMA_VERSION:
+            self.conn.close()
+            if version < SCHEMA_VERSION:
+                raise IndexProblem(f"the local index has schema version {version}; this feature needs {SCHEMA_VERSION}. It is never upgraded automatically here: "
+                                   "open it once with a normal command (a verified backup is made first)")
+            raise IndexProblem(f"unsupported index schema version {version} (expected {SCHEMA_VERSION})")

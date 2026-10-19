@@ -1097,6 +1097,32 @@ def cmd_labels_approve(args):
     return _label_plan_cmd(args, go)
 
 
+def cmd_mailbox_insights(args):
+    from gmail_intelligence import analytics, analytics_report
+
+    def go(index, account):
+        a = analytics.Analytics(index, account, reveal_senders=args.reveal_senders, reveal_names=args.reveal_names)
+        names = list(analytics.SECTIONS) if args.section == "all" else [args.section]
+        kw = {"senders": {"kind": args.kind, "limit": args.limit}, "categories": {"by": "month" if args.by_month else "total"}}
+        envs = [a.section(n, **kw.get(n, {})) for n in names]
+        print(analytics_report.as_json(envs[0] if len(envs) == 1 else {e["section"]: e for e in envs}) if args.json else analytics_report.text(envs))
+        return 0
+    return _with_index(args, go)
+
+
+def cmd_dashboard_serve(args):
+    from gmail_intelligence import config, dashboard_server, index as idx
+
+    try:
+        path = config.index_path()
+        account = dashboard_server.detect_account(path, args.account)
+        if args.port and not 1024 <= args.port <= 65535:
+            raise ValueError("--port must be 0 (any free port) or between 1024 and 65535")
+        return dashboard_server.serve(path, account, port=args.port, open_browser=args.open, reveal_senders=args.reveal_senders, reveal_names=args.reveal_names, verbose=args.verbose)
+    except (ValueError, idx.IndexProblem, OSError) as exc:
+        return _fail(exc)
+
+
 def cmd_labels_report(args):
     from gmail_intelligence import label_hygiene, label_report
     return _with_index(args, lambda i, a: print(label_report.hygiene_text(i, a, label_hygiene.analyze(i, a), args.show_names)) or 0)
@@ -1121,7 +1147,7 @@ def build_parser():
         prog="gmail-intelligence",
         description="Gmail Intelligence (early development). Offline: no Gmail integration yet.",
     )
-    sub = parser.add_subparsers(dest="command", required=True, metavar="{version,doctor,auth,gmail,mailbox,classify,cleanup}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="{version,doctor,auth,gmail,mailbox,classify,cleanup,labels,dashboard}")
     sub.add_parser("version", help="print the version").set_defaults(func=cmd_version)
     sub.add_parser("doctor", help="check local development prerequisites (offline)").set_defaults(func=cmd_doctor)
 
@@ -1158,8 +1184,21 @@ def build_parser():
     gsub = gm.add_subparsers(dest="gmail_command", required=True, metavar="{check}")
     gsub.add_parser("check", help="verify connectivity and identity (reads profile counts only)").set_defaults(func=cmd_gmail_check)
 
+    def account_opt(q):
+        q.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the logged-in account)")
+        return q
+
     mb = sub.add_parser("mailbox", help="read-only mailbox index and reports (M2)")
-    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,status,report,top-senders,purge}")
+    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,status,report,insights,top-senders,purge}")
+    q = account_opt(msub.add_parser("insights", help="aggregate, explainable analytics of the local index (M6A; local only, human-readable or --json)"))
+    q.add_argument("section", nargs="?", default="overview", choices=("all", "freshness", "overview", "volume", "categories", "senders", "subscriptions", "cleanup-summary", "cleanup-history", "organization"))
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.add_argument("--kind", choices=("domain", "address"), default="domain", help="senders: group by domain (default) or address")
+    q.add_argument("--limit", type=int, default=10, help="senders: how many to list (1-100)")
+    q.add_argument("--by-month", action="store_true", help="categories: break the breakdown down by month")
+    q.add_argument("--reveal-senders", action="store_true", help="show full sender addresses (private; masked by default)")
+    q.add_argument("--reveal-names", action="store_true", help="include label names in the organization section (private; hidden by default)")
+    q.set_defaults(func=cmd_mailbox_insights)
     p = msub.add_parser("scan", help="index message metadata into the local database (contacts Gmail, read-only)")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--limit", type=int, metavar="N", help="index the newest N messages (recommended first run: 100)")
@@ -1184,10 +1223,6 @@ def build_parser():
     cl = sub.add_parser("classify", help="rules and optional local-AI classification of the local index (M3; offline)")
     csub = cl.add_subparsers(dest="classify_command", required=True,
                              metavar="{status,preview,run,report,explain,clear,rules,ai}")
-
-    def account_opt(q):
-        q.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the logged-in account)")
-        return q
 
     account_opt(csub.add_parser("status", help="classification coverage and staleness (local only)")).set_defaults(
         func=cmd_classify_status)
@@ -1325,6 +1360,16 @@ def build_parser():
     q.add_argument("exec_id")
     q.add_argument("--show-ids", action="store_true", help="also list message ids and item states")
     q.set_defaults(func=cmd_cleanup_exec_show)
+    db = sub.add_parser("dashboard", help="local read-only dashboard (M6): serves the analytics on 127.0.0.1 only; no Gmail access, no changes")
+    dbsub = db.add_subparsers(dest="dashboard_command", required=True, metavar="{serve}")
+    q = dbsub.add_parser("serve", help="start the local dashboard server (loopback only, per-launch token, read-only index)")
+    q.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the only account in it; the Keychain is never read)")
+    q.add_argument("--port", type=int, default=0, help="port (default 0: any free port)")
+    q.add_argument("--open", action="store_true", help="open the dashboard link in your default browser")
+    q.add_argument("--reveal-senders", action="store_true", help="show full sender addresses (private; masked by default)")
+    q.add_argument("--reveal-names", action="store_true", help="show label names in the Organization screen (private; hidden by default)")
+    q.add_argument("--verbose", action="store_true", help="print one line per request (method, path, status; never the token)")
+    q.set_defaults(func=cmd_dashboard_serve)
     lb = sub.add_parser("labels", help="inbox organization (M5): label hygiene, recommendations, suggestions and label-change plans; LOCAL ONLY, changes nothing in Gmail",
                              description="Inbox organization (M5). LOCAL ONLY — no Gmail changes performed: these commands read the local index and never call Gmail, edit labels or create filters.")
     lbsub = lb.add_subparsers(dest="labels_command", required=True, metavar="{report,recommend,suggest-rules,suggest-filters,plan,approve}")

@@ -4,7 +4,7 @@ A local-first command-line tool that connects to **your own Gmail account with r
 
 > **Independent project.** Gmail Intelligence is not affiliated with, endorsed by, or sponsored by Google. Gmail and Google Cloud are trademarks of Google LLC. Released under the [MIT License](LICENSE).
 
-## What works today (milestones M0-M5 complete in their approved scopes)
+## What works today (milestones M0-M6 complete in their approved scopes)
 - **M0** foundation, security model, documentation, local secret scanner.
 - **M1** Google OAuth (desktop flow, `gmail.readonly` only), tokens in the macOS Keychain, `auth` and `gmail check` commands.
 - **M2** resumable read-only mailbox scan into a local SQLite index (message ids, dates, size estimates, label ids, sender address; no bodies, subjects or attachments) and local reports: `mailbox scan | status | report | top-senders | purge`.
@@ -12,8 +12,9 @@ A local-first command-line tool that connects to **your own Gmail account with r
 - **M4** safe cleanup in an owner-approved reduced scope: candidate engine, protection rules, immutable hash-bound plans, typed one-time local approvals, a hash-chained audit log, local execution state, recovery and a fake-tested executor. One owner-approved real single-message archive canary succeeded; **live execution is disabled again** (`LIVE_EXECUTION_ENABLED = False`), the write grant was revoked, and real Gmail undo is **not implemented** ([docs/M4-CLOSEOUT.md](docs/M4-CLOSEOUT.md)).
 - **M5** intelligent inbox organization, **local and read-only** (`labels ...`): label hygiene report, label recommendations, proposed classification rules with the M3 preview, Gmail filter *suggestions* (text only), and offline label-change plans with typed local approvals and audit. Nothing in M5 changes Gmail, creates a label or filter, or can execute a plan ([docs/LABELS.md](docs/LABELS.md)). Upgrading an existing index to schema v6 creates an automatic backup first.
 
+- **M6** a local, **read-only dashboard** (`dashboard serve`) and aggregate analytics (`mailbox insights`): overview, trends, senders, cleanup recommendations and history, label organization, and honest data-freshness indicators. English and Hebrew (RTL), light/dark, desktop and mobile. It listens on `127.0.0.1` only with a per-launch token, opens the index read-only, has no action buttons and needs no new dependency ([docs/DASHBOARD.md](docs/DASHBOARD.md)).
 ## Planned, not implemented
-M5F (executing label changes), M6 local dashboard, M7 incremental sync and later milestones. Any feature that changes a mailbox needs its own explicit design, owner approval and, where required, extra OAuth scopes.
+M5F (executing label changes), M7 incremental sync and later milestones. Any feature that changes a mailbox needs its own explicit design, owner approval and, where required, extra OAuth scopes.
 
 ## Requirements and limitations
 - macOS (tokens use the macOS Keychain), Python 3.10+, and a Google account.
@@ -39,4 +40,4 @@ Then connect Gmail ([docs/SETUP-GMAIL.md](docs/SETUP-GMAIL.md)) and run `mailbox
 The project is designed to cost nothing: no billing accounts, paid APIs, paid dependencies or hosting. Free tiers can change; nothing promises that a provider stays free ([docs/DECISIONS.md](docs/DECISIONS.md) D8).
 
 ## Documentation
-[Architecture](docs/ARCHITECTURE.md) · [Security model](docs/SECURITY.md) · [Development](docs/DEVELOPMENT.md) · [Gmail setup](docs/SETUP-GMAIL.md) · [Mailbox index](docs/MAILBOX.md) · [Labels (M5)](docs/LABELS.md) · [Skills](docs/SKILLS.md) · [Decisions](docs/DECISIONS.md) · [Roadmap](docs/ROADMAP.md)
+[Architecture](docs/ARCHITECTURE.md) · [Security model](docs/SECURITY.md) · [Development](docs/DEVELOPMENT.md) · [Gmail setup](docs/SETUP-GMAIL.md) · [Mailbox index](docs/MAILBOX.md) · [Labels (M5)](docs/LABELS.md) · [Dashboard (M6)](docs/DASHBOARD.md) · [Skills](docs/SKILLS.md) · [Decisions](docs/DECISIONS.md) · [Roadmap](docs/ROADMAP.md)
