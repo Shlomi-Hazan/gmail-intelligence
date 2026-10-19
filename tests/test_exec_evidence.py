@@ -856,11 +856,11 @@ class ReportTests(TCE.ExecBase):
         self.assertIn("cannot show whether anything was sent", text)
 
     def test_the_schema_and_vocabularies_are_untouched(self):
-        self.assertEqual(idx.SCHEMA_VERSION, 5)
+        self.assertEqual(idx.SCHEMA_VERSION, 6)  # M5D added v6; the v5 execution schema below is unchanged
         self.assertIn("evidence_source IN ('CALLER_SUPPLIED','TRUSTED_ADAPTER')", idx.SCHEMA_V5)
         self.assertEqual(ce.EVIDENCE_SOURCES, ("CALLER_SUPPLIED", "TRUSTED_ADAPTER"))
         self.assertEqual(sorted(ce.STOP_REASONS), sorted(("CIRCUIT_BREAKER", "AMBIGUOUS_RESULT", "AUTH_PROBLEM", "ACCOUNT_MISMATCH", "RATE_LIMITED", "OWNER_REQUEST", "OWNER_ABORT", "INTERRUPTED")))
-        self.assertEqual(self.index.conn.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(self.index.conn.execute("PRAGMA user_version").fetchone()[0], 6)
 
 
 # ====================================================================== static boundaries

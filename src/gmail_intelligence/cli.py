@@ -986,6 +986,122 @@ def cmd_cleanup_exec_list(args):
     return _with_index(args, lambda i, a: print(cleanup_exec_report.list_text(cleanup_exec.list_executions(i, a))) or 0)
 
 
+# ---- inbox organization (M5): label hygiene, recommendations, suggestions and label-change plans. LOCAL ONLY: no Gmail call, no credential, no mailbox change ----
+def cmd_labels_recommend(args):
+    from gmail_intelligence import label_report, label_suggest
+    return _with_index(args, lambda i, a: print(label_report.recommend_text(i, a, label_suggest.recommend(i, a), args.show_names, args.show_senders)) or 0)
+
+
+def cmd_labels_suggest_rules(args):
+    from gmail_intelligence import label_report, label_suggest
+    return _with_index(args, lambda i, a: print(label_report.rules_text(i, a, label_suggest.suggest_rules(i, a), args.show_senders)) or 0)
+
+
+def cmd_labels_suggest_filters(args):
+    from gmail_intelligence import filter_suggest, label_report
+    return _with_index(args, lambda i, a: print(label_report.filters_text(i, a, filter_suggest.suggest(i, a), args.show_names, args.show_senders)) or 0)
+
+
+def _label_plan_cmd(args, fn):
+    from gmail_intelligence import label_plans as lp
+
+    def go(index, account):
+        try:
+            lp.expire_due(index, account)
+            return fn(index, account, lp)
+        except lp.PlanError as exc:
+            return _fail(exc)
+        except EOFError:
+            return _fail("cancelled: this step needs a real interactive terminal; nothing was changed")
+    return _with_index(args, go)
+
+
+def _split_pair(text, what):
+    ref, sep, rest = text.partition("=")
+    if not sep:
+        raise ValueError(f"{what} takes LABEL=VALUE (use the label id if the name contains '=')")
+    return ref.strip(), rest.strip()
+
+
+def cmd_labels_plan_create(args):
+    def go(index, account, lp):
+        try:
+            specs = [("CREATE", n) for n in args.create or []]
+            specs += [("RENAME", *_split_pair(t, "--rename")) for t in args.rename or []]
+            specs += [("NEST", *_split_pair(t, "--nest")) for t in args.nest or []]
+            specs += [("MERGE", *_split_pair(t, "--merge")) for t in args.merge or []]
+        except ValueError as exc:
+            return _fail(exc)
+        plan = lp.create_plan(index, account, specs)
+        print(f"Label plan {plan['plan_id']} created as DRAFT: {plan['op_count']} operation(s), hash {lp.short(plan['plan_hash'])}. LOCAL ONLY — no Gmail changes performed.")
+        print(f"Next: labels plan show {plan['plan_id']}, then labels plan review {plan['plan_id']}.")
+        return 0
+    return _label_plan_cmd(args, go)
+
+
+def cmd_labels_plan_list(args):
+    from gmail_intelligence import label_plan_report as rep
+    return _label_plan_cmd(args, lambda i, a, lp: print(rep.list_text(lp.list_plans(i, a))) or 0)
+
+
+def cmd_labels_plan_show(args):
+    from gmail_intelligence import label_plan_report as rep
+    return _label_plan_cmd(args, lambda i, a, lp: print(rep.plan_text(i, a, lp.get_plan(i, a, args.plan_id), args.show_names)) or 0)
+
+
+def cmd_labels_plan_review(args):
+    from gmail_intelligence import label_plan_report as rep
+
+    def go(index, account, lp):
+        plan = lp.get_plan(index, account, args.plan_id)
+        if plan["state"] != "DRAFT":
+            return _fail(f"plan is {plan['state']}; only a DRAFT plan can be reviewed")
+        problems = lp.revalidate(index, account, plan)
+        if problems:
+            return _fail("label plan is stale or inconsistent: " + lp._describe(problems) + "; create a new plan")
+        print(rep.plan_text(index, account, plan, args.show_names))
+        phrase = _tty_input(f"Type exactly  {lp.review_phrase(plan)}  to mark this plan REVIEWED (anything else aborts): ")
+        done = lp.mark_reviewed(index, account, args.plan_id, phrase)
+        print(f"Label plan {done['plan_id']} is now {done['state']}. Next: labels approve {done['plan_id']}  (local record only). LOCAL ONLY — no Gmail changes performed.")
+        return 0
+    return _label_plan_cmd(args, go)
+
+
+def cmd_labels_plan_cancel(args):
+    def go(index, account, lp):
+        try:
+            answer = _tty_input(f"Cancel label plan {args.plan_id}? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer != "y":
+            return _fail("cancelled; the plan was not changed")
+        lp.cancel(index, account, args.plan_id)
+        print(f"Label plan {args.plan_id} CANCELLED; any approval was revoked. LOCAL ONLY — no Gmail changes performed.")
+        return 0
+    return _label_plan_cmd(args, go)
+
+
+def cmd_labels_approve(args):
+    from gmail_intelligence import cleanup_audit, label_plan_report as rep
+
+    def go(index, account, lp):
+        plan = lp.get_plan(index, account, args.plan_id)
+        print(f"Label plan {plan['plan_id']}: {plan['op_count']} operation(s), hash {lp.short(plan['plan_hash'])}, state {plan['state']}.")
+        print(rep.NOT_AN_AUTH)
+        phrase = _tty_input(f"Type exactly  {lp.approval_phrase(plan)}  to record a local approval (anything else aborts): ")
+        st = lp.approve(index, account, args.plan_id, phrase)
+        a = st["approvals"][-1]
+        print(f"Label plan {args.plan_id} APPROVED locally (one-time; valid until {a['expires_at']}). Nothing was executed and Gmail was not contacted. LOCAL ONLY — no Gmail changes performed.")
+        print(f"Audit head after this approval: {cleanup_audit.head(index, account)[1][:16]} (optional checkpoint).")
+        return 0
+    return _label_plan_cmd(args, go)
+
+
+def cmd_labels_report(args):
+    from gmail_intelligence import label_hygiene, label_report
+    return _with_index(args, lambda i, a: print(label_report.hygiene_text(i, a, label_hygiene.analyze(i, a), args.show_names)) or 0)
+
+
 def cmd_cleanup_exec_show(args):
     from gmail_intelligence import cleanup_exec, cleanup_exec_report
     from gmail_intelligence import cleanup_plans as cp
@@ -1209,6 +1325,47 @@ def build_parser():
     q.add_argument("exec_id")
     q.add_argument("--show-ids", action="store_true", help="also list message ids and item states")
     q.set_defaults(func=cmd_cleanup_exec_show)
+    lb = sub.add_parser("labels", help="inbox organization (M5): label hygiene, recommendations, suggestions and label-change plans; LOCAL ONLY, changes nothing in Gmail",
+                             description="Inbox organization (M5). LOCAL ONLY — no Gmail changes performed: these commands read the local index and never call Gmail, edit labels or create filters.")
+    lbsub = lb.add_subparsers(dest="labels_command", required=True, metavar="{report,recommend,suggest-rules,suggest-filters,plan,approve}")
+    q = account_opt(lbsub.add_parser("report", help="label hygiene report: duplicates, unused labels, nesting problems (local, read-only)"))
+    q.add_argument("--show-names", action="store_true", help="display label names (private; hidden by default)")
+    q.set_defaults(func=cmd_labels_report)
+    q = account_opt(lbsub.add_parser("recommend", help="label recommendations from label usage, sender patterns and classification (local, suggestions only)"))
+    q.add_argument("--show-names", action="store_true", help="display label names (private; hidden by default)")
+    q.add_argument("--show-senders", action="store_true", help="display sender addresses and domains (private; hidden by default)")
+    q.set_defaults(func=cmd_labels_recommend)
+    q = account_opt(lbsub.add_parser("suggest-rules", help="proposed M3 classification rules with the standard preview (local; never saves a rule)"))
+    q.add_argument("--show-senders", action="store_true", help="display sender addresses and domains (private; hidden by default)")
+    q.set_defaults(func=cmd_labels_suggest_rules)
+    q = account_opt(lbsub.add_parser("suggest-filters", help="Gmail filter suggestions (text only; creates no filter and needs no filter permission)"))
+    q.add_argument("--show-names", action="store_true", help="display label names (private; hidden by default)")
+    q.add_argument("--show-senders", action="store_true", help="display sender addresses and domains (private; hidden by default)")
+    q.set_defaults(func=cmd_labels_suggest_filters)
+    pl = lbsub.add_parser("plan", help="label-change plans (CREATE/RENAME/NEST/MERGE of user labels): offline, reviewed, never executed")
+    plsub = pl.add_subparsers(dest="label_plan_command", required=True, metavar="{create,list,show,review,cancel}")
+    q = account_opt(plsub.add_parser("create", help="create a DRAFT plan from explicit operations (validates names, nesting, system labels, duplicates)"))
+    q.add_argument("--create", action="append", metavar="NAME", help="create a label with this full name (repeatable)")
+    q.add_argument("--rename", action="append", metavar="LABEL=NEWLEAF", help="rename a label's last name segment; LABEL is an id or exact name (repeatable)")
+    q.add_argument("--nest", action="append", metavar="LABEL=PARENT", help="move a label under PARENT (id or exact name), or to top level with LABEL= (repeatable)")
+    q.add_argument("--merge", action="append", metavar="SOURCE=TARGET", help="merge SOURCE into TARGET (ids or exact names); may be irreversible (repeatable)")
+    q.set_defaults(func=cmd_labels_plan_create)
+    q = account_opt(plsub.add_parser("list", help="list label plans"))
+    q.set_defaults(func=cmd_labels_plan_list)
+    q = account_opt(plsub.add_parser("show", help="show one label plan"))
+    q.add_argument("plan_id")
+    q.add_argument("--show-names", action="store_true", help="display label names (private; hidden by default)")
+    q.set_defaults(func=cmd_labels_plan_show)
+    q = account_opt(plsub.add_parser("review", help="review a DRAFT plan and confirm by typing its phrase (terminal only)"))
+    q.add_argument("plan_id")
+    q.add_argument("--show-names", action="store_true", help="display label names (private; hidden by default)")
+    q.set_defaults(func=cmd_labels_plan_review)
+    q = account_opt(plsub.add_parser("cancel", help="cancel a label plan (terminal confirmation)"))
+    q.add_argument("plan_id")
+    q.set_defaults(func=cmd_labels_plan_cancel)
+    q = account_opt(lbsub.add_parser("approve", help="record a one-time LOCAL approval for a REVIEWED label plan (grants nothing; nothing executes)"))
+    q.add_argument("plan_id")
+    q.set_defaults(func=cmd_labels_approve)
     return parser
 
 

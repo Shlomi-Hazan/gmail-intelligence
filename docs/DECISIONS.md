@@ -128,6 +128,19 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D64 | **Subscriptions are recommendation-only.** No automatic unsubscribe request, link visit, one-click POST or unsubscribe e-mail (sending stays forbidden); unsubscribe links are stored as host and presence flags only. |
 | D65 | **Scopes and scheduling.** The recommendation phases of M5-M11 request no new OAuth scope. `gmail.settings.basic` (filters) is considered only for a separately approved filter-execution phase. Scheduled analysis is opt-in persistent configuration, read-only, with no access to write credentials. |
 
+## M5 decisions (owner-approved scope M5A-M5E; implemented local and read-only)
+| ID | Decision |
+|----|----------|
+| D110 | **M5 scope.** M5A (hygiene), M5B (recommendations), M5C (proposed rules), M5D (offline label-change plans, approvals, audit) and M5E (filter suggestions) ship together as local, read-only features under one `labels` command group. **M5F (executing label changes) and every real Gmail modification are excluded**; no new OAuth scope (in particular none for filter management) is requested, and live execution stays disabled. |
+| D111 | **Confidence is evidence strength.** Tiers LOW/MEDIUM/HIGH from sample size and agreement; small samples cannot reach HIGH; a partial index, an INFERRED basis, stale or AI-sourced evidence cap a suggestion at MEDIUM; findings are marked OBSERVED or INFERRED. A label is never called globally unused from a partial index. |
+| D112 | **Conservative defaults.** Maximum recommended nesting depth 3; safe normalization only (NFKC, case-fold, whitespace); bounded edit distance 1 for near-duplicates; system labels are never analyzed, recommended or planned; protected or potentially important mail is never suggested; "tag" means the local classification type/attention concept and "label" an existing Gmail user label. |
+| D113 | **Privacy.** Label names and sender addresses are hidden by default (`--show-names`, `--show-senders`), always sanitized; the account address is never printed; audit events carry no names or ids. |
+| D114 | **No second implementations.** Rule proposals reuse the M3 rule model and the single M3 preview; no proposal is ever persisted (`classify rules add` stays the only way to store a rule). Filter suggestions are a separate concept validated by an explicit safe vocabulary (exact sender/domain criteria, apply-label action only). |
+| D115 | **Label plans are a dedicated model.** CREATE/RENAME/NEST/MERGE of user labels, frozen as canonical JSON bound to the plan hash and the label-inventory hash, with typed review and approval phrases, one-time local approvals, expiry, lockout and clock-rollback checks, and fail-closed validation. They do not reuse the message-archive plan tables. |
+| D116 | **Shared audit chain.** Label-plan events extend the `cleanup_audit` vocabulary and chain, so existing verification covers them without change; they hold counts, kinds and hashes only. |
+| D117 | **Schema v6 is additive.** Three new tables and their triggers; the migration reuses the verified-backup machinery (`pre-m5` backup, one transaction, no partial migration). The owner makes their own verified backup before first opening the real index with this version. |
+| D118 | **No execute path.** No label plan can be executed in this build; an approval is a local record only; a static test enforces that no execute/apply function exists and that no M5 module imports Gmail, OAuth, Keychain or write modules. |
+
 ## M3 decisions
 | ID | Decision |
 |----|----------|

@@ -20,7 +20,10 @@ EVENTS = ("PLAN_CREATED", "PLAN_REVIEWED", "REVIEW_REJECTED", "PLAN_APPROVED", "
           # M4D: owner-approved undo of an archived item (the audit chain is the undo ledger: it never rewrites the original execution history)
           "UNDO_AUTHORIZED", "UNDO_REJECTED", "UNDO_INTENT", "UNDO_RESULT",
           # M4 canary: the owner's separate confirmation to archive ONE message live (the entry point is disabled in this build)
-          "CANARY_CONFIRMED", "CANARY_REJECTED")
+          "CANARY_CONFIRMED", "CANARY_REJECTED",
+          # M5D: local label-change plans (counts/hashes/state names only; never label names or ids). They share this hash chain, so M4 verification covers them.
+          "LABEL_PLAN_CREATED", "LABEL_PLAN_REVIEWED", "LABEL_REVIEW_REJECTED", "LABEL_PLAN_APPROVED", "LABEL_APPROVAL_REJECTED", "LABEL_PLAN_CANCELLED",
+          "LABEL_PLAN_EXPIRED", "LABEL_APPROVAL_REVOKED", "LABEL_APPROVAL_EXPIRED", "LABEL_ATTEMPTS_LOCKED_OUT")
 
 
 def canonical(obj):

@@ -1,6 +1,6 @@
 # Product roadmap: M5-M11 (planning only)
 
-> **Status: direction approved by the owner; NOTHING proposed in this document (M5-M11) is implemented.** It adds product direction to the planning documents. It does
+> **Status: direction approved by the owner. M5A-M5E are implemented as local, read-only features (see [LABELS.md](LABELS.md)); M5F and M6-M11 are NOT implemented.** It adds product direction to the planning documents. It does
 > not authorize implementing any feature, any live Gmail operation, any new OAuth scope, any new dependency or any change to an existing security
 > boundary. Every milestone below needs its own explicit owner approval to start, and every increment needs its own Draft PR and review.
 > **Authority:** this document grants no authority to start M5-M11 or to perform any live Gmail operation. **Current M4 status (M4 closeout, [M4-CLOSEOUT.md](M4-CLOSEOUT.md)):** one owner-approved real single-message archive canary succeeded; live execution is disabled again (`LIVE_EXECUTION_ENABLED = False`); the write grant was revoked; real Gmail undo is NOT implemented; general live batch execution is NOT enabled; any future live operation needs fresh owner approval. The stage names M4C-B2/B3, M4C-C, M4C-D and M4D below are HISTORICAL: they describe how M4 was staged, not what remains.
@@ -43,6 +43,7 @@ Every milestone carries the project-wide **Zero Additional Cost verification** (
 API or model, no paid dependency, free-tier terms of any external service checked and recorded, unknown billing treated as a blocker.
 
 ### M5 — Intelligent Inbox Organization (expands the original "Labels & Filters Management")
+- **Status:** M5A-M5E implemented (local, read-only, offline plans; schema v6; documented in [LABELS.md](LABELS.md)); **M5F not implemented.** The text below is the original plan.
 - **Goal and value:** make the label system understandable and tidy, and suggest how to classify mail, without touching the mailbox.
 - **MVP (M5A-M5C):** label inventory and hygiene report (duplicates and near-duplicates, unused labels, over-deep or inconsistent nesting, orphaned
   parents); label and tag recommendations from existing classification and sender patterns; suggested classification rules with an impact preview

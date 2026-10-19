@@ -113,7 +113,7 @@ class MigrationV5Tests(ExecBase):
         path = self.make_v4()
         before = self.rows(path)
         with idx.Index(str(path)) as index:
-            self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (4, 5))
+            self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (4, idx.SCHEMA_VERSION))  # M5D: the same chain now ends at v6
             for t in ("cleanup_execution", "cleanup_exec_slice", "cleanup_exec_item"):
                 self.assertEqual(index._q(f"SELECT COUNT(*) FROM {t}")[0][0], 0)
             backup = Path(index.backup_path)

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from gmail_intelligence import config
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SCHEMA = """
 CREATE TABLE messages (
   account TEXT NOT NULL, id TEXT NOT NULL, thread_id TEXT, internal_ms INTEGER, size INTEGER,
@@ -321,6 +321,69 @@ WHEN NEW.state <> OLD.state AND EXISTS (SELECT 1 FROM cleanup_execution e WHERE 
 BEGIN SELECT RAISE(ABORT, 'a plan that has an execution can no longer change state'); END;
 """
 
+# Version 6 (M5D): LOCAL label-change plans only (CREATE / RENAME / NEST / MERGE of Gmail user labels). Nothing here talks to Gmail and NO executor exists: a label plan
+# is a frozen, hash-bound proposal plus a local approval record. The M4 tables above are untouched (additive migration); audit events share the cleanup_audit hash chain.
+# Triggers keep content immutable and states forward-only, exactly like the M4 plan tables; they guard against bugs, not against someone who can write the file.
+SCHEMA_V6 = """
+CREATE TABLE label_plan (
+  account TEXT NOT NULL, plan_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('DRAFT','REVIEWED','APPROVED','CANCELLED','EXPIRED')),
+  plan_hash TEXT NOT NULL CHECK (length(plan_hash) = 64), inventory_hash TEXT NOT NULL CHECK (length(inventory_hash) = 64), snapshot TEXT NOT NULL,
+  op_count INTEGER NOT NULL CHECK (op_count >= 1), created_at TEXT NOT NULL, expires_at TEXT NOT NULL, reviewed_at TEXT, state_changed_at TEXT NOT NULL,
+  PRIMARY KEY (account, plan_id)) WITHOUT ROWID;
+CREATE TABLE label_plan_op (
+  account TEXT NOT NULL, plan_id TEXT NOT NULL, seq INTEGER NOT NULL CHECK (seq >= 1),
+  op TEXT NOT NULL CHECK (op IN ('CREATE','RENAME','NEST','MERGE')), label_id TEXT NOT NULL, target_id TEXT NOT NULL,
+  old_name TEXT NOT NULL, new_name TEXT NOT NULL, op_digest TEXT NOT NULL CHECK (length(op_digest) = 64),
+  PRIMARY KEY (account, plan_id, seq),
+  FOREIGN KEY (account, plan_id) REFERENCES label_plan (account, plan_id)) WITHOUT ROWID;
+CREATE TABLE label_plan_approval (
+  account TEXT NOT NULL, plan_id TEXT NOT NULL, nonce TEXT NOT NULL UNIQUE, plan_hash TEXT NOT NULL, op_count INTEGER NOT NULL,
+  created_at TEXT NOT NULL, expires_at TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('VALID','REVOKED','EXPIRED')), status_changed_at TEXT NOT NULL,
+  PRIMARY KEY (account, plan_id, nonce),
+  FOREIGN KEY (account, plan_id) REFERENCES label_plan (account, plan_id)) WITHOUT ROWID;
+CREATE UNIQUE INDEX label_plan_one_valid_approval ON label_plan_approval (account, plan_id) WHERE status = 'VALID';
+CREATE TRIGGER label_plan_content_immutable BEFORE UPDATE ON label_plan
+WHEN NEW.account IS NOT OLD.account OR NEW.plan_id IS NOT OLD.plan_id OR NEW.plan_hash IS NOT OLD.plan_hash OR NEW.inventory_hash IS NOT OLD.inventory_hash
+  OR NEW.snapshot IS NOT OLD.snapshot OR NEW.op_count IS NOT OLD.op_count OR NEW.created_at IS NOT OLD.created_at OR NEW.expires_at IS NOT OLD.expires_at
+BEGIN SELECT RAISE(ABORT, 'label plan content is immutable'); END;
+CREATE TRIGGER label_plan_state_forward_only BEFORE UPDATE OF state ON label_plan
+WHEN NEW.state <> OLD.state AND NOT (
+     (OLD.state = 'DRAFT' AND NEW.state IN ('REVIEWED','CANCELLED','EXPIRED'))
+  OR (OLD.state = 'REVIEWED' AND NEW.state IN ('APPROVED','CANCELLED','EXPIRED'))
+  OR (OLD.state = 'APPROVED' AND NEW.state IN ('CANCELLED','EXPIRED')))
+BEGIN SELECT RAISE(ABORT, 'illegal label plan state transition'); END;
+CREATE TRIGGER label_plan_starts_as_draft BEFORE INSERT ON label_plan WHEN NEW.state <> 'DRAFT'
+BEGIN SELECT RAISE(ABORT, 'a label plan must start as DRAFT'); END;
+CREATE TRIGGER label_plan_approval_only_for_reviewed BEFORE INSERT ON label_plan_approval
+WHEN NEW.status <> 'VALID' OR (SELECT state FROM label_plan WHERE account = NEW.account AND plan_id = NEW.plan_id) IS NOT 'REVIEWED'
+BEGIN SELECT RAISE(ABORT, 'a label plan approval can only be recorded for a REVIEWED plan'); END;
+CREATE TRIGGER label_plan_approved_needs_approval BEFORE UPDATE OF state ON label_plan
+WHEN NEW.state = 'APPROVED' AND NOT EXISTS (SELECT 1 FROM label_plan_approval WHERE account = NEW.account AND plan_id = NEW.plan_id AND status = 'VALID')
+BEGIN SELECT RAISE(ABORT, 'a label plan can only become APPROVED while it has a VALID approval record'); END;
+CREATE TRIGGER label_plan_reviewed_needs_timestamp BEFORE UPDATE OF state ON label_plan
+WHEN NEW.state IN ('REVIEWED','APPROVED') AND NEW.reviewed_at IS NULL
+BEGIN SELECT RAISE(ABORT, 'a reviewed label plan must record when it was reviewed'); END;
+CREATE TRIGGER label_plan_no_delete BEFORE DELETE ON label_plan
+BEGIN SELECT RAISE(ABORT, 'label plans are never deleted'); END;
+CREATE TRIGGER label_plan_op_no_update BEFORE UPDATE ON label_plan_op
+BEGIN SELECT RAISE(ABORT, 'label plan operations are immutable'); END;
+CREATE TRIGGER label_plan_op_no_delete BEFORE DELETE ON label_plan_op
+BEGIN SELECT RAISE(ABORT, 'label plan operations are immutable'); END;
+CREATE TRIGGER label_plan_op_only_in_draft BEFORE INSERT ON label_plan_op
+WHEN (SELECT state FROM label_plan WHERE account = NEW.account AND plan_id = NEW.plan_id) IS NOT 'DRAFT'
+BEGIN SELECT RAISE(ABORT, 'operations can only be added while a label plan is being created'); END;
+CREATE TRIGGER label_plan_approval_content_immutable BEFORE UPDATE ON label_plan_approval
+WHEN NEW.account IS NOT OLD.account OR NEW.plan_id IS NOT OLD.plan_id OR NEW.nonce IS NOT OLD.nonce OR NEW.plan_hash IS NOT OLD.plan_hash
+  OR NEW.op_count IS NOT OLD.op_count OR NEW.created_at IS NOT OLD.created_at OR NEW.expires_at IS NOT OLD.expires_at
+BEGIN SELECT RAISE(ABORT, 'label plan approval content is immutable'); END;
+CREATE TRIGGER label_plan_approval_forward_only BEFORE UPDATE OF status ON label_plan_approval
+WHEN NEW.status <> OLD.status AND OLD.status <> 'VALID'
+BEGIN SELECT RAISE(ABORT, 'a revoked or expired label plan approval can never become valid again'); END;
+CREATE TRIGGER label_plan_approval_no_delete BEFORE DELETE ON label_plan_approval
+BEGIN SELECT RAISE(ABORT, 'label plan approvals are never deleted'); END;
+"""
+
 
 def _reserve_backup(base):
     """Create a NEW empty file at `base` (or `base-N`) with mode 0600. O_EXCL guarantees an existing file is never touched."""
@@ -396,8 +459,8 @@ class Index:
                                "(e.g. index.sqlite3.pre-m3-backup-*) or remove the file and rescan") from None
         if version == 0:
             with self.conn:
-                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + SCHEMA_V3 + SCHEMA_V4 + SCHEMA_V5 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3, 4):
+                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + SCHEMA_V3 + SCHEMA_V4 + SCHEMA_V5 + SCHEMA_V6 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        elif version in (1, 2, 3, 4, 5):
             self._migrate(version)
         elif version != SCHEMA_VERSION:
             self.conn.close()
@@ -409,8 +472,8 @@ class Index:
         The backup file is created exclusively (never overwriting an existing file) with mode 0600 from the first byte; a partial
         backup that WE created is removed if writing it fails; a complete, verified backup is always kept.
         """
-        tag = {1: "pre-m3", 2: "pre-m4a", 3: "pre-m4b", 4: "pre-m4c"}[version]
-        script = "".join([SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5][version - 1:])  # names resolved now, so tests can patch them
+        tag = {1: "pre-m3", 2: "pre-m4a", 3: "pre-m4b", 4: "pre-m4c", 5: "pre-m5"}[version]
+        script = "".join([SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6][version - 1:])  # names resolved now, so tests can patch them
         base = f"{self.path}.{tag}-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         backup = None
         try:
