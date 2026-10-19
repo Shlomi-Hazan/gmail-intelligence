@@ -82,7 +82,7 @@ class DashboardServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
 
-    def __init__(self, db_path, account, token, port=0, reveal_senders=False, reveal_names=False, static=None, clock=None, verbose=False):
+    def __init__(self, db_path, account, token, port=0, reveal_senders=False, reveal_names=False, static=None, clock=None, verbose=False, reload_static=False):
         if not isinstance(port, int) or isinstance(port, bool) or not 0 <= port <= 65535:
             raise ValueError("port must be between 0 and 65535")
         super().__init__(("127.0.0.1", port), Handler)  # loopback only; there is deliberately no host parameter
@@ -90,6 +90,7 @@ class DashboardServer(http.server.ThreadingHTTPServer):
         self.token = token.encode("utf-8")
         self.reveal_senders, self.reveal_names = bool(reveal_senders), bool(reveal_names)
         self.static = load_static() if static is None else static
+        self.reload_static = bool(reload_static)  # development aid used only by the synthetic demo launcher: re-read the allowlisted files per request
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.verbose = verbose
         self.port = self.server_address[1]
@@ -248,7 +249,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8"), "application/json; charset=utf-8", head=head)
         if query:
             return self._error(404, head)
-        entry = self.server.static.get("/index.html" if path == "/" else path)
+        static = load_static() if self.server.reload_static else self.server.static
+        entry = static.get("/index.html" if path == "/" else path)
         if entry is None:
             return self._error(404, head)
         self._send(200, entry[1], entry[0], head=head)

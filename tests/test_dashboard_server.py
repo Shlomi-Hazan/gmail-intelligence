@@ -393,5 +393,60 @@ class AccountTests(M5Base):
         self.assertFalse(served.call_args.kwargs["reveal_senders"])
 
 
+class SyntheticDemoTests(unittest.TestCase):
+    """The synthetic demo index (invented domains, hostile strings) served end to end."""
+
+    def setUp(self):
+        import tempfile
+        import dashboard_fixture as fx
+        self.fx = fx
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "index.sqlite3"
+        index = fx.build(self.path, messages=150)
+        fx.add_history(index)
+        index.close()
+
+    def serve(self, **kw):
+        guard = mock.patch.object(socket.socket, "connect", _loopback_only)
+        guard.start()
+        self.addCleanup(guard.stop)
+        server = ds.DashboardServer(str(self.path), self.fx.ACCOUNT, TOKEN, **kw)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(5)))
+        return server
+
+    def fetch(self, server, route):
+        conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=10)
+        conn.request("GET", "/api/v1/" + route, headers={"Host": f"127.0.0.1:{server.port}", "Authorization": "Bearer " + TOKEN})
+        r = conn.getresponse()
+        body = r.read().decode("utf-8")
+        conn.close()
+        return r.status, body
+
+    def test_every_route_works_on_the_demo_index_and_nothing_hostile_survives(self):
+        server = self.serve(reveal_senders=True, reveal_names=True)
+        dump = ""
+        for route in ds.ROUTES:
+            status, body = self.fetch(server, route + ("?kind=address&limit=50" if route == "senders" else ""))
+            self.assertEqual(status, 200, route)
+            dump += body
+        for ch in ("\u202e", "\u2066", "\u200f", "\x00", "\x07"):
+            self.assertNotIn(ch, dump.replace("\\u202e", ""))
+        self.assertIn("evil.example.test", dump)  # the hostile sender is present, as inert text
+        self.assertNotIn(self.fx.ACCOUNT, dump)
+
+    def test_the_hostile_sender_and_label_are_masked_by_default(self):
+        server = self.serve()
+        _, senders = self.fetch(server, "senders?kind=address&limit=50")
+        _, org = self.fetch(server, "organization")
+        self.assertNotIn("onerror", senders)
+        self.assertNotIn("<script>", org)
+        self.assertNotIn("<img", senders)
+        for item in json.loads(senders)["data"]["items"]:
+            self.assertTrue(item["masked"] and item["key"] is None)
+
+
 if __name__ == "__main__":
     unittest.main()

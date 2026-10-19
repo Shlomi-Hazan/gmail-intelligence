@@ -134,12 +134,12 @@ class SectionTests(AnalyticsBase):
         self.assertEqual(len(by["AUTOMATED_NOTIFICATION"]["monthly"]), 4)  # the same period axis for every type
 
     def test_untrusted_sender_text_is_cleaned(self):
-        evil = "bad‮\x07@evil.example.test"
+        evil = "bad\u202e\x07@evil.example.test"
         self.fixture([], [when(900, 2026, 1, 1, evil)], complete=True)
         text = json.dumps(self.a(reveal_senders=True).senders(kind="address", limit=100), ensure_ascii=False)
-        for ch in ("‮", "\x07"):
+        for ch in ("\u202e", "\x07"):
             self.assertNotIn(ch, text)
-        self.assertEqual(an.clean("a⁦b‏c\n d"), "a b c d")
+        self.assertEqual(an.clean("a\u2066b\u200fc\n d"), "a b c d")
         self.assertEqual(len(an.clean("x" * 500)), 120)
         self.assertEqual(an.mask_address("nobody"), "•••")
 
