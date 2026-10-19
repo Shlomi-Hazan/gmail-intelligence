@@ -27,12 +27,15 @@ function block(load, render) {
   return el;
 }
 
-/** Screens that need indexed mail show ONE clear empty state (not one per panel) when the index has no scan at all. */
-function whenData(render) {
+/** Every data screen shows the same honest data note (partial, stale or unclassified) above its content, and screens that need indexed mail show ONE clear empty state when the index has no scan at all. */
+function whenData(render, { gate = true } = {}) {
   const el = h("div", { class: "stack" }, skeleton());
   const run = async () => {
     el.replaceChildren(skeleton());
-    try { const env = await get("freshness"); put(el, env.data.state === "empty" ? [empty("empty.title", "empty.body"), freshnessNotice(env)] : render()); } catch (err) { el.replaceChildren(errorState(err, run)); }
+    try {
+      const env = await get("freshness");
+      put(el, gate && env.data.state === "empty" ? [empty("empty.title", "empty.body"), freshnessNotice(env)] : [freshnessNotice(env), render()]);
+    } catch (err) { el.replaceChildren(errorState(err, run)); }
   };
   run();
   return el;
@@ -47,10 +50,9 @@ function ribbonPoints(volume, cats) {
 function overviewView() {
   const top = block(() => get("overview"), (env) => {
     const d = env.data;
-    if (!d.messages) return [empty("empty.title", "empty.body"), freshnessNotice(env)];
+    if (!d.messages) return empty("empty.title", "empty.body");
     return [
       h("p", { class: "lede" }, tn("ov.lede", d.messages, { from: day(d.oldest), to: day(d.newest), classified: pct(d.classified_share_pct) })),
-      freshnessNotice(env),
       h("section", { class: "panel", "aria-label": t("ov.glance") }, kpis([
         { label: t("kpi.messages"), value: int(d.messages) }, { label: t("kpi.unread"), value: int(d.unread), note: pct(d.unread_share_pct) },
         { label: t("kpi.inbox"), value: int(d.in_inbox) }, { label: t("kpi.size"), value: bytes(d.size_bytes) },
@@ -213,8 +215,11 @@ export const overview = () => whenData(overviewView);
 export const trends = () => whenData(trendsView);
 export const senders = () => whenData(sendersView);
 
+export const cleanupScreen = () => whenData(cleanup, { gate: false });
+export const organizationScreen = () => whenData(organization, { gate: false });
+
 export const SCREENS = [
   { id: "overview", icon: "overview", render: overview }, { id: "trends", icon: "trends", render: trends }, { id: "senders", icon: "senders", render: senders },
-  { id: "cleanup", icon: "cleanup", render: cleanup }, { id: "organization", icon: "organization", render: organization }, { id: "data", icon: "data", render: data },
+  { id: "cleanup", icon: "cleanup", render: cleanupScreen }, { id: "organization", icon: "organization", render: organizationScreen }, { id: "data", icon: "data", render: data },
 ];
 export { icon, swatch, TYPE_ORDER, month, monthLong, ApiError };

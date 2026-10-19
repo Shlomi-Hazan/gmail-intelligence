@@ -214,7 +214,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("unknown or repeated parameter")
             rule, value = spec[key], values[0]
             if isinstance(rule[0], int):
-                if not value.isdigit() or not rule[0] <= int(value) <= rule[1]:
+                if not (value.isascii() and value.isdigit()) or not rule[0] <= int(value) <= rule[1]:
                     raise ValueError("number out of range")
                 params[key] = int(value)
             elif value in rule:

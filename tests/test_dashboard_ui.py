@@ -318,6 +318,15 @@ class DesignTests(unittest.TestCase):
         self.assertIn("View as table".split()[0], json.loads(read("i18n/en.json"))["chart.table"])  # every chart has a table alternative
         self.assertGreaterEqual(views.count("tableAlt("), 4)
 
+    def test_every_data_screen_carries_the_honest_data_note(self):
+        views = read("js/views.js")
+        for screen in ("overviewView", "trendsView", "sendersView", "cleanup, { gate: false }", "organization, { gate: false }"):
+            self.assertIn(f"whenData({screen}" if "gate" in screen else f"whenData({screen})", views, screen)
+        self.assertIn("[freshnessNotice(env), render()]", views)  # partial / stale / unclassified is stated on Trends, Senders, Cleanup and Organization too, not only on Overview
+        screens = re.search(r"export const SCREENS = \[(.*?)\];", views, re.S).group(1)
+        for name in ("overview", "trends", "senders", "cleanupScreen", "organizationScreen", "data"):
+            self.assertIn(f"render: {name}", screens)
+
     def test_no_write_actions_exist_in_the_interface(self):
         for f in js_files():
             src = f.read_text(encoding="utf-8")
