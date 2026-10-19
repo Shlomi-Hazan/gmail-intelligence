@@ -7,6 +7,7 @@ Confidence is EVIDENCE STRENGTH, not a probability. Tiers (conservative, documen
   LOW     : at least MIN_GROUP messages in the group and a dominant pattern covering at least 60% of them.
   MEDIUM  : at least 5 messages and at least 80% agreement.
   HIGH    : at least 20 messages and at least 95% agreement.
+When several types have exactly the same highest count in a group, the alphabetically first type identifier is the group's dominant type (`dominant_type`).
 Caps: a partial index, an INFERRED basis (classification instead of observed label usage), stale classifications or any AI-sourced classification limit a suggestion to MEDIUM,
 so such evidence can never yield HIGH on its own. Groups containing protected or potentially important mail are suppressed (and counted), never suggested.
 
@@ -65,6 +66,14 @@ class Suggestions:
     groups_considered: int
     index_state: str
     index_why: str
+
+
+def dominant_type(types):
+    """The dominant type of a group and its message count, from a Counter of type -> messages. DETERMINISTIC: the highest count wins; when several types have exactly the highest count
+    (two compatible types carried by the same messages are always tied), the alphabetically first type identifier wins. The result never depends on insertion order, so it is
+    the same in every process (it used to follow the iteration order of a set of strings, which changes with PYTHONHASHSEED). Same tie rule as the dashboard's per-sender dominant type."""
+    top = max(types.values())
+    return min(t for t, n in types.items() if n == top), top
 
 
 def _cap(conf, ceiling):
@@ -181,7 +190,7 @@ def recommend(index, account, groups=None):
     for key, g in sorted(groups.items()):
         if key[0] != "domain" or g.n < MIN_GROUP or g.protected or g.user_labels or not g.types:
             continue
-        t, n = g.types.most_common(1)[0]
+        t, n = dominant_type(g.types)
         if t not in TYPE_LABEL_NAMES or n / g.n < 0.8 or g.stale:
             continue
         agg = by_type[t]
@@ -227,7 +236,7 @@ def suggest_rules(index, account, groups=None, context=None):
             continue
         if not g.types:
             continue
-        t, n = g.types.most_common(1)[0]
+        t, n = dominant_type(g.types)
         ratio = n / g.n
         if g.protected:
             suppressed["protected or potentially important mail in the group"] += 1

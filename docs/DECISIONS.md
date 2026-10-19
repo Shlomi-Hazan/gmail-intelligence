@@ -140,6 +140,7 @@ Status: **Approved** (owner decision) · **Approved design direction** (owner-ap
 | D125 | **Bilingual and appearance.** English and Hebrew from v1 with full RTL, catalogs `en.json` / `he.json`, `Intl` plurals and formatting; System / Light / Dark with a manual selector (the owner approved an in-app override); only language and appearance are persisted locally. |
 | D126 | **Stack: zero dependencies.** Python standard library HTTP server, vanilla JavaScript ES modules, hand-written CSS, hand-authored SVG charts, system fonts, no build step. This resolves Q18 for the dashboard and supersedes D5's React direction and the FastAPI proposal for it; no dependency review is needed because none was added. |
 | D127 | **Design process.** The installed design skills were loaded and applied while designing and reviewing the UI; evidence (and what was not run, including the Impeccable launcher, which needs a network download) is recorded in DASHBOARD.md section 10. |
+| D128 | **Deterministic tie-breaking.** The dominant type of a sender or domain group is the highest count, and among exactly equal counts the alphabetically first type identifier (`label_suggest.dominant_type`), the same rule the dashboard already used for a sender's dominant type. This replaced `Counter.most_common`, whose winner followed the iteration order of a set and therefore `PYTHONHASHSEED`. Only tied groups can change; the output no longer varies between processes. |
 
 ## M5 decisions (owner-approved scope M5A-M5E; implemented local and read-only)
 | ID | Decision |
