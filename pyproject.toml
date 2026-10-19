@@ -23,3 +23,6 @@ version = { attr = "gmail_intelligence.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+gmail_intelligence = ["dashboard/static/*", "dashboard/static/*/*", "dashboard/static/*/*/*"]
