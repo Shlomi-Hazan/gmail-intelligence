@@ -96,6 +96,7 @@ API or model, no paid dependency, free-tier terms of any external service checke
   workflows.
 - **Dependencies:** M2 and ARCHITECTURE sections 6-7. Needs a design for how incremental sync interacts with M4 plans, which are bound to an index anchor:
   sync must neither silently invalidate nor silently validate an approved plan.
+- **Design contract (owner-approved direction, documentation only):** [SYNC.md](SYNC.md) and D129-D144 in [DECISIONS.md](DECISIONS.md); M7 is still NOT implemented.
 - **Privacy:** metadata only; schedule logs are privacy-safe.
 - **Security boundaries:** `gmail.readonly` only; **no unattended Gmail mutation by default**; scheduled jobs run without access to the write Keychain item
   or write client; a schedule is persistent configuration and needs explicit approval.
