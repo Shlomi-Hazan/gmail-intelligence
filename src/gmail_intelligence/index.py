@@ -2,16 +2,18 @@
 
 All data is keyed by account, so one account's rows are never mixed with another's. Schema version is
 kept in `PRAGMA user_version`. There is no migration framework: older versions are upgraded by additive scripts (v2 = M3
-classification tables, v3 = M4A protection rules, v4 = M4B plans/approvals/audit, v5 = M4C-A local execution state) in ONE transaction, after an automatic backup copy of the database file.
+classification tables, v3 = M4A protection rules, v4 = M4B plans/approvals/audit, v5 = M4C-A local execution state, v6 = M5D label plans, v7 = M7A sync state) in ONE transaction, after a verified backup copy of the database file.
+Up to v6 an old file was upgraded automatically by any command. From v7 on an existing file is NEVER upgraded implicitly: `Index()` refuses it and the explicit `index upgrade` command (typed confirmation) performs the upgrade (D146).
 """
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
 
 from gmail_intelligence import config
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SCHEMA = """
 CREATE TABLE messages (
   account TEXT NOT NULL, id TEXT NOT NULL, thread_id TEXT, internal_ms INTEGER, size INTEGER,
@@ -385,6 +387,32 @@ CREATE TRIGGER label_plan_approval_no_delete BEFORE DELETE ON label_plan_approva
 BEGIN SELECT RAISE(ABORT, 'label plan approvals are never deleted'); END;
 """
 
+# Version 7 (M7A): incremental-sync state, runs (which are also the single-writer lease) and deletion records. Purely additive; no existing table or trigger changes.
+# See docs/SYNC.md section 4. `messages.scan_id` of a row changed by an incremental run is -sync_run.id (negative, never colliding with the positive ids of `scans`).
+SCHEMA_V7 = """
+CREATE TABLE sync_state (
+  account TEXT PRIMARY KEY, history_id TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('PROFILE_BEFORE_FULL_LIST','HISTORY_RESPONSE')),
+  basis_scan_id INTEGER NOT NULL, established_at TEXT NOT NULL, advanced_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('OK','IN_PROGRESS','INTERRUPTED','NEEDS_RECONCILE')), reason TEXT) WITHOUT ROWID;
+CREATE TABLE sync_run (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('INCREMENTAL','FULL','LIMITED')),
+  status TEXT NOT NULL CHECK (status IN ('running','completed','interrupted','failed','needs_reconcile')),
+  started_at TEXT NOT NULL, finished_at TEXT, scan_id INTEGER,
+  lease_token TEXT NOT NULL CHECK (length(lease_token) = 64), lease_expires_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL,
+  start_history_id TEXT, first_history_id TEXT,
+  pages INTEGER NOT NULL DEFAULT 0, records INTEGER NOT NULL DEFAULT 0, affected INTEGER NOT NULL DEFAULT 0,
+  refreshed INTEGER NOT NULL DEFAULT 0, unchanged INTEGER NOT NULL DEFAULT 0, tombstoned INTEGER NOT NULL DEFAULT 0,
+  vanished INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, error TEXT);
+CREATE INDEX sync_run_account ON sync_run (account, id);
+CREATE UNIQUE INDEX sync_run_one_running ON sync_run (account) WHERE status = 'running';
+CREATE TABLE message_tombstone (
+  account TEXT NOT NULL, message_id TEXT NOT NULL, detected_at TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK (reason IN ('HISTORY_DELETED','NOT_FOUND_ON_REFRESH','FULL_RECONCILE')),
+  run_id INTEGER, PRIMARY KEY (account, message_id)) WITHOUT ROWID;
+"""
+
 
 def _reserve_backup(base):
     """Create a NEW empty file at `base` (or `base-N`) with mode 0600. O_EXCL guarantees an existing file is never touched."""
@@ -434,7 +462,7 @@ def _now():
 
 
 class Index:
-    def __init__(self, path=None, create=True):
+    def __init__(self, path=None, create=True, allow_upgrade=False):
         self.path = path if path is not None else config.index_path()
         parent = os.path.dirname(self.path) or "."
         if not os.path.exists(self.path) and not create:
@@ -452,6 +480,7 @@ class Index:
             self.conn.close()
             raise IndexProblem("could not enable recursive_triggers; refusing to open the index")
         self.migrated_from = self.backup_path = None
+        self.lease = None  # set while a sync/scan run owns the writer lease: every Gmail-derived write is then fenced (docs/SYNC.md section 5)
         try:
             version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         except sqlite3.DatabaseError:
@@ -460,8 +489,12 @@ class Index:
                                "(e.g. index.sqlite3.pre-m3-backup-*) or remove the file and rescan") from None
         if version == 0:
             with self.conn:
-                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + SCHEMA_V3 + SCHEMA_V4 + SCHEMA_V5 + SCHEMA_V6 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3, 4, 5):
+                self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + SCHEMA_V3 + SCHEMA_V4 + SCHEMA_V5 + SCHEMA_V6 + SCHEMA_V7 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        elif version in (1, 2, 3, 4, 5, 6):
+            if not allow_upgrade:  # D146: never an implicit upgrade; nothing was written to the file
+                self.conn.close()
+                raise IndexProblem(f"the local index has schema version {version} and this version needs {SCHEMA_VERSION}. It is never upgraded implicitly: "
+                                   "run `gmail-intelligence index upgrade` (a verified private backup is made first)")
             self._migrate(version)
         elif version != SCHEMA_VERSION:
             self.conn.close()
@@ -473,8 +506,8 @@ class Index:
         The backup file is created exclusively (never overwriting an existing file) with mode 0600 from the first byte; a partial
         backup that WE created is removed if writing it fails; a complete, verified backup is always kept.
         """
-        tag = {1: "pre-m3", 2: "pre-m4a", 3: "pre-m4b", 4: "pre-m4c", 5: "pre-m5"}[version]
-        script = "".join([SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6][version - 1:])  # names resolved now, so tests can patch them
+        tag = {1: "pre-m3", 2: "pre-m4a", 3: "pre-m4b", 4: "pre-m4c", 5: "pre-m5", 6: "pre-m7"}[version]
+        script = "".join([SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7][version - 1:])  # names resolved now, so tests can patch them
         base = f"{self.path}.{tag}-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         backup = None
         try:
@@ -515,9 +548,30 @@ class Index:
     def _q(self, sql, *params):
         return self.conn.execute(sql, params).fetchall()
 
+    @contextmanager
+    def _write(self):
+        """One write-locking transaction. While a lease is attached the transaction starts with the fence (docs/SYNC.md 5.2): a run that lost its lease writes nothing.
+
+        If the caller already opened a transaction the statements simply join it (the caller commits).
+        """
+        if self.conn.in_transaction:
+            yield
+            return
+        if self.lease is not None:
+            with self.lease.fence_txn():
+                yield
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+
     # ---- scans ----
     def start_scan(self, account, mode, limit=None):
-        with self.conn:  # an old 'running' scan of this account can only be a crashed one
+        with self._write():  # an old 'running' scan of this account can only be a crashed one
             self.conn.execute("UPDATE scans SET status='interrupted' WHERE account=? AND status='running'", (account,))
             cur = self.conn.execute("INSERT INTO scans (account, mode, limit_n, status, started_at) VALUES (?,?,?,?,?)",
                                     (account, mode, limit, "running", _now()))
@@ -531,15 +585,15 @@ class Index:
         return None
 
     def reopen_scan(self, scan_id):
-        with self.conn:
+        with self._write():
             self.conn.execute("UPDATE scans SET status='running', error=NULL, finished_at=NULL WHERE id=?", (scan_id,))
 
     def set_page_token(self, scan_id, token):
-        with self.conn:
+        with self._write():
             self.conn.execute("UPDATE scans SET page_token=? WHERE id=?", (token, scan_id))
 
     def finish_scan(self, scan_id, status, error=None, **counters):
-        with self.conn:
+        with self._write():
             self.conn.execute("UPDATE scans SET status=?, finished_at=?, error=? WHERE id=?",
                               (status, _now(), error, scan_id))
             for key, val in counters.items():
@@ -568,12 +622,12 @@ class Index:
         return {r["id"] for r in rows}
 
     def set_listed(self, scan_id, listed):
-        with self.conn:
+        with self._write():
             self.conn.execute("UPDATE scans SET listed=? WHERE id=?", (listed, scan_id))
 
     def save_batch(self, account, scan_id, rows, vanished=0, failed=0):
         """Upsert message rows (dicts from the adapter) and bump counters in ONE transaction."""
-        with self.conn:
+        with self._write():
             for r in rows:
                 labels = r["label_ids"]
                 self.conn.execute(
@@ -589,23 +643,32 @@ class Index:
             self.add_counters(scan_id, indexed=len(rows), vanished=vanished, failed=failed)
 
     def save_labels(self, account, labels):
-        with self.conn:
+        with self._write():
             self.conn.execute("DELETE FROM labels WHERE account=?", (account,))
             self.conn.executemany("INSERT OR IGNORE INTO labels VALUES (?,?,?,?)",
                                   [(account, x["id"], x["name"], x["type"]) for x in labels if x.get("id")])
 
-    def prune_unseen(self, account, scan_id):
-        """After a COMPLETE full scan only: drop rows the scan did not see (no longer in Gmail)."""
-        with self.conn:
-            for table, col in (("message_labels", "message_id"), ("message_class", "message_id")):
-                self.conn.execute(f"DELETE FROM {table} WHERE account=? AND {col} IN "
-                                  "(SELECT id FROM messages WHERE account=? AND scan_id<>?)", (account, account, scan_id))
-            cur = self.conn.execute("DELETE FROM messages WHERE account=? AND scan_id<>?", (account, scan_id))
+    def prune_unseen(self, account, scan_id, run_id=None):
+        """After a COMPLETE full scan only: drop rows the scan did not see (no longer in Gmail) and record a tombstone for each (M7A)."""
+        with self._write():
+            return self._prune_unseen(account, scan_id, run_id)
+
+    def _prune_unseen(self, account, scan_id, run_id=None):
+        """The pruning statements; the caller owns the (fenced) transaction."""
+        self.conn.execute("INSERT OR IGNORE INTO message_tombstone (account, message_id, detected_at, reason, run_id) "
+                          "SELECT account, id, ?, 'FULL_RECONCILE', ? FROM messages WHERE account=? AND scan_id<>?",
+                          (_now(), run_id, account, scan_id))
+        for table, col in (("message_labels", "message_id"), ("message_class", "message_id")):
+            self.conn.execute(f"DELETE FROM {table} WHERE account=? AND {col} IN "
+                              "(SELECT id FROM messages WHERE account=? AND scan_id<>?)", (account, account, scan_id))
+        cur = self.conn.execute("DELETE FROM messages WHERE account=? AND scan_id<>?", (account, scan_id))
         return cur.rowcount
 
     def purge(self, account):
-        with self.conn:
-            for table in ("message_class", "message_labels", "messages", "labels", "scans"):  # class_rules (user config) is kept
+        with self._write():
+            if self.conn.execute("SELECT 1 FROM sync_run WHERE account=? AND status='running' AND lease_expires_at>?", (account, _now())).fetchone():
+                raise IndexProblem("a sync or scan is active for this account; nothing was removed")
+            for table in ("message_class", "message_labels", "messages", "labels", "scans", "message_tombstone", "sync_state", "sync_run"):  # class_rules (user config) is kept
                 self.conn.execute(f"DELETE FROM {table} WHERE account=?", (account,))
 
     def accounts(self):
@@ -658,9 +721,10 @@ class ReadOnlyIndex(Index):
         except sqlite3.DatabaseError:
             raise IndexProblem("the local index file is unreadable or corrupt; nothing was changed") from None
         self.migrated_from = self.backup_path = None
+        self.lease = None
         if version != SCHEMA_VERSION:
             self.conn.close()
             if version < SCHEMA_VERSION:
                 raise IndexProblem(f"the local index has schema version {version}; this feature needs {SCHEMA_VERSION}. It is never upgraded automatically here: "
-                                   "open it once with a normal command (a verified backup is made first)")
+                                   "run `gmail-intelligence index upgrade` once (a verified backup is made first)")
             raise IndexProblem(f"unsupported index schema version {version} (expected {SCHEMA_VERSION})")

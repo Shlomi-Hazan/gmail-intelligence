@@ -48,6 +48,8 @@ def build(path, messages=900, seed=7, now=None):
     index.save_labels(ACCOUNT, [{"id": "Label_1", "name": "Receipts", "type": "user"}, {"id": "Label_2", "name": "receipts", "type": "user"}, {"id": "Label_3", "name": "Travel/2025", "type": "user"},
                                 {"id": "Label_4", "name": HOSTILE_LABEL, "type": "user"}, {"id": "Label_5", "name": "Archive Old", "type": "user"}, {"id": "INBOX", "name": "INBOX", "type": "system"}])
     index.finish_scan(scan, "completed")
+    import m7_support  # M7A: the synthetic demo plans need a healthy synthetic sync state
+    m7_support.seed_healthy_sync(index, ACCOUNT, at=now)
     classifier.run(index, ACCOUNT, persist=True)
     return index
 

@@ -471,29 +471,52 @@ def _local_account(args):
     return blob["account"].lower()
 
 
+def _scan_precheck(index, args):
+    """D144, decided from LOCAL state before any Gmail request: a limited scan may not run beside a sync checkpoint (any status)."""
+    from gmail_intelligence import sync_health
+
+    try:
+        account = _local_account(args)
+    except ValueError:
+        return None  # not logged in: the reader reports that
+    limited = args.limit is not None
+    if args.resume:
+        prev = index.find_resumable(account)
+        limited = bool(prev and prev["mode"] == "limited")
+    if limited and sync_health.state_row(index, account) is not None:
+        return "SYNC_LIMITED_REFUSED: a sync checkpoint exists; use `mailbox sync` or a full scan (`mailbox scan --all`) instead of --limit"
+    return None
+
+
 def cmd_mailbox_scan(args):
-    from gmail_intelligence import gmail, index as idx, oauth, scanner
+    from gmail_intelligence import gmail, index as idx, oauth, scanner, sync_lease
     from gmail_intelligence.keystore import KeystoreError
 
     mode = "full" if args.all else "limited"
     if args.limit is not None and args.limit < 1:
         return _fail("--limit must be at least 1")
     try:
-        reader, blob = _open_reader()
-        profile = reader.get_profile()
-        account = profile["emailAddress"].lower()
-        if account != str(blob.get("account", "")).lower():
-            return _fail("authenticated account differs from the stored account; run `auth logout` and `auth login`")
-        if args.all or args.resume:
-            est = profile.get("messagesTotal")
-            print(f"Account {account}: scanning " + (f"about {est:,} messages (Gmail estimate) " if est else "")
-                  + "read-only. Press Ctrl+C to stop; resume later with --resume.")
         with idx.Index() as index:
+            refusal = _scan_precheck(index, args)
+            if refusal:
+                return _fail(refusal)
+            reader, blob = _open_reader()
+            profile = reader.get_profile()
+            account = profile["emailAddress"].lower()
+            if account != str(blob.get("account", "")).lower():
+                return _fail("authenticated account differs from the stored account; run `auth logout` and `auth login`")
+            if args.all or args.resume:
+                est = profile.get("messagesTotal")
+                print(f"Account {account}: scanning " + (f"about {est:,} messages (Gmail estimate) " if est else "")
+                      + "read-only. Press Ctrl+C to stop; resume later with --resume.")
             row = scanner.run_scan(reader, index, account, mode=mode, limit=args.limit, resume=args.resume,
-                                   limiter=scanner.RateLimiter(args.max_units_per_minute), progress=print)
+                                   limiter=scanner.RateLimiter(args.max_units_per_minute), progress=print,
+                                   accept_count_mismatch=args.accept_count_mismatch, allow_large_prune=args.allow_large_prune)
     except scanner.ScanInterrupted as exc:
         print(f"\n{exc}", file=sys.stderr)
         return 130
+    except sync_lease.SyncError as exc:
+        return _fail(f"{exc.code}: {exc}")
     except scanner.ScanError as exc:
         return _fail(exc)
     except (oauth.AuthError, gmail.GmailApiError, KeystoreError, idx.IndexProblem) as exc:
@@ -501,10 +524,113 @@ def cmd_mailbox_scan(args):
     print(f"Scan {row['id']} {row['status']}: listed {row['listed']:,}, indexed {row['indexed']:,}, "
           f"vanished {row['vanished']}, failed {row['failed']}, pruned {row['pruned']}")
     if row["status"] == "incomplete":
-        print("Some messages could not be indexed; the index is PARTIAL. See `mailbox status`.")
+        reason = row.get("error") or ""
+        if reason == "COUNT_MISMATCH":
+            print("The listed message count differs from Gmail's estimate, so nothing was pruned and no checkpoint was set. "
+                  "If you have reviewed the numbers, repeat with --accept-count-mismatch.")
+        elif reason == "LARGE_PRUNE":
+            print("Many indexed messages were not seen, so nothing was pruned. If that is expected, repeat with --allow-large-prune.")
+        else:
+            print("Some messages could not be indexed; the index is PARTIAL. See `mailbox status`.")
     elif mode == "limited":
         print("Limited scan: the index is PARTIAL by design. Next: mailbox report")
     return 0 if row["status"] == "completed" else 1
+
+
+def cmd_mailbox_sync(args):
+    from gmail_intelligence import gmail, index as idx, oauth, scanner, sync, sync_health, sync_lease
+    from gmail_intelligence.keystore import KeystoreError
+
+    if args.status:
+        return _with_index(args, lambda i, a: print(sync_status_text(i, a)) or 0)
+    try:
+        account_hint = _local_account(args)
+        with idx.Index(create=False) as index:
+            if sync_health.state_row(index, account_hint) is None:  # local refusal before any Gmail request
+                return _fail("SYNC_CHECKPOINT_MISSING: there is no sync checkpoint yet; run a full scan first (mailbox scan --all)")
+            reader, blob = _open_reader()
+            account = str(blob.get("account", "")).lower()
+            if account != account_hint:
+                return _fail("authenticated account differs from the requested account; run `auth logout` and `auth login`")
+            print("Syncing recent changes (read-only). Press Ctrl+C to stop; the next run replays from the saved checkpoint.")
+            counts = sync.run_sync(reader, index, account, limiter=scanner.RateLimiter(args.max_units_per_minute), progress=print)
+    except sync_lease.SyncError as exc:
+        return _fail(f"{exc.code}: {exc}")
+    except (ValueError, oauth.AuthError, gmail.GmailApiError, KeystoreError, idx.IndexProblem) as exc:
+        return _fail(exc)
+    print("Sync completed: " + ", ".join(f"{k} {v:,}" for k, v in counts.items()))
+    return 0
+
+
+def sync_status_text(index, account):
+    """Aggregate, privacy-safe sync status: states, ages and counters only (no ids, labels, addresses or paths)."""
+    from datetime import datetime, timezone
+
+    from gmail_intelligence import sync_health
+
+    state = sync_health.state_row(index, account)
+    lines = ["Sync status (local only; Gmail was not contacted)"]
+    if state is None:
+        lines.append("  checkpoint: none. Run a full scan first: mailbox scan --all")
+    else:
+        age = ""
+        try:
+            hours = (datetime.now(timezone.utc) - sync_health.parse(state["advanced_at"])).total_seconds() / 3600
+            age = f", last advanced {hours:.1f} hours ago"
+        except (ValueError, TypeError):
+            pass
+        lines.append(f"  state: {state['status']}" + (f" ({state['reason']})" if state["reason"] else "") + age)
+    runs = index._q("SELECT kind, status, pages, records, affected, refreshed, unchanged, tombstoned, vanished, failed, error FROM sync_run WHERE account=? "
+                    "ORDER BY id DESC LIMIT 3", account)
+    for r in runs:
+        lines.append(f"  run [{r['kind']}] {r['status']}: pages {r['pages']}, records {r['records']}, affected {r['affected']}, refreshed {r['refreshed']}, "
+                     f"unchanged {r['unchanged']}, tombstoned {r['tombstoned']}, vanished {r['vanished']}, failed {r['failed']}" + (f" ({r['error']})" if r["error"] else ""))
+    codes = sync_health.problems(index, account)
+    lines.append("  cleanup plan operations: " + ("allowed (index is fresh)" if not codes else "PROHIBITED until sync health is restored: " + ", ".join(codes)))
+    return "\n".join(lines)
+
+
+def cmd_index_upgrade(args):
+    """D146: the only way an existing index is migrated to the current schema. Typed confirmation on a real terminal; a verified private backup first."""
+    import sqlite3
+
+    from gmail_intelligence import index as idx
+
+    path = config.index_path()
+    if not os.path.isfile(path):
+        return _fail("no local index file exists; nothing to upgrade")
+    try:
+        probe = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        try:
+            version = probe.execute("PRAGMA user_version").fetchone()[0]
+            tables = probe.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchone()[0]
+        finally:
+            probe.close()
+    except sqlite3.DatabaseError:
+        return _fail("the local index file is unreadable or corrupt; nothing was changed")
+    if version == idx.SCHEMA_VERSION:
+        print(f"The local index already uses schema v{version}; nothing to do.")
+        return 0
+    if version > idx.SCHEMA_VERSION or version == 0:
+        return _fail(f"unsupported index schema version {version}; nothing was changed")
+    print(f"Proposed upgrade: local index schema v{version} -> v{idx.SCHEMA_VERSION} ({tables} tables today).")
+    print("  Additive only: new tables are added, existing data, plans, approvals and the audit log are not changed.")
+    print("  A verified private backup (owner-only permissions) is created next to the index first.")
+    if not sys.stdin.isatty():
+        return _fail("the upgrade needs a real terminal for its typed confirmation (piped input is refused); nothing was changed")
+    try:
+        answer = input("Type UPGRADE to continue: ")
+    except EOFError:
+        return _fail("no confirmation was entered; nothing was changed")
+    if answer.strip() != "UPGRADE":
+        return _fail("confirmation did not match; nothing was changed")
+    try:
+        with idx.Index(path, create=False, allow_upgrade=True) as index:
+            done = index.migrated_from
+    except idx.IndexProblem as exc:
+        return _fail(exc)
+    print(f"Upgraded the local index from schema v{done} to v{idx.SCHEMA_VERSION}. A verified private backup was kept next to the index.")
+    return 0
 
 
 def _with_index(args, fn):
@@ -1189,7 +1315,7 @@ def build_parser():
         return q
 
     mb = sub.add_parser("mailbox", help="read-only mailbox index and reports (M2)")
-    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,status,report,insights,top-senders,purge}")
+    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,status,report,insights,top-senders,purge}")
     q = account_opt(msub.add_parser("insights", help="aggregate, explainable analytics of the local index (M6A; local only, human-readable or --json)"))
     q.add_argument("section", nargs="?", default="overview", choices=("all", "freshness", "overview", "volume", "categories", "senders", "subscriptions", "cleanup-summary", "cleanup-history", "organization"))
     q.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1206,7 +1332,14 @@ def build_parser():
     g.add_argument("--resume", action="store_true", help="continue the last interrupted scan")
     p.add_argument("--max-units-per-minute", type=int, default=4500, metavar="U",
                    help="Gmail API quota-unit budget per minute (default 4500 of the documented 6000)")
+    p.add_argument("--accept-count-mismatch", action="store_true", help="full scan: accept a reviewed difference between the listed count and Gmail's estimate")
+    p.add_argument("--allow-large-prune", action="store_true", help="full scan: allow removing more than 20%% of the indexed messages (reviewed)")
     p.set_defaults(func=cmd_mailbox_scan)
+    p = msub.add_parser("sync", help="apply recent Gmail changes to the local index from the saved history checkpoint (contacts Gmail, read-only)")
+    p.add_argument("--status", action="store_true", help="show the local sync state and exit (no Gmail contact)")
+    p.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the logged-in account)")
+    p.add_argument("--max-units-per-minute", type=int, default=4500, metavar="U", help="Gmail API quota-unit budget per minute (default 4500 of the documented 6000)")
+    p.set_defaults(func=cmd_mailbox_sync)
     for name, fn, helptext in (("status", cmd_mailbox_status, "scan history and index completeness (local only)"),
                                ("report", cmd_mailbox_report, "mailbox overview from the local index (local only)"),
                                ("top-senders", cmd_mailbox_top_senders, "top senders from the local index (local only)"),
@@ -1220,6 +1353,9 @@ def build_parser():
             q.add_argument("--domains", action="store_true", help="group by domain instead of showing addresses")
         if name == "purge":
             q.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    ix = sub.add_parser("index", help="local index maintenance (offline)")
+    isub = ix.add_subparsers(dest="index_command", required=True, metavar="{upgrade}")
+    isub.add_parser("upgrade", help="upgrade an existing local index to the current schema (typed confirmation; verified private backup first)").set_defaults(func=cmd_index_upgrade)
     cl = sub.add_parser("classify", help="rules and optional local-AI classification of the local index (M3; offline)")
     csub = cl.add_subparsers(dest="classify_command", required=True,
                              metavar="{status,preview,run,report,explain,clear,rules,ai}")

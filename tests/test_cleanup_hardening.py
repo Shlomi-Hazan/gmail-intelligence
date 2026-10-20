@@ -66,7 +66,7 @@ class BackupSafetyTests(Base):
         old = os.umask(0)
         try:
             with mock.patch.object(idx, "_write_backup", side_effect=spy):
-                with idx.Index(str(self.db)) as index:
+                with idx.Index(str(self.db), allow_upgrade=True) as index:
                     final = stat.S_IMODE(os.stat(index.backup_path).st_mode)
         finally:
             os.umask(old)
@@ -79,7 +79,7 @@ class BackupSafetyTests(Base):
             raise sqlite3.OperationalError("disk full (simulated)")
         with mock.patch.object(idx, "_write_backup", side_effect=boom):
             with self.assertRaises(idx.IndexProblem) as cm:
-                idx.Index(str(self.db))
+                idx.Index(str(self.db), allow_upgrade=True)
         self.assertEqual(backups(self.db), [])
         self.assertNotIn(str(self.tmp), str(cm.exception))  # no paths in the message
         c = sqlite3.connect(self.db)
@@ -94,7 +94,7 @@ class BackupSafetyTests(Base):
         precious.write_bytes(b"IRREPLACEABLE")
         os.chmod(precious, 0o600)
         with mock.patch.object(idx, "datetime", fixed):
-            with idx.Index(str(self.db)) as index:
+            with idx.Index(str(self.db), allow_upgrade=True) as index:
                 new = Path(index.backup_path)
         self.assertEqual(precious.read_bytes(), b"IRREPLACEABLE")
         self.assertNotEqual(new, precious)
@@ -106,7 +106,7 @@ class BackupSafetyTests(Base):
     def test_failed_upgrade_keeps_the_complete_verified_backup(self):
         with mock.patch.object(idx, "SCHEMA_V4", "CREATE TABLE a (x);CREATE TABLE a (x);"):
             with self.assertRaises(idx.IndexProblem) as cm:
-                idx.Index(str(self.db))
+                idx.Index(str(self.db), allow_upgrade=True)
         (kept,) = backups(self.db)
         self.assertEqual(stat.S_IMODE(os.stat(kept).st_mode), 0o600)
         c = sqlite3.connect(kept)
@@ -119,7 +119,7 @@ class BackupSafetyTests(Base):
             raise sqlite3.DatabaseError("backup verification failed")
         with mock.patch.object(idx, "_write_backup", side_effect=wrong_version):
             with self.assertRaises(idx.IndexProblem):
-                idx.Index(str(self.db))
+                idx.Index(str(self.db), allow_upgrade=True)
         self.assertEqual(backups(self.db), [])
 
     def test_simultaneous_upgrades_leave_a_healthy_database_and_private_backups(self):
@@ -128,7 +128,7 @@ class BackupSafetyTests(Base):
 
         def go():
             try:
-                i = idx.Index(str(self.db))
+                i = idx.Index(str(self.db), allow_upgrade=True)
                 out.append("ok")
                 i.close()
             except idx.IndexProblem:

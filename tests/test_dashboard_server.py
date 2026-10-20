@@ -274,7 +274,7 @@ class ApiContractTests(ServerBase):
             self.assertEqual(status, 200, route)
             self.assertTrue(h["content-type"].startswith("application/json"))
             if route == "meta":
-                self.assertEqual((body["read_only"], body["schema"], body["languages"]), (True, 6, ["en", "he"]))
+                self.assertEqual((body["read_only"], body["schema"], body["languages"]), (True, 7, ["en", "he"]))
                 self.assertNotIn(ACCT, json.dumps(body))
             else:
                 self.assertEqual(set(body), {"section", "data", "basis", "explain", "as_of", "index"}, route)
