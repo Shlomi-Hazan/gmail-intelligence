@@ -99,6 +99,66 @@ def build_case(path, name):
     return build(path, **CASES[name])
 
 
+TIE_RULES = (("CATEGORY_UPDATES", "NEWSLETTER"), ("CATEGORY_UPDATES", "EDUCATIONAL"), ("CATEGORY_FORUMS", "TRANSACTIONAL"), ("CATEGORY_FORUMS", "FINANCIAL"),
+             ("CATEGORY_SOCIAL", "NEWSLETTER"), ("CATEGORY_SOCIAL", "PROMOTIONAL"),
+             ("CATEGORY_PROMOTIONS", "NEWSLETTER"), ("CATEGORY_PROMOTIONS", "EDUCATIONAL"), ("CATEGORY_PROMOTIONS", "PROMOTIONAL"))
+
+
+def build_ties(path, account=ACCOUNT):
+    """A small SYNTHETIC index made of exact ties between types. Equal-precedence user rules on one Gmail tab label make every message of that tab carry BOTH types (a message with two
+    compatible types), so a sender/domain group has two types with identical counts. Domains: a (NEWSLETTER = EDUCATIONAL), b (TRANSACTIONAL = FINANCIAL), c (NEWSLETTER = PROMOTIONAL),
+    d (a tie only for some senders but NEWSLETTER leads overall), e (three tied types, which conflict and so are protected), f (a tie, but one starred message protects the group),
+    g (no rules: UNKNOWN only), h (not tied: one higher-priority rule decides), i (a sender group whose domain group is mixed), j and k (ties over 80% of a group, so rule proposals and label recommendations are produced)."""
+    index = idx.Index(str(path))
+    for label_id, value in TIE_RULES:
+        classifier.add_rule(index, account, kind="type", value=value, confidence="HIGH", priority=0, label=label_id)
+    classifier.add_rule(index, account, kind="type", value="NEWSLETTER", confidence="HIGH", priority=10, sender="lead@d.example.test")
+    classifier.add_rule(index, account, kind="type", value="PROMOTIONAL", confidence="HIGH", priority=20, domain="h.example.test")
+    rows = []
+
+    def add(domain, local, tab, count, extra=()):
+        for k in range(count):
+            n = len(rows)
+            rows.append({"id": f"t{n:05d}", "thread_id": f"th{n:05d}", "internal_ms": int((NOW - timedelta(days=200 + n)).timestamp() * 1000), "size": 1000, "sender": f"{local}@{domain}.example.test",
+                         "label_ids": ["INBOX"] + ([tab] if tab else []) + list(extra)})
+    add("a", "one", "CATEGORY_UPDATES", 6)
+    add("a", "two", "CATEGORY_UPDATES", 6)
+    add("b", "one", "CATEGORY_FORUMS", 6)
+    add("b", "two", "CATEGORY_FORUMS", 6)
+    add("c", "one", "CATEGORY_SOCIAL", 6)
+    add("c", "two", "CATEGORY_SOCIAL", 6)
+    add("d", "lead", "CATEGORY_UPDATES", 5)
+    add("d", "other", "CATEGORY_UPDATES", 7)
+    add("e", "one", "CATEGORY_PROMOTIONS", 12)
+    add("f", "one", "CATEGORY_UPDATES", 11)
+    add("f", "one", "CATEGORY_UPDATES", 1, ("STARRED",))
+    add("g", "one", None, 12)
+    add("h", "one", "CATEGORY_UPDATES", 12)
+    add("i", "one", "CATEGORY_FORUMS", 4)
+    add("i", "two", "CATEGORY_SOCIAL", 4)
+    add("i", "three", None, 4)
+    add("j", "one", "CATEGORY_UPDATES", 10)  # a tie (NEWSLETTER = EDUCATIONAL) over 83% of the group: the rest is UNKNOWN, so a rule proposal would really change something
+    add("j", "one", None, 2)
+    add("k", "one", "CATEGORY_UPDATES", 8)  # the same at sender level inside a domain whose other sender adds more tab messages
+    add("k", "one", None, 2)
+    add("k", "two", "CATEGORY_UPDATES", 5)
+    scan = index.start_scan(account, "full")
+    index.save_batch(account, scan, rows)
+    index.save_labels(account, [{"id": "Label_1", "name": "Mine", "type": "user"}, {"id": "INBOX", "name": "INBOX", "type": "system"}])
+    index.finish_scan(scan, "completed")
+    with index.conn:
+        index.conn.execute("UPDATE scans SET started_at='2026-10-18T09:00:00Z', finished_at='2026-10-18T09:30:00Z' WHERE id=?", (scan,))
+    classifier.run(index, account, persist=True)
+    return index
+
+
+def parts_digest(index, account=ACCOUNT):
+    """Per-component SHA-256 prefixes of the Organization output, to show WHICH part differs between two runs."""
+    h = lambda x: hashlib.sha256(x.encode()).hexdigest()[:12]  # noqa: E731
+    c = canonical(index, account)
+    return {k: h(json.dumps(v, sort_keys=True)) for k, v in c.items()}
+
+
 def canonical(index, account=ACCOUNT, reveal_names=True):
     """Everything the Organization screen is built from, in full and in order, as a JSON-serializable structure (clock fixed)."""
     h = label_hygiene.analyze(index, account)
