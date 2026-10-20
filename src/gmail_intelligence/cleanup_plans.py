@@ -280,9 +280,14 @@ def revalidate(index, account, plan, now=None, _out=None, only_ids=None):
     return problems
 
 
+PARTIAL_INDEX_CODES = frozenset({"INDEX_NOT_COMPLETE", "REASON_INDEX_PARTIAL", "ITEM_NOT_ELIGIBLE"})  # what the pre-M7 completeness check reports during a full scan
+
+
 def sync_only(problems):
-    """True when every problem is a sync-health code (the plan itself is not stale)."""
-    return bool(problems) and all(code in SYNC_CODES for code in problems)
+    """True when the refusal is about index freshness, not about the plan: at least one sync-health code and nothing else except the pre-M7 partial-index
+    codes that an active or unfinished full scan produces by itself (ITEM_NOT_ELIGIBLE only counts when its sole reason is the partial index)."""
+    codes = set(problems)
+    return bool(codes & SYNC_CODES) and codes <= (SYNC_CODES | PARTIAL_INDEX_CODES)
 
 
 def sync_guard_error(problems):

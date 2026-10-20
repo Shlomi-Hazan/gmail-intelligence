@@ -496,6 +496,7 @@ def cmd_mailbox_scan(args):
     if args.limit is not None and args.limit < 1:
         return _fail("--limit must be at least 1")
     try:
+        sync_lease.guard_ok()  # D145: before the index file, a reader or any Gmail request exists
         with idx.Index() as index:
             refusal = _scan_precheck(index, args)
             if refusal:
@@ -544,6 +545,7 @@ def cmd_mailbox_sync(args):
     if args.status:
         return _with_index(args, lambda i, a: print(sync_status_text(i, a)) or 0)
     try:
+        sync_lease.guard_ok()  # D145: before the index file, a reader or any Gmail request is touched
         account_hint = _local_account(args)
         with idx.Index(create=False) as index:
             if sync_health.state_row(index, account_hint) is None:  # local refusal before any Gmail request

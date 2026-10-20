@@ -138,8 +138,8 @@ def _reap(index, account, now):
     row = conn.execute("SELECT * FROM sync_run WHERE account=? AND status='running'", (account,)).fetchone()
     if row is None:
         # legacy rows: a scan marked running without any live run can only come from code that predates v7 and cannot be live
-        conn.execute("UPDATE scans SET status='interrupted', error='interrupted', finished_at=? WHERE account=? AND status='running'", (iso(now), account))
-        return False
+        cur = conn.execute("UPDATE scans SET status='interrupted', error='interrupted', finished_at=? WHERE account=? AND status='running'", (iso(now), account))
+        return cur.rowcount > 0  # a changed legacy row is a fail-closed fact worth keeping even if this requester is then refused
     expires, beat = sync_health.parse(row["lease_expires_at"]), sync_health.parse(row["heartbeat_at"])
     if expires > now:
         raise SyncError("SYNC_BUSY", "another sync or scan is active for this account; try again after it finishes or its lease expires")

@@ -12,7 +12,14 @@ gmail-intelligence mailbox report             # overview, categories, labels, ye
 gmail-intelligence mailbox top-senders [--unread] [--domains] [--limit N]   # sender addresses (local)
 gmail-intelligence mailbox purge              # delete this account's locally indexed data (asks first)
 ```
-Only `scan` contacts Gmail. `status`, `report`, `top-senders`, `purge`, `doctor` and `auth status` never do, and nothing starts a scan implicitly. Exit codes: 0 ok, 1 failure/incomplete, 2 usage, 130 interrupted (resume with `--resume`).
+```bash
+gmail-intelligence mailbox sync               # M7A: apply recent Gmail changes from the saved history checkpoint (read-only; needs a completed `scan --all` first)
+gmail-intelligence mailbox sync --status      # sync state, last runs (aggregates only) and whether cleanup plan operations are allowed (local)
+gmail-intelligence index upgrade              # M7A: explicitly upgrade an older local index to schema v7 (real terminal, type UPGRADE; a private backup is made first)
+```
+`scan` and `sync` contact Gmail (history is read through `history.list`, ids only, with the existing `gmail.readonly` scope). Nothing runs in the background or on a schedule. **Cleanup plans cannot be created, reviewed, approved or executed unless the sync state is fresh** (a completed `scan --all` or `sync` within 24 hours, no run or full scan unfinished, no `NEEDS_RECONCILE`); see [SYNC.md](SYNC.md). `scan --limit` is refused once a checkpoint exists. `scan --all` has two review flags, `--accept-count-mismatch` and `--allow-large-prune`, for the cases its safety checks stop on.
+
+Only `scan` and `sync` contact Gmail. `status`, `report`, `top-senders`, `purge`, `doctor` and `auth status` never do, and nothing starts a scan implicitly. Exit codes: 0 ok, 1 failure/incomplete, 2 usage, 130 interrupted (resume with `--resume`).
 
 ## What is requested from Gmail, stored, and displayed
 | Gmail call | Fields requested | Stored locally | Shown |

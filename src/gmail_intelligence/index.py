@@ -532,7 +532,7 @@ class Index:
                 return
             self.conn.close()
             raise IndexProblem(f"could not upgrade the index to schema version {SCHEMA_VERSION}; it was left unchanged "
-                               f"({type(exc).__name__}); the verified backup was kept: {backup}") from None
+                               f"({type(exc).__name__}); the verified backup was kept next to the index ({os.path.basename(backup)})") from None
         self.migrated_from = version
         self.backup_path = backup
 
