@@ -1,6 +1,6 @@
 # Incremental sync and maintenance (M7) — design contract
 
-> **Status: DESIGN ONLY. Nothing in this document is implemented.** It is the authoritative design for M7A ([#20](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/20)), M7B ([#21](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/21)) and M7C ([#22](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/22)). The owner approved this direction for documentation and synthetic-only implementation planning. It does **not** authorize: any Gmail call, any change to the personal index, any migration, any Gmail write, scheduling, or the M4 code changes in section 9 (those need the owner's explicit approval when M7B is started). Decisions are recorded as D129-D144 in [DECISIONS.md](DECISIONS.md).
+> **Status: DESIGN ONLY. Nothing in this document is implemented.** It is the authoritative design for M7A ([#20](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/20)), M7B ([#21](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/21)) and M7C ([#22](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/22)). The owner approved this direction for documentation and synthetic-only implementation planning. It does **not** authorize: any Gmail call, any change to the personal index, any migration, any Gmail write, scheduling, or the M4 code changes in section 9 (those need the owner's explicit approval when M7A is started; they ship in the same PR as the first operational sync path, section 14.1). Decisions are recorded as D129-D146 in [DECISIONS.md](DECISIONS.md).
 
 Tags: **[Implemented]** exists in `main` · **[Design]** decided here, not built · **[Verified]** checked against the cited official Google page on 2026-10-20 · **[Unverified]** an assumption that must be checked before it is relied on · **OWNER-APPROVAL-REQUIRED** changes an existing security contract.
 
@@ -78,23 +78,49 @@ Every operation that writes Gmail-derived rows to the index — an INCREMENTAL s
 
 Constants: `LEASE_TTL = 5 minutes`, heartbeat at every page, every 50-message chunk and at least once per 30 seconds of backoff sleep.
 
-### 5.1 Acquire (T0), one `BEGIN IMMEDIATE` transaction
-1. Read the account's `running` row, if any.
-2. If it exists and `lease_expires_at > now`: roll back and refuse with `SYNC_BUSY` ("another sync is active until ..."). **Never** take it over.
-3. If it exists and is expired: take over only if `now >= heartbeat_at` (a clock that moved backwards cannot prove abandonment; otherwise refuse with `SYNC_CLOCK_UNCERTAIN`). Mark it `interrupted` with a compare-and-swap (`UPDATE ... WHERE id=? AND status='running' AND lease_token=?`, rowcount must be 1), error `LEASE_EXPIRED`.
-4. Refuse if an M4 execution is active for the account (`PREPARED`, `EXECUTING`, `AWAITING_CONTINUATION`, `RECONCILIATION_REQUIRED`).
-5. Insert the new `running` row with a fresh random 256-bit hex lease token, then set `sync_state.status='IN_PROGRESS'` if a row exists (section 8). Commit.
+### 5.1 Reap and acquire (T0): how an expired run is taken over
+Both steps run inside one `BEGIN IMMEDIATE` transaction. The reap is a fail-closed clean-up that is committed **even when the requester is then refused**; admission is decided afterwards, on the post-reap state, in the same transaction.
 
-Rows marked `running` in the legacy `scans` table without a `sync_run` row can only come from a v6 binary, which cannot open a v7 file; they are marked `interrupted` once, by the first v7 acquire.
+**Reap (every acquire attempt starts here)**
+1. Read the account's `running` row, if any (the unique index allows at most one). None: nothing to reap.
+2. `lease_expires_at > now`: the run is active. Do not reap; refuse with `SYNC_BUSY` ("another sync is active until ..."). An active lease is never taken over.
+3. Expired but `now < heartbeat_at`: a clock that moved backwards cannot prove abandonment; refuse with `SYNC_CLOCK_UNCERTAIN`.
+4. Otherwise reap with a compare-and-swap (`UPDATE sync_run SET status='interrupted', error='LEASE_EXPIRED', finished_at=? WHERE id=? AND status='running' AND lease_token=?`; the row count must be 1, otherwise another process reaped first and this attempt is refused as `SYNC_BUSY`). In the same transaction: a `running` `scans` row of that run becomes `interrupted`, and an existing `sync_state` row moves `IN_PROGRESS` to `INTERRUPTED` with reason `LEASE_EXPIRED` when the dead run was INCREMENTAL, or `FULL_SCAN_INTERRUPTED` when it was FULL or LIMITED. The checkpoint value (`history_id`) is **never** touched by a reap, and a reap never writes `OK`.
+
+**Admission (after the reap, same transaction)**
+
+| Requester | Required state | Otherwise |
+|---|---|---|
+| INCREMENTAL | a `sync_state` row exists; `status` is `OK` or `INTERRUPTED` with reason `LEASE_EXPIRED`/`API_QUOTA`/`API_ERROR`; **no unfinished full scan** (derived from `scans`, below); no active M4 execution | refused: `SYNC_CHECKPOINT_MISSING`, `SYNC_NEEDS_RECONCILE`, `SYNC_FULL_SCAN_UNFINISHED` or `SYNC_EXECUTION_ACTIVE`; nothing is read from Gmail |
+| FULL (new or `--resume`) | any state | - |
+| LIMITED | no `sync_state` row at all (D144) | refused: `SYNC_LIMITED_REFUSED` |
+
+*Unfinished full scan* = any `scans` row of mode `full` or `limited` for the account with status `running`, `interrupted`, `failed` or `incomplete` and an id greater than `sync_state.basis_scan_id` (or any such row at all while no checkpoint exists). This is derived from the tables, independently of the status flag, so a wrong flag cannot let an incremental run start over an unfinished full scan.
+
+On admission: insert the new `running` run (fresh random 256-bit hex lease token), set an existing `sync_state` row to `IN_PROGRESS` (reason cleared), commit. A resumed FULL scan keeps its `scans` row and copies the captured baseline `historyId` from the most recent FULL `sync_run` row of the same scan; if there is none (a scan from before v7) the resumed scan establishes no checkpoint. A replacement INCREMENTAL run starts from `H0 = sync_state.history_id` exactly as last committed (a reaped incremental run never advanced it) and replays the whole range; chunks are idempotent.
+
+Legacy `scans` rows marked `running` without any `sync_run` row can only come from a v6 binary, which cannot open a v7 file; the first v7 acquire marks them `interrupted` and they count as an unfinished full scan.
 
 ### 5.2 Fencing: every later write
 Every transaction that changes the index on behalf of a run (each chunk, the label refresh, the final transaction, the heartbeat itself) begins with `BEGIN IMMEDIATE` and a **fence**: `SELECT 1 FROM sync_run WHERE id=? AND status='running' AND lease_token=?`. No row means the lease was lost: roll back, write nothing, stop with `SYNC_LEASE_LOST`. Because the fence and the write share one write-locking transaction, a stalled process (laptop sleep, SIGSTOP) that wakes after another process took over **cannot commit anything**, even though it still believes it owns the run. A fenced write also extends `lease_expires_at`/`heartbeat_at`. The process id is never trusted.
 
 ### 5.3 Release and recovery
 - Success: the final transaction sets the run `completed` (and the state, section 6/7). Clean failure or Ctrl+C: the run is set `interrupted`/`failed` (best effort) and the state per section 8.
-- Crash (kill -9, power loss): the `running` row stays; `sync_state` stays `IN_PROGRESS`, which keeps M4 prohibited; other writers see `SYNC_BUSY` until the lease expires (at most 5 minutes), then the next acquire takes over (5.1 step 3).
+- Crash (kill -9, power loss): the `running` row stays; `sync_state` stays `IN_PROGRESS`, which keeps M4 prohibited; other writers see `SYNC_BUSY` until the lease expires (at most 5 minutes), then the next acquire reaps it and takes over (5.1, 5.4).
 - `mailbox purge` refuses while an unexpired `running` lease exists.
 - Two processes racing T0 or a takeover: SQLite serializes the `IMMEDIATE` transactions and the unique index plus the compare-and-swap leave exactly one winner.
+
+### 5.4 Recovery table (dead run, expired lease)
+
+| Dead run | State after the reap | INCREMENTAL requester | FULL requester | LIMITED requester |
+|---|---|---|---|---|
+| INCREMENTAL | `INTERRUPTED` / `LEASE_EXPIRED` | admitted; replays from the committed checkpoint; `IN_PROGRESS`, then `OK` only at its final transaction | admitted (new capture) | refused |
+| FULL, checkpoint existed before | `INTERRUPTED` / `FULL_SCAN_INTERRUPTED` (the earlier `OK` is not restored) | **refused** `SYNC_FULL_SCAN_UNFINISHED`; no Gmail request, no row changed | admitted; `--resume` reuses the original baseline, a restart captures a new one; `OK` only when it completes | refused |
+| FULL or LIMITED, no checkpoint yet | stays MISSING | refused `SYNC_CHECKPOINT_MISSING` | admitted | admitted |
+| legacy v6 `running` scan | MISSING or as above | as the row above for its situation | as above | as above |
+| `IN_PROGRESS` flag but no `running` run (corruption) | `SYNC_STATE_INCONSISTENT` | refused | admitted (repairs) | refused |
+
+The only way back to `OK` after an unfinished FULL scan is that FULL scan completing (6.2). An incremental run can never bypass it, by three independent checks: the state reason, the derived unfinished-scan rule above, and `sync_health` itself.
 
 ## 6. FULL scans: baseline and reconciliation **[Design]**
 
@@ -181,7 +207,7 @@ Reason vocabulary (closed): `HISTORY_EXPIRED`, `HISTORY_INVALID`, `RANGE_TOO_LAR
 | NEEDS_RECONCILE, or INTERRUPTED with an unfinished FULL scan | INCREMENTAL requested | **refused** ("finish the full scan first") |
 | any | process crash | unchanged (`IN_PROGRESS`), which stays unhealthy |
 
-A LIMITED scan (`mailbox scan --limit`) is **refused once a checkpoint exists** (use `mailbox sync` or a FULL scan); before the first checkpoint it behaves as today and cannot create one. This removes an undefined case: a partial listing that restamps rows can never run beside a trusted checkpoint (D144).
+**D144 (confirmed by the owner):** `mailbox scan --limit` is refused whenever a `sync_state` row exists, in **any** status (an `INTERRUPTED` or `NEEDS_RECONCILE` row is an untrusted checkpoint, and a partial listing that restamps rows must never run beside it). The supported paths are FULL scans (`mailbox scan --all`, `--resume`) and incremental `mailbox sync`. Before the first checkpoint a limited scan behaves as today and can never create one. The refusal is decided from local state **before any Gmail request**: the account comes from the stored authorization and is re-verified against the profile only after the check; a refused attempt changes no file.
 
 ### 8.3 The interlock rules (exact)
 
@@ -198,7 +224,7 @@ A LIMITED scan (`mailbox scan --limit`) is **refused once a checkpoint exists** 
 
 **Immutability:** none of these transitions writes to `cleanup_plan`, `cleanup_item`, `cleanup_approval`, `cleanup_execution*`, `label_plan*` or `cleanup_audit`. A full scan or reconciliation that completes changes the M4 anchor (`last_full_scan`) exactly as it does today, which already makes older plans `INDEX_RESCANNED`; this document changes nothing about that.
 
-## 9. M4 plan-health contract (E1-E5) **[Design; OWNER-APPROVAL-REQUIRED when implemented in M7B]**
+## 9. M4 plan-health contract (E1-E5) **[Design; OWNER-APPROVAL-REQUIRED; implemented in the same PR as the first operational sync path (M7A), section 14.1]**
 
 ### 9.1 Three different things
 | Concept | Meaning | Decided by | Writes? | Reversible? |
@@ -261,9 +287,9 @@ After the v7 migration every M4 workflow stays blocked until one FULL baseline s
 | Isolation | no row mixes accounts |
 
 ## 11. CLI, modules and code touch list **[Design]**
-- New commands: `mailbox sync [--max-units-per-minute N]` (incremental), `mailbox sync --status` (local), `mailbox maintenance`. `mailbox scan --all` becomes the baseline/reconciliation command (no separate command, nothing automatic). `mailbox scan --limit` follows 8.2.
+- New commands: `mailbox sync [--max-units-per-minute N]` (incremental), `mailbox sync --status` (local), `mailbox maintenance`. `mailbox scan --all` becomes the baseline/reconciliation command (no separate command, nothing automatic). `mailbox scan --limit` follows 8.2. New explicit `index upgrade` (14.1, D146): the only way an existing index file is migrated to v7.
 - New modules: `sync_health.py`, `sync.py`, `sync_report.py`, `maintenance.py`; tests `fake_history.py`, `m7_support.py`, `test_sync_*`, `test_maintenance.py`.
-- Changed: `gmail.py` (read-only `list_history` with a minimal `fields` mask and a typed expired-history error; the public-method test is updated deliberately), `index.py` (v7, atomic baseline start, lease helpers, purge, `find_resumable` by kind), `scanner.py` (baseline capture, atomic completion, tombstones, count check), `report.py`/`analytics.py` (sync status in freshness, additive), `cli.py`, and the E1-E5 files in 9.3.
+- Changed: `gmail.py` (read-only `list_history` with a minimal `fields` mask and a typed expired-history error; the public-method test is updated deliberately), `index.py` (v7, atomic baseline start, lease helpers, purge, `find_resumable` by kind), `scanner.py` (baseline capture, atomic completion, tombstones, count check), `report.py`/`analytics.py` (sync status in freshness, additive), `cli.py`, and the E1-E5 files in 9.3 (`cleanup_plans.py`, `cleanup_exec.py`, in the M7A PR).
 - Unchanged: `cleanup_executor`, `cleanup_audit`, `gmail_write*`, `oauth*`, `label_plans`.
 
 ## 12. Quota and Zero Additional Cost
@@ -300,19 +326,41 @@ All tests use a fake Gmail (`FakeHistoryMailbox`: ground-truth oracle, monotonic
 | P3 | Prohibition | every cell of 9.4: refused with `SYNC_NOT_HEALTHY`; **table hashes of all `cleanup_*`/`label_plan*` tables and the audit head are identical before and after**; no lockout count; message never says "create a new plan" |
 | P4 | Recovery of health | after a completed sync a non-stale plan and unexpired approval pass again; a touched plan stays stale |
 | P5 | Audit | the chain verifies after every scenario |
+| RC1 | **Takeover of a dead incremental run** | `kill -9` of the holder after some chunks: before expiry a second process gets `SYNC_BUSY`; after expiry (injected clock) exactly one process reaps and acquires. The recorded state timeline is `IN_PROGRESS` -> `INTERRUPTED(LEASE_EXPIRED)` -> `IN_PROGRESS` (new run) -> `OK`; the checkpoint equals the pre-run value `H0` until the final transaction; the replay starts from `H0`; the final index equals the oracle |
+| RC2 | **Dead FULL scan beside an earlier healthy checkpoint** | `kill -9` of a FULL scan: after expiry an INCREMENTAL attempt reaps (state `INTERRUPTED(FULL_SCAN_INTERRUPTED)`), is refused `SYNC_FULL_SCAN_UNFINISHED`, makes **no** Gmail request and changes no message row; `OK` is not restored; `scan --all --resume` reuses the original baseline id and, only on completion, returns `OK`; then an incremental run is admitted |
+| RC3 | Derived guard | with the status flag deliberately corrupted to `OK` (or `INTERRUPTED/LEASE_EXPIRED`) while an unfinished full scan exists, INCREMENTAL is still refused and `sync_health` is still unhealthy |
+| RC4 | Reap race | two processes see the same expired lease: exactly one reaps (compare-and-swap), the other `SYNC_BUSY`; the state transition is applied once |
+| RC5 | Reap without admission | a refused requester still commits the reap; repeating the attempt is idempotent; a reap never writes `OK` and never changes `history_id` |
+| RC6 | Stale and legacy | a flag `IN_PROGRESS` with no `running` run is `SYNC_STATE_INCONSISTENT` (incremental refused, FULL repairs); a legacy `running` scan row is reaped and its resume establishes no checkpoint |
+| LS1 | **D144** | with a `sync_state` row in each status (`OK`, `IN_PROGRESS`, `INTERRUPTED`, `NEEDS_RECONCILE`) `scan --limit` is refused with `SYNC_LIMITED_REFUSED` before any Gmail request, the database file bytes are unchanged; FULL `--all`/`--resume` and `sync` remain available; with no row a limited scan works as today and writes no checkpoint |
+| G2 | **No unguarded intermediate state** | see 14.1: guard-inventory test, mutation test, handshake refusal, upgrade-refusal bytes unchanged |
 | M1 | Migration | v1..v6 to v7 on synthetic data: all existing tables byte-identical, backup 0600 and valid, failure mid-way leaves the file unchanged, concurrent migrators, `ReadOnlyIndex` accepts v7 and refuses v6 |
 | G1 | Boundaries | read-only scope only; adapter public methods exactly as approved; no write call reachable; metadata-only `fields`; no new dependency; no private data in logs/stdout/stderr; `LIVE_EXECUTION_ENABLED` still `False`; `scan_secrets --all` clean |
 | R1 | Maintenance | each check on a corrupted synthetic database; the report changes no byte of the file; output has no paths or private values |
 
 ## 14. Implementation order, pull requests and gates
 1. **This PR (documentation only).** Owner review and merge.
-2. **M7A Draft PR** (#20): schema v7 and migration, `list_history`, lease, FULL-scan changes (baseline, atomic completion, tombstones, count check), incremental engine, CLI, fake mailbox; S1-S5, C1-C8, L1-L6, F1-F2, M1, G1.
-3. **M7B Draft PR** (#21): deletion/change reporting, `sync_health`, the **E1-E5** M4 changes (explicit owner approval at the start of M7B), P1-P5, test helper updates.
+2. **M7A Draft PR** (#20) — the first usable sync path **and its safety interlocks together**: schema v7 and the explicit `index upgrade`, `list_history`, the lease and recovery, FULL-scan changes (baseline, atomic completion, tombstones, count check), the incremental engine (including deletion handling and tombstones), CLI, fake mailbox, `sync_health`, the **E1-E5** M4 changes (explicit owner approval at the **start of M7A**), the guard handshake, the shared test helper update; S1-S5, C1-C8, L1-L6, RC1-RC6, LS1, F1-F2, P1-P5, M1, G1, G2, U1.
+3. **M7B Draft PR** (#21): the change and deletion reporting surface (per-run change summary, tombstone counts, a read-only report of which plans a sync made stale), the extended adversarial plan-anchor matrix and the documentation of the plan effect; depends on M7A.
 4. **M7C Draft PR** (#22): `mailbox maintenance`, dashboard freshness fields, R1.
 5. Synthetic integration and security verification (inside the last PR).
-6. A **separate owner approval** before any real Gmail synchronization, then separate acceptance stages: v7 migration of the real index (backup first), the baseline FULL scan, the first incremental sync, real-index verification. Operational note: do not run an old-version scan during the migration; after the merge the dashboard cannot open the real index until it has been migrated once with a normal command.
+6. A **separate owner approval** before any real Gmail synchronization, then separate acceptance stages: the v7 upgrade of the real index (backup first), the baseline FULL scan, the first incremental sync, real-index verification. Operational note: do not run an old-version scan during the upgrade; after the merge the dashboard cannot open the real index until it has been upgraded once with `index upgrade`.
 
 Per-increment acceptance: every row of section 13 assigned to it passes; the whole existing suite passes; `git diff --check` and `scripts/scan_secrets.py --all` are clean; no new dependency; no new OAuth scope; no Gmail call in any test; documentation and decision records updated.
+
+### 14.1 No unguarded intermediate merged state (D145, D146)
+The risk: a state of `main` in which an operational sync path can change the index while the M4 sync-health interlocks (E1-E5) do not exist yet. Chosen approach, the simplest safe one: **no sync path ships without its guards.** The first PR that adds any operational path that can write Gmail-derived rows with a lease (`mailbox sync`, and the FULL scan changes that write `sync_state`) is the M7A PR, and it contains `sync_health` and E1-E5. The alternative (ship the engine switched off and enable it in M7B) was rejected: it needs a flag whose later flip is itself an unguarded step, and leaves dead code in `main`. Safety does not rest on a promise not to run a command; it is enforced in code and proven by tests:
+
+1. **Guard handshake (code-level).** `cleanup_plans` and `cleanup_exec` each declare `SYNC_GUARD_CONTRACT = 1`. Every lease acquisition (sync, FULL, LIMITED) first checks both constants and that `revalidate`/`_insert_plan` consult `sync_health`; otherwise it refuses with `SYNC_GUARD_MISSING` before touching the database or Gmail. A partial revert or cherry-pick that removes the guards therefore disables the sync path instead of leaving it open. There is no enable flag.
+2. **Explicit upgrade of an existing index (D146).** From v7 on, `Index()` refuses to migrate an existing file whose version is below 7; the message tells the owner to run `gmail-intelligence index upgrade`, which makes the verified private `pre-m7` backup, asks for typed confirmation, and migrates. Earlier migrations (v2-v6) were automatic on any command; to v7 it is deliberate, so that merging M7A and then running any ordinary command can never silently change the owner's personal index. `ReadOnlyIndex` keeps refusing older versions. Brand-new index files are created at v7 as before. Existing migration tests pass an explicit `allow_upgrade=True`.
+3. **Network gate.** Gmail is contacted only by explicit user commands that need the stored authorization; no test contacts Gmail (fake only), and no import-time or startup path starts a sync.
+
+**Tests (all synthetic):**
+- *Guard inventory:* a reflective test lists every public callable of `cleanup_plans` and `cleanup_exec` that creates, revises, reviews, approves, reserves, continues or executes, and requires each to be either on a reviewed "guarded" list (it must refuse with `SYNC_NOT_HEALTHY` when `sync_health` is patched to return a code, with no write and no audit row) or on a reviewed "always allowed" list (cancel, abort, expire, recovery, read-only views). A new public callable not on either list fails the suite.
+- *Mutation:* removing the `sync_health` call from `revalidate`, from `_insert_plan`, or the handshake constants makes the matching test fail.
+- *Handshake:* with a constant removed or patched, `mailbox sync`, `scan --all` and `scan --limit` refuse with `SYNC_GUARD_MISSING`, make no Gmail request and leave the database file bytes unchanged.
+- *Upgrade:* a v6 file opened by every ordinary command (`mailbox status`, `sync`, `scan`, `cleanup ...`) is refused and its bytes (hash) and mtime are unchanged; `index upgrade` without confirmation changes nothing; with confirmation it creates the 0600 backup and migrates; a failed upgrade leaves the file unchanged.
+- *Structural:* the CLI registers `sync` only together with the guard modules (single import of `sync_health` in `sync.py` and in `cleanup_plans.py`); a static test forbids importing a write module from any sync module.
 
 ## 15. Owner decisions (D1-D14 of the approved plan) and open items
 | Plan label | Subject | Record |
@@ -321,7 +369,7 @@ Per-increment acceptance: every row of section 13 assigned to it passes; the who
 | D2 | negative `scan_id` | D133 |
 | D3 | baseline FULL scan required; M4 blocked until then | D142 |
 | D4 | no sync during an active execution | D134 |
-| D5 | M4 fail-closed sync-health protections E1-E5 | D135 |
+| D5 | M4 fail-closed sync-health protections E1-E5 (in the M7A PR) | D135, D145 |
 | D6 | prune safety: count check, 20% tripwire, tombstones | D137 |
 | D7 | replay design, `MAX_RANGE_IDS = 5,000`, no watermark | D131, D132 |
 | D8 | billing-threshold blocker for live use | D140 |
@@ -331,6 +379,9 @@ Per-increment acceptance: every row of section 13 assigned to it passes; the who
 | D12 | `SYNC_MAX_AGE` 24 hours | D143 |
 | D13 | executor labels sync refusals `SKIPPED_DRIFT` (no execution-boundary change) | D135 |
 | D14 | label plans are not gated | D135 |
-| (new in this PR) | single-writer lease; full-scan interlock; LIMITED scans refused once a checkpoint exists | D134, D136, D144 (D144 is new and needs the owner's confirmation) |
+| (added by the design PR) | single-writer lease and recovery; full-scan interlock | D134, D136 |
+| (added) | LIMITED scans refused while any `sync_state` row exists (**confirmed by the owner**) | D144 |
+| (added in the PR #46 correction) | E1-E5 ship with the first operational sync path, no enable flag, guard handshake | D145 (needs the owner's confirmation) |
+| (added in the PR #46 correction) | explicit `index upgrade` for the v7 migration | D146 (needs the owner's confirmation) |
 
 **Blockers for live use (not for implementation):** confirmation of the current Gmail billing terms (section 12); a separate approval for the v7 migration, the baseline scan and the first live sync; the unverified `messagesTotal` semantics (observed during the first live acceptance; fails closed until then).
