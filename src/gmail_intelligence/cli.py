@@ -1259,6 +1259,21 @@ def cmd_mailbox_changes(args):
     return _with_readonly_index(args, go)
 
 
+def cmd_mailbox_maintenance(args):
+    """M7C: local, read-only maintenance report. Does not use the writable Index class, never contacts Gmail, never repairs anything."""
+    import json
+
+    from gmail_intelligence import maintenance
+
+    try:
+        account = _local_account(args)
+    except ValueError:
+        account = None  # file-level checks still run
+    rep = maintenance.run(config.index_path(), account, deep=args.deep)
+    print(json.dumps(rep, indent=2, sort_keys=True) if args.json else maintenance.render_text(rep))
+    return 0
+
+
 def cmd_cleanup_plan_impact(args):
     import json
 
@@ -1363,7 +1378,7 @@ def build_parser():
         return q
 
     mb = sub.add_parser("mailbox", help="read-only mailbox index and reports (M2)")
-    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,changes,status,report,insights,top-senders,purge}")
+    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,changes,maintenance,status,report,insights,top-senders,purge}")
     q = account_opt(msub.add_parser("insights", help="aggregate, explainable analytics of the local index (M6A; local only, human-readable or --json)"))
     q.add_argument("section", nargs="?", default="overview", choices=("all", "freshness", "overview", "volume", "categories", "senders", "subscriptions", "cleanup-summary", "cleanup-history", "organization"))
     q.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1387,6 +1402,10 @@ def build_parser():
     q.add_argument("--runs", type=int, default=5, metavar="N", help="how many recent runs to show (1-50)")
     q.add_argument("--json", action="store_true", help="machine-readable output")
     q.set_defaults(func=cmd_mailbox_changes)
+    q = account_opt(msub.add_parser("maintenance", help="local integrity checks and maintenance report (M7C; read-only, advisory, never repairs or contacts Gmail)"))
+    q.add_argument("--deep", action="store_true", help="also run SQLite's full integrity_check on the index and the backups (slower)")
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_mailbox_maintenance)
     p = msub.add_parser("sync", help="apply recent Gmail changes to the local index from the saved history checkpoint (contacts Gmail, read-only)")
     p.add_argument("--status", action="store_true", help="show the local sync state and exit (no Gmail contact)")
     p.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the logged-in account)")

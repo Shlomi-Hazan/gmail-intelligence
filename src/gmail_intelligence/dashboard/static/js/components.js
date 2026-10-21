@@ -61,6 +61,8 @@ export function freshnessNotice(env) {
   if (idx.stale) items.push(tn("fresh.stale", idx.age_days));
   if (idx.health === "CLASSIFICATION_STALE") items.push(t("fresh.class_stale"));
   if (idx.health === "UNCLASSIFIED") items.push(t("fresh.unclassified"));
+  const sync = env.data && env.data.sync;  // only the freshness section carries it; every other envelope is unchanged
+  if (sync && sync.state !== "OK") items.push(code("fresh.sync", sync.state), t("fresh.sync.hint"));
   return items.length ? notice("warn", t("fresh.title"), items.join(" "), h("p", { class: "actions" }, h("code", null, "gmail-intelligence mailbox scan"))) : null;
 }
 

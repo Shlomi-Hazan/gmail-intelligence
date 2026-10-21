@@ -1,6 +1,6 @@
 # Incremental sync and maintenance (M7) — design contract
 
-> **Status: M7A (#20) and M7B (#21: change/deletion reporting and plan-impact explanation) are IMPLEMENTED against synthetic data only (guards E1-E5, lease, explicit `index upgrade`, schema v7, `mailbox sync`, `mailbox changes`, `cleanup plan impact`); M7C is NOT started, and nothing has run against real Gmail or the owner's index. See sections 16 and 17.** It is the authoritative design for M7A ([#20](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/20)), M7B ([#21](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/21)) and M7C ([#22](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/22)). The owner approved this direction for documentation and synthetic-only implementation planning. It does **not** authorize: any Gmail call, any change to the personal index, any migration, any Gmail write, scheduling, or the M4 code changes in section 9 (those need the owner's explicit approval when M7A is started; they ship in the same PR as the first operational sync path, section 14.1). Decisions are recorded as D129-D146 in [DECISIONS.md](DECISIONS.md).
+> **Status: M7A (#20), M7B (#21) and M7C (#22: `mailbox maintenance` and the dashboard sync information) are IMPLEMENTED against synthetic data only (guards E1-E5, lease, explicit `index upgrade`, schema v7, `mailbox sync`, `mailbox changes`, `cleanup plan impact`, `mailbox maintenance`); nothing has run against real Gmail or the owner's index. See sections 16, 17 and 18.** It is the authoritative design for M7A ([#20](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/20)), M7B ([#21](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/21)) and M7C ([#22](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/22)). The owner approved this direction for documentation and synthetic-only implementation planning. It does **not** authorize: any Gmail call, any change to the personal index, any migration, any Gmail write, scheduling, or the M4 code changes in section 9 (those need the owner's explicit approval when M7A is started; they ship in the same PR as the first operational sync path, section 14.1). Decisions are recorded as D129-D146 in [DECISIONS.md](DECISIONS.md).
 
 Tags: **[Implemented]** exists in `main` · **[Design]** decided here, not built · **[Verified]** checked against the cited official Google page on 2026-10-20 · **[Unverified]** an assumption that must be checked before it is relied on · **OWNER-APPROVAL-REQUIRED** changes an existing security contract.
 
@@ -446,3 +446,54 @@ Reason categories (a plan lists ALL that apply; the headline is only a summary, 
 Findings made while the sync state is unhealthy are marked `evidence: UNCERTAIN_INDEX` (observed against an index of uncertain freshness). Approval rows are always reported as retained and immutable: a stale plan's VALID approval "can no longer authorize anything" but is never described as deleted or revoked. Stale plans are never edited or regenerated.
 
 Limits: observations of the LOCAL index only; the executor re-reads live Gmail before any write regardless; the report is a snapshot at the time it runs.
+
+## 18. Maintenance report and dashboard sync information (M7C)
+### 18.1 Running it
+`gmail-intelligence mailbox maintenance [--account EMAIL] [--deep] [--json]`. User-triggered only (nothing is scheduled), local only (no Gmail, no OAuth, no Keychain beyond reading the stored account name), and **advisory**: it never repairs, deletes, rescans, migrates, restores, chmods, expires a plan, consumes an approval, reserves an execution or appends an audit event. It exits 0 whenever the report could be produced; the worst severity is in the output (`overall`, JSON key). Without an account only the file-level checks run (`ACCOUNT_UNKNOWN`).
+
+### 18.2 What "read-only" means here
+The live index is opened with SQLite `mode=ro` + `query_only` (never the writable `Index` class, never `ReadOnlyIndex`'s upgrade-refusal path, never a migration); backups are opened `mode=ro&immutable=1`. A database is **not opened at all** when a `-journal`, `-wal` or `-shm` file sits next to it, because opening could require recovery, which writes (`INDEX_AUX_FILES_PRESENT` / `BACKUP_NOT_VERIFIED_AUX_FILES`, certainty UNKNOWN). The only SQL it runs is `SELECT` and the read pragmas `user_version`, `quick_check`, `integrity_check`, `foreign_key_check` and `query_only` (tests record every statement). Tests also compare SHA-256, size, mtime, mode and the directory listing of the index and every backup before and after.
+
+### 18.3 Four properties, never confused
+| Property | Answer | Meaning |
+|---|---|---|
+| local database | `HEALTHY` / `PROBLEMS_DETECTED` / `UNSUPPORTED_SCHEMA` / `NOT_VERIFIED` | two separate conclusions are reported with it: `sqlite_integrity` (`OK` / `FAILED` / `NOT_VERIFIED`: the file's structure, foreign keys) and `application_schema` (`SUPPORTED` / `OLDER` / `NEWER` / `UNRECOGNISED` / `NOT_VERIFIED`). `HEALTHY` requires both a sound file AND the supported schema; a structurally valid file with another schema (including `user_version` 0) is `UNSUPPORTED_SCHEMA`, its row-level checks are skipped and nothing is migrated |
+| mailbox index fresh | `FRESH` / `NOT_FRESH` / `UNKNOWN` | judged from local sync records only. **Gmail is never contacted: a clean report is not proof that the mailbox is unchanged or that the index matches it** |
+| backups | `NONE_FOUND` / `ALL_VERIFIED` / `PROBLEMS_DETECTED` / `NOT_FULLY_VERIFIED` | each discoverable backup passed SQLite's check, has the schema version its name implies and owner-only permissions; says nothing about recency or content versus Gmail |
+| cleanup plan operations | `ALLOWED_BY_INDEX_FRESHNESS` / `BLOCKED_BY_INDEX_FRESHNESS` | the E1-E5 gate only. Not the safety of any single plan: use `cleanup plan impact` |
+The audit chain is reported separately (`CONTINUOUS`, `BROKEN`, `NO_EVENTS`).
+
+### 18.4 Findings
+Every finding has a stable `code`, a `severity`, a `certainty`, a static privacy-safe explanation, a manual recommendation and optionally an integer `count`. Language is exact: *detected* only for directly established facts (`OBSERVED`), *possible* for inferences (`INFERRED`), *not verified* when evidence is insufficient (`UNKNOWN`).
+
+| Severity | Meaning |
+|---|---|
+| `INFO` | context or an expected condition; nothing to do |
+| `WARN` | something is stale, unfinished or unverified; cleanup plan operations may be blocked; act when convenient |
+| `ERROR` | a detected inconsistency or invalid backup; do not rely on the affected data until reviewed |
+| `CRITICAL` | the database cannot be read, fails SQLite's integrity check, or the audit chain is broken; stop using cleanup plans on this index and keep a copy before doing anything |
+
+| Category | Codes (severity/certainty) |
+|---|---|
+| A. SQLite | `INDEX_UNREADABLE_OR_CORRUPT`, `SQLITE_INTEGRITY_FAILED` (CRITICAL/OBSERVED); `FOREIGN_KEY_VIOLATIONS`, `INDEX_NOT_READABLE`, `INDEX_SCHEMA_NEWER` (ERROR/OBSERVED); `INDEX_MISSING`, `INDEX_SCHEMA_OLD`, `INDEX_SCHEMA_UNRECOGNISED`, `INDEX_PERMISSIONS_TOO_OPEN` (WARN/OBSERVED); `INDEX_AUX_FILES_PRESENT` (WARN/UNKNOWN) |
+| B. rows | `ORPHAN_MESSAGE_LABELS`, `ORPHAN_CLASSIFICATIONS`, `INVALID_SCAN_REFERENCE_POSITIVE/NEGATIVE/ZERO`, `CHECKPOINT_BASELINE_MISSING`, `CHECKPOINT_BASELINE_NOT_COMPLETED_FULL` (ERROR/OBSERVED); `TOMBSTONE_MESSAGE_CONTRADICTION`, `TOMBSTONE_RUN_MISSING`, `CLASSIFICATION_REFERENCES_MISSING_SCAN`, `SYNC_RUN_SCAN_MISSING` (WARN/OBSERVED); `LABEL_REFERENCES_UNKNOWN_LABEL` (WARN/INFERRED); `PLAN_ITEMS_REFERENCE_REMOVED_MESSAGES`, `NO_DATA_FOR_ACCOUNT`, `ACCOUNT_UNKNOWN` (INFO) |
+| C. scans and sync | `NO_BASELINE_SCAN`, `CHECKPOINT_MISSING`, `FULL_SCAN_UNFINISHED`, `SCAN_FAILED_REFRESHES`, `SYNC_RUN_FAILED_REFRESHES`, `LATEST_RUN_NOT_COMPLETED`, `SYNC_INTERRUPTED`, `SYNC_NEEDS_RECONCILE`, `CHECKPOINT_STALE` (WARN/OBSERVED); `SYNC_STATE_INCONSISTENT` (ERROR/OBSERVED); `SYNC_LEASE_EXPIRED`, `CHECKPOINT_MAY_EXPIRE` (WARN/INFERRED); `CHECKPOINT_LIKELY_EXPIRED` (ERROR/INFERRED); `SYNC_RUN_ACTIVE` (INFO/OBSERVED); `HISTORY_RETENTION_UNCERTAIN` (INFO/UNKNOWN) |
+| D. backups | `BACKUP_SCHEMA_VERSION_MISMATCH`, `BACKUP_CORRUPT`, `BACKUP_INVALID` (ERROR/OBSERVED); `BACKUP_PERMISSIONS_TOO_OPEN`, `BACKUP_NOT_REGULAR_FILE` (WARN/OBSERVED); `BACKUP_UNREADABLE`, `BACKUP_NOT_VERIFIED_AUX_FILES`, `BACKUP_UNSUPPORTED_TAG` (WARN/UNKNOWN); `NO_BACKUPS_FOUND`, `BACKUPS_VERIFIED` (INFO/OBSERVED) |
+| E. audit and executions | `AUDIT_CHAIN_BROKEN` (CRITICAL/OBSERVED); `EXECUTION_STATE_INCONSISTENT`, `APPROVAL_CONSUMED_WITHOUT_EXECUTION` (ERROR/OBSERVED); `EXECUTION_RECONCILIATION_REQUIRED`, `EXECUTION_OPEN` (WARN/OBSERVED); `AUDIT_TAIL_NOT_VERIFIABLE` (INFO/UNKNOWN); `PLANS_PAST_EXPIRY_NOT_RECORDED` (INFO/OBSERVED) |
+
+*Expected history is not corruption.* Immutable plan items (and executions) that name messages which later left the index are reported as `PLAN_ITEMS_REFERENCE_REMOVED_MESSAGES` (INFO, with how many have a recorded deletion). *An expired lease proves nothing*: `SYNC_LEASE_EXPIRED` is INFERRED and says the process may be suspended or slow, never that it is dead. Row-level checks are scoped to the chosen account; the SQLite and foreign-key checks are properties of the whole file and apply to every account.
+
+### 18.5 Quick versus deep
+Quick (default): `PRAGMA quick_check`, which verifies page structure but does **not** compare each index with its table. Deep (`--deep`): `PRAGMA integrity_check`, which also does that (a synthetic test shows a key altered inside an index page is missed by quick and found by deep), on the index and on every backup; slower on a large index. The dashboard never runs either.
+
+### 18.6 Limits of backup and audit verification
+- A backup is discovered only next to the index by the names the upgrade writes (`<index>.pre-m*-backup-<UTC stamp>[-n]`); copies kept elsewhere are invisible. "No backups found" is information, never corruption.
+- Verification is: owner-only permissions, schema version matching the tag (`pre-m3`=1, `pre-m4a`=2, `pre-m4b`=3, `pre-m4c`=4, `pre-m5`=5, `pre-m7`=6), and SQLite's check through an immutable read-only connection. It does not restore, compare content with Gmail, or prove the backup is recent or complete. Unreadable or unopenable backups are `UNKNOWN`, not "corrupt". A backup whose name carries a version tag this tool does not know (for example a newer release's) has no schema version to check against: it is **not opened**, never `VERIFIED`, never counted as verified, never makes the aggregate `ALL_VERIFIED`, and is reported as `BACKUP_UNSUPPORTED_TAG` (not verified, not 'damaged').
+- The audit check reuses `cleanup_audit.verify_chain`: it proves internal continuity of the hash chain only. **Removal of the newest entries cannot be detected without an external checkpoint of the chain head**, so the report always carries `AUDIT_TAIL_NOT_VERIFIABLE` when there are events. Anyone who controls the file can rewrite it consistently.
+- Absolute paths, file names and stored text are never printed: the output is built from static texts, fixed codes, backup tags and integer counts.
+
+### 18.7 Dashboard
+The freshness section gains an additive `sync` block (checkpoint present/missing, a state label `OK`/`MISSING`/`IN_PROGRESS`/`INTERRUPTED`/`NEEDS_RECONCILE`/`FULL_SCAN_UNFINISHED`/`STALE`/`INCONSISTENT`, status, allow-listed reason, age in hours, last completed sync time, the sync-health codes and the maintenance command) (and nothing in any other envelope: the `index` block of every section is unchanged). It is **not** merged into `issues`/`health`, so existing consumers see unchanged values. The Data screen shows it and every data screen's freshness notice mentions a problem with a hint to run `mailbox maintenance` in a terminal. It uses only cheap queries (no integrity checks) and adds no route, no write endpoint and no browser path to Gmail.
+
+### 18.8 Operations that remain separate owner-approval gates
+Everything the report may recommend that contacts Gmail or changes data: `mailbox scan --all` / `--resume`, `mailbox sync` (Gmail billing terms confirmed first), the `index upgrade` of the real index, a baseline scan, restoring from a backup, any scheduling, and any live execution. The report runs none of them.

@@ -14,7 +14,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-from gmail_intelligence import classifier, classify, cleanup_audit, cleanup_candidates as cc, label_hygiene, label_model as lm, label_suggest, filter_suggest, report
+from gmail_intelligence import classifier, classify, cleanup_audit, cleanup_candidates as cc, label_hygiene, label_model as lm, label_suggest, filter_suggest, report, sync_health, sync_report
 
 STALE_DAYS = 7
 MASK = "•••"
@@ -94,11 +94,28 @@ class Analytics:
             issues.append("CLASSIFICATION_STALE")
         if cls["unclassified"] and cls["indexed"]:
             issues.append("UNCLASSIFIED")
-        self._fresh = {"state": state, "why": clean(why, 200), "as_of": as_of, "age_days": age, "stale_after_days": STALE_DAYS,
+        self._fresh = {"state": state, "why": clean(why, 200), "sync": self._sync_facts(), "as_of": as_of, "age_days": age, "stale_after_days": STALE_DAYS,
                        "last_full_scan": full["finished_at"] if full else None, "scans_recorded": len(scans),
                        "classification": {"indexed": cls["indexed"], "current": cls["current"], "stale": cls["stale"], "unclassified": cls["unclassified"]},
                        "issues": issues, "health": issues[0] if issues else "OK"}
         return self._fresh
+
+    SYNC_PRECEDENCE = (("SYNC_NEEDS_RECONCILE", "NEEDS_RECONCILE"), ("SYNC_STATE_INCONSISTENT", "INCONSISTENT"), ("SYNC_FULL_SCAN_INCOMPLETE", "FULL_SCAN_UNFINISHED"),
+                       ("SYNC_IN_PROGRESS", "IN_PROGRESS"), ("SYNC_INTERRUPTED", "INTERRUPTED"), ("SYNC_CHECKPOINT_MISSING", "MISSING"), ("SYNC_STALE", "STALE"))
+
+    def _sync_facts(self):
+        """Aggregate, cheap sync information for the freshness screen (M7C). Local records only; the expensive integrity checks live in `mailbox maintenance`, never here.
+
+        Additive: it is kept OUT of `issues` / `health`, so existing consumers see exactly what they saw before."""
+        index, account = self.index, self.account
+        codes = sync_health.problems(index, account, self.now)
+        row = sync_health.state_row(index, account)
+        last = index._q("SELECT finished_at FROM sync_run WHERE account=? AND status='completed' ORDER BY id DESC LIMIT 1", account)
+        label = next((name for code, name in self.SYNC_PRECEDENCE if code in codes), "OK")
+        return {"state": label, "healthy": not codes, "checkpoint": "present" if row else "missing",
+                "status": row["status"] if row and row["status"] in ("OK", "IN_PROGRESS", "INTERRUPTED", "NEEDS_RECONCILE") else None,
+                "reason": sync_report.safe_reason(row["reason"]) if row else None, "age_hours": sync_report._age_hours(row["advanced_at"], self.now) if row else None,
+                "last_completed_sync_at": sync_report.safe_ts(last[0][0]) if last else None, "codes": codes, "maintenance_command": "mailbox maintenance"}
 
     def _envelope(self, section, data, basis, explain):
         f = self.freshness_facts()
@@ -137,7 +154,7 @@ class Analytics:
 
     # ------------------------------------------------------------------ sections
     def freshness(self):
-        return self._envelope("freshness", self.freshness_facts(), "OBSERVED", ["SNAPSHOT_NOT_LIVE", "DATA_AGE_FROM_LAST_SCAN"])
+        return self._envelope("freshness", self.freshness_facts(), "OBSERVED", ["SNAPSHOT_NOT_LIVE", "DATA_AGE_FROM_LAST_SCAN", "SYNC_FROM_LOCAL_RECORDS"])
 
     def overview(self):
         self._load()
