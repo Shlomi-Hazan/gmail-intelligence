@@ -568,7 +568,7 @@ def sync_status_text(index, account):
     """Aggregate, privacy-safe sync status: states, ages and counters only (no ids, labels, addresses or paths)."""
     from datetime import datetime, timezone
 
-    from gmail_intelligence import sync_health
+    from gmail_intelligence import sync_health, sync_report
 
     state = sync_health.state_row(index, account)
     lines = ["Sync status (local only; Gmail was not contacted)"]
@@ -581,12 +581,15 @@ def sync_status_text(index, account):
             age = f", last advanced {hours:.1f} hours ago"
         except (ValueError, TypeError):
             pass
-        lines.append(f"  state: {state['status']}" + (f" ({state['reason']})" if state["reason"] else "") + age)
+        status = state["status"] if state["status"] in ("OK", "IN_PROGRESS", "INTERRUPTED", "NEEDS_RECONCILE") else "UNRECOGNISED"
+        reason = sync_report.safe_reason(state["reason"])
+        lines.append(f"  state: {status}" + (f" ({reason})" if reason else "") + age)
     runs = index._q("SELECT kind, status, pages, records, affected, refreshed, unchanged, tombstoned, vanished, failed, error FROM sync_run WHERE account=? "
                     "ORDER BY id DESC LIMIT 3", account)
     for r in runs:
-        lines.append(f"  run [{r['kind']}] {r['status']}: pages {r['pages']}, records {r['records']}, affected {r['affected']}, refreshed {r['refreshed']}, "
-                     f"unchanged {r['unchanged']}, tombstoned {r['tombstoned']}, vanished {r['vanished']}, failed {r['failed']}" + (f" ({r['error']})" if r["error"] else ""))
+        lines.append(f"  run [{r['kind']}] {r['status']}: collected pages {r['pages']}, records {r['records']}, affected {r['affected']}; applied refreshed {r['refreshed']}, "
+                     f"unchanged {r['unchanged']}, tombstoned {r['tombstoned']}, vanished {r['vanished']}, failed {r['failed']}"
+                     + (f" ({sync_report.classify_note(r['error'])[0]})" if r["error"] else "") + ("" if r["status"] == "completed" else " [partial: see `mailbox changes`]"))
     codes = sync_health.problems(index, account)
     lines.append("  cleanup plan operations: " + ("allowed (index is fresh)" if not codes else "PROHIBITED until sync health is restored: " + ", ".join(codes)))
     return "\n".join(lines)

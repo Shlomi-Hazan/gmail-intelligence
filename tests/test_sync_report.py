@@ -279,3 +279,173 @@ class DeterminismTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SECRETS = ("ZXCV1234QWERTY5678UIOPasdf", "john.smith@company.example", "Private Label Name", "/Users/someone/Library/index.sqlite3", "m18c0ffee00001234",
+           "token abc123SECRETxyz", "ya29a0AfH6SMBxTOKEN", "SenderNameJaneDoe", "S3cretAlphaNumeric99")
+
+
+class StoredTextPrivacyTests(ReportCase):
+    """P1: sync_run.error / sync_state.reason / scan columns are stored free text. The report must never echo them: only a strict allow-list of known diagnostic codes
+    (and numbers parsed from two fixed shapes) is shown; everything else becomes a generic 'unrecognised' marker - including secrets made only of letters and digits."""
+
+    def poison(self, value):
+        with self.index.conn:
+            self.index.conn.execute("UPDATE sync_run SET error=? WHERE id=(SELECT MAX(id) FROM sync_run)", (value,))
+
+    def all_output(self):
+        rep = self.report()
+        ro = idx.ReadOnlyIndex(self.db)
+        try:
+            from gmail_intelligence import cli as cli_mod
+            status = cli_mod.sync_status_text(ro, ACCOUNT)
+        finally:
+            ro.close()
+        return sync_report.changes_text(rep) + "\n" + json.dumps(rep, sort_keys=True) + "\n" + status
+
+    def test_secret_bearing_error_strings_never_reach_text_json_or_status(self):
+        for secret in SECRETS:
+            for shape in ("{s}", "API error (HTTP 503) {s}", "{s} 12 messages could not be refreshed", "LEASE_EXPIRED {s}", "{s}\nLEASE_EXPIRED", "x" + "{s}" + "y"):
+                with self.subTest(secret=secret, shape=shape):
+                    self.poison(shape.format(s=secret))
+                    out = self.all_output()
+                    self.assertNotIn(secret, out)
+                    self.assertEqual(self.last()["note"], "UNRECOGNISED")
+                    self.assertIn("not shown", sync_report.changes_text(self.report()))
+
+    def test_secret_bearing_state_reason_and_scan_columns_are_not_echoed_either(self):
+        with self.index.conn:
+            self.index.conn.execute("UPDATE sync_state SET reason=?", ("S3cretAlphaNumeric99",))
+            self.index.conn.execute("UPDATE scans SET status=?, mode=?", ("ZXCV1234QWERTY5678UIOPasdf", "SenderNameJaneDoe"))
+            self.index.conn.execute("UPDATE sync_run SET started_at=?, finished_at=?", ("john.smith@company.example", "ya29a0AfH6SMBxTOKEN"))
+        out = self.all_output()
+        for secret in SECRETS:
+            self.assertNotIn(secret, out)
+        rep = self.report()
+        self.assertEqual(rep["checkpoint"]["reason"], "UNRECOGNISED")
+
+    def test_known_diagnostics_stay_meaningful(self):
+        cases = {"LEASE_EXPIRED": ("LEASE_EXPIRED", None), "HISTORY_EXPIRED": ("HISTORY_EXPIRED", None), "COUNT_MISMATCH": ("COUNT_MISMATCH", None),
+                 "API error (HTTP 503)": ("API_ERROR_HTTP", {"http_status": 503}), "12 messages could not be refreshed": ("MESSAGE_FAILURES", {"count": 12, "stage": "refreshed"}),
+                 "3 messages could not be indexed": ("MESSAGE_FAILURES", {"count": 3, "stage": "indexed"}), "authorization failed": ("AUTH_FAILED", None),
+                 "interrupted by user": ("INTERRUPTED_BY_USER", None), "rate limit": ("RATE_LIMIT", None)}
+        for raw, (code, detail) in cases.items():
+            with self.subTest(raw=raw):
+                self.poison(raw)
+                run = self.last()
+                self.assertEqual((run["note"], run["note_detail"]), (code, detail))
+                self.assertTrue(run["note_text"])
+        self.poison(None)
+        self.assertEqual((self.last()["note"], self.last()["note_text"]), (None, None))
+
+    def test_oversized_or_non_text_notes_are_unrecognised(self):
+        for raw in ("A" * 5000, "API error (HTTP 99999)", "99999999999999 messages could not be refreshed", b"bytes"):
+            with self.subTest(raw=str(raw)[:20]):
+                self.poison(raw)
+                self.assertEqual(self.last()["note"], "UNRECOGNISED")
+
+    def test_the_cli_commands_do_not_leak_either(self):
+        self.poison("S3cretAlphaNumeric99")
+        with self.index.conn:
+            self.index.conn.execute("UPDATE sync_state SET reason=?", ("ZXCV1234QWERTY5678UIOPasdf",))
+        self.index.close()
+        env = mock.patch.dict(os.environ, {config.HOME_ENV: str(self.tmp / "h2")})
+        env.start()
+        self.addCleanup(env.stop)
+        os.makedirs(config.app_dir(), exist_ok=True)
+        import shutil
+        shutil.copy(self.db, config.index_path())
+        store = mock.Mock()
+        store.load.return_value = {"account": ACCOUNT}
+        with mock.patch.object(cli, "_store", return_value=store):
+            for argv in (["mailbox", "changes"], ["mailbox", "changes", "--json"], ["mailbox", "sync", "--status"]):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    cli.main(argv)
+                for secret in ("S3cretAlphaNumeric99", "ZXCV1234QWERTY5678UIOPasdf"):
+                    self.assertNotIn(secret, out.getvalue(), argv)
+        self.index = idx.Index(self.db)
+
+
+class CounterSemanticsTests(ReportCase):
+    """P2: history pages / records / affected are COLLECTED (recorded once, before any message is applied); refreshed / unchanged / deleted / vanished / failed are
+    APPLIED (recorded with each chunk). A partial run must not present collected numbers as applied changes."""
+
+    def crash_at(self, point, **kw):
+        def hook(p):
+            if p == point:
+                raise Crash()
+        with self.assertRaises(Crash):
+            self.sync(hook=hook, **kw)
+        sync_lease.release(self.index)
+
+    def test_an_interruption_after_collection_and_before_the_first_chunk(self):
+        for i in range(6):
+            self.mailbox.add(f"x{i}")
+        self.mailbox.delete("m001")
+        self.crash_at("collected", chunk=2)
+        run = self.last()
+        self.assertEqual((run["phase"], run["history_collection_recorded"]), ("PARTIAL_RUNNING_LEASE_ACTIVE", True))
+        self.assertGreaterEqual(run["history_pages"], 1)
+        self.assertEqual((run["messages_affected"], run["history_records"]), (7, 7))              # collected ...
+        self.assertEqual((run["new_or_changed"], run["unchanged"], run["deleted"], run["never_indexed_and_gone"], run["failed_refreshes"]), (0, 0, 0, 0, 0))   # ... nothing applied
+        self.assertEqual(run["messages_not_yet_applied"], 7)
+        self.assertFalse(run["checkpoint_advanced_by_this_run"])
+        self.assertEqual(self.index._q("SELECT COUNT(*) FROM messages WHERE id LIKE 'x%'")[0][0], 0)           # and indeed no message row was touched
+        self.assertEqual(self.index._q("SELECT COUNT(*) FROM message_tombstone")[0][0], 0)
+        text = sync_report.changes_text(self.report())
+        self.assertIn("Collected before any message was applied", text)
+        self.assertIn("pages", text)
+        self.assertIn("Applied durably", text)
+        self.assertIn("new or changed 0", text)
+        self.assertIn("Not yet applied: 7", text)
+        self.assertIn("the next run will replay them", text)
+        self.assertIn("did not move", text)
+        self.assertNotIn("only what was durably applied", text)                                    # the old, wrong blanket statement is gone
+
+    def test_an_interruption_after_some_chunks_splits_applied_from_remaining(self):
+        for i in range(6):
+            self.mailbox.add(f"x{i}")
+        self.crash_at("chunk:1", chunk=2)
+        run = self.last()
+        self.assertEqual((run["messages_affected"], run["new_or_changed"], run["messages_not_yet_applied"]), (6, 2, 4))
+        self.assertIn("Not yet applied: 4", sync_report.changes_text(self.report()))
+
+    def test_a_run_that_stopped_before_collection_finished_records_no_collection(self):
+        self.mailbox.add("x1")
+        self.mailbox.faults["list_history"] = [Crash()]
+        with self.assertRaises(Crash):
+            self.sync()
+        sync_lease.release(self.index)
+        run = self.last()
+        self.assertEqual((run["history_collection_recorded"], run["history_pages"], run["messages_affected"]), (False, 0, 0))
+        self.assertIsNone(run["messages_not_yet_applied"])                                          # unknown, not zero
+        text = sync_report.changes_text(self.report())
+        self.assertIn("History collection: not recorded", text)
+        self.assertIn("0 here means not recorded", text)
+
+    def test_a_completed_run_has_nothing_left_and_the_checkpoint_moved(self):
+        self.mailbox.add("x1")
+        self.sync()
+        run = self.last()
+        self.assertEqual((run["phase"], run["messages_not_yet_applied"], run["checkpoint_advanced_by_this_run"], run["history_collection_recorded"]), ("COMPLETED", None, True, True))
+        self.assertEqual(run["new_or_changed"] + run["unchanged"] + run["deleted"] + run["never_indexed_and_gone"] + run["failed_refreshes"], run["messages_affected"])
+        text = sync_report.changes_text(self.report())
+        self.assertNotIn("Not yet applied", text)
+        self.assertIn("checkpoint advanced", text)
+
+    def test_a_partial_full_scan_reports_progress_counters_not_applied_changes(self):
+        self.at_call("list_message_ids", 2, lambda: (_ for _ in ()).throw(Crash()))
+        with self.assertRaises(Crash):
+            self.scan_all()
+        sync_lease.release(self.index)
+        run = self.last()
+        self.assertEqual((run["kind"], run["checkpoint_advanced_by_this_run"], run["removed_by_reconciliation"]), ("FULL", False, 0))
+        text = sync_report.changes_text(self.report())
+        self.assertIn("progress so far", text)
+        self.assertIn("removed nothing", text)
+        self.assertIn("no checkpoint", text)
+
+    def test_the_overlap_warning_still_holds(self):
+        text = sync_report.changes_text(self.report())
+        self.assertIn("must not be added together", text)

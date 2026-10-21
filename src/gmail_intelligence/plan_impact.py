@@ -9,7 +9,7 @@ never contacted, and the executor re-reads live Gmail state before any write reg
 """
 from datetime import datetime, timezone
 
-from gmail_intelligence import cleanup_plans as cp, sync_health
+from gmail_intelligence import cleanup_plans as cp, sync_health, sync_report
 
 ACTIVE_STATES = ("DRAFT", "REVIEWED", "APPROVED")
 FIELDS = (("labels", "labels_sha256"), ("read_state", "unread"), ("sender", "sender_sha256"), ("thread", "thread_id"), ("received_time", "internal_ms"),
@@ -139,8 +139,8 @@ def plan_entry(index, account, row, now, uncertain):
     cats = categories(problems)
     reasons = sorted(cats - {"OTHER"}, key=CATEGORY_ORDER.index) + (["OTHER"] if "OTHER" in cats else [])
     approvals = _approvals(index, account, plan["plan_id"])
-    entry = {"plan_id": plan["plan_id"], "state": state, "version": plan["version"], "items": plan["item_count"], "created_at": plan["created_at"],
-             "expires_at": plan["expires_at"], "headline": _headline(state, reasons), "reasons": reasons,
+    entry = {"plan_id": plan["plan_id"], "state": state, "version": plan["version"], "items": plan["item_count"], "created_at": sync_report.safe_ts(plan["created_at"]),
+             "expires_at": sync_report.safe_ts(plan["expires_at"]), "headline": _headline(state, reasons), "reasons": reasons,
              "codes": {k: problems[k] for k in sorted(problems)}, "approval_rows": approvals,
              "approval_rows_are_retained": True,
              "expiry_not_yet_recorded": state in ACTIVE_STATES and "EXPIRED" in reasons,

@@ -412,16 +412,18 @@ Per run (newest first) plus the checkpoint status, the sync-health codes, the la
 
 | Reported | Source (stored evidence) | Not claimed |
 |---|---|---|
-| history pages, records, messages affected | `sync_run` counters | - |
+| **collected**: history pages, records, messages affected | `sync_run` counters, written ONCE after the whole history range was read and BEFORE any message is applied; `0` pages means "not recorded" (the run stopped earlier), never "nothing found" | that any of these messages was changed |
 | **new or changed** | `sync_run.refreshed` (one combined counter) | **new vs changed is reported as "not recorded"**; it is never derived |
-| unchanged | `sync_run.unchanged` | - |
+| **applied**: unchanged | `sync_run.unchanged`, written in the same transaction as each chunk | - |
 | deleted | `sync_run.tombstoned`, cross-checked against the tombstone rows of that run | a move to Trash is a label change, counted inside "new or changed", never as deleted |
 | never indexed and gone | `sync_run.vanished` | - |
 | failed refreshes | `sync_run.failed` | - |
 | FULL/LIMITED runs: ids listed, fetched or refreshed, failed, removed by reconciliation | the linked `scans` row; removal tombstones (`FULL_RECONCILE`) of that run | new vs changed again unavailable; an unfinished scan removes nothing |
 | phase | `COMPLETED`, or `PARTIAL_*` from the run status; a `running` row is `PARTIAL_RUNNING_LEASE_ACTIVE` or `PARTIAL_ABANDONED_LEASE_EXPIRED` judged from the stored lease only | - |
 
-Counters of a partial run are what was durably applied (the counters are written in the same transaction as the chunk); the history checkpoint did not move for it. A replayed range counts the same messages in both runs (`messages affected`), so runs must never be added together; the text says so. Output is aggregate only: no message ids, senders, label names, account address or paths; free-text notes from a run are reduced to a safe character set.
+**Collected versus applied.** A partial run can hold collected totals and no applied change at all (it may stop right after collection, before its first chunk). The report therefore keeps the two groups apart: *collected* (pages, records, affected messages), *applied durably* (new or changed, unchanged, deleted, never indexed and gone, failed), and, for a partial run, *not yet applied* = affected minus the applied buckets (every affected message ends in exactly one bucket), which the next run replays. The history checkpoint advanced only for a run that completed (`checkpoint_advanced_by_this_run`). A replayed range counts the same messages as *affected* in both runs, so runs must never be added together; the text says so.
+
+**Stored text is untrusted.** Output is aggregate only: no message ids, senders, label names, account address or paths. Stored free text (`sync_run.error`, `sync_state.reason`, scan mode/status, timestamps) is never echoed: it is mapped through a strict allow-list of the diagnostic codes the sync and scan code writes (plus an HTTP status and a message count parsed from two fixed shapes); anything else is shown only as `UNRECOGNISED`. Character filtering is deliberately not used, because an alphanumeric-only secret would survive it.
 
 ### 17.2 `cleanup plan impact [--json]`
 For every active plan (DRAFT, REVIEWED, APPROVED) the current local index is compared with the stored plan using the existing checks only (`revalidate`, or `verify_approved` for an approved plan; both only SELECT). It never calls `expire_due`, a `_plan_cmd` helper or anything that writes: it does not expire a plan, consume or revoke an approval, reserve an execution, append an audit event or count towards a lockout.
