@@ -22,7 +22,7 @@ from gmail_intelligence import index as idx
 
 ALGORITHM_VERSION = 1
 WEIGHTS_STATUS = "PROVISIONAL"
-RETAINED_THREAD_BUDGET = 500_000  # PROVISIONAL placeholder: the final value is set from measured peak RSS and needs the owner's approval
+RETAINED_THREAD_BUDGET = 250_000  # PROPOSED, NOT APPROVED: measured ~0.72 KB peak RSS per retained thread (tests/attention_bench.py, docs/ATTENTION-EVALUATION.md); the owner decides
 BATCH = 2000
 MAX_RETRIES = 2
 DEFAULT_LIMIT, MAX_LIMIT = 25, 100
