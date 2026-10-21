@@ -206,6 +206,7 @@ export function data() {
         h("dt", null, t("dt.sync")), h("dd", null, f.sync.healthy ? badge("ok", code("sync", f.sync.state)) : code("sync", f.sync.state)),
         h("dt", null, t("dt.sync.checkpoint")), h("dd", null, f.sync.checkpoint === "present" ? t("dt.sync.present") : t("dt.sync.missing")),
         h("dt", null, t("dt.sync.last")), h("dd", null, f.sync.last_completed_sync_at ? `${dateTime(f.sync.last_completed_sync_at)}${f.sync.age_hours === null ? "" : " · " + t("dt.sync.hours", { n: int(Math.round(f.sync.age_hours)) })}` : t("dt.sync.never")),
+        h("dt", null, t("dt.sync.note.label")), h("dd", null, t("dt.sync.note")),
         h("dt", null, t("dt.maint")), h("dd", null, h("code", null, "gmail-intelligence mailbox maintenance"), " ", t("dt.maint.hint"))), how(env)];
     } }),
     panel({ title: "dt.limits.title", desc: "dt.limits.desc", load: () => get("meta"), render: (meta) => [

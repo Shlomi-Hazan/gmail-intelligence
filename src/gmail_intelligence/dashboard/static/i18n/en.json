@@ -84,6 +84,8 @@
  "dt.sync.last": "Last successful sync",
  "dt.sync.missing": "missing",
  "dt.sync.never": "none recorded",
+ "dt.sync.note.label": "Scan vs. sync",
+ "dt.sync.note": "Two separate freshness checks: the scan (a full pass over the mailbox, stale after 7 days) and the sync (keeps the index current for cleanup plans, stale after 24 hours). One can be fresh while the other is stale; they are not merged.",
  "dt.sync.present": "present",
  "dt.title": "Index and data freshness",
  "empty.body": "Run a scan to build the local index, then reload this page.",

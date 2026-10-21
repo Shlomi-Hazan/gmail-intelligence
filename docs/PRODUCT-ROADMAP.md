@@ -1,6 +1,6 @@
 # Product roadmap: M5-M11 (planning only)
 
-> **Status: direction approved by the owner. M5A-M5E (see [LABELS.md](LABELS.md)) and M6A-M6C (see [DASHBOARD.md](DASHBOARD.md)) are implemented as local, read-only features; M5F and M7-M11 are NOT implemented.** It adds product direction to the planning documents. It does
+> **Status: direction approved by the owner. M5A-M5E (see [LABELS.md](LABELS.md)) and M6A-M6C (see [DASHBOARD.md](DASHBOARD.md)) are implemented as local, read-only features; M7A-M7C (see [SYNC.md](SYNC.md)) are implemented and merged against synthetic data only; M5F and M8-M11 are NOT implemented.** Independent synthetic acceptance found one small correction still required; real Gmail acceptance has NOT occurred, a personal-index upgrade and live scanning are NOT approved, and Gmail write execution remains disabled. It adds product direction to the planning documents. It does
 > not authorize implementing any feature, any live Gmail operation, any new OAuth scope, any new dependency or any change to an existing security
 > boundary. Every milestone below needs its own explicit owner approval to start, and every increment needs its own Draft PR and review.
 > **Authority:** this document grants no authority to start M5-M11 or to perform any live Gmail operation. **Current M4 status (M4 closeout, [M4-CLOSEOUT.md](M4-CLOSEOUT.md)):** one owner-approved real single-message archive canary succeeded; live execution is disabled again (`LIVE_EXECUTION_ENABLED = False`); the write grant was revoked; real Gmail undo is NOT implemented; general live batch execution is NOT enabled; any future live operation needs fresh owner approval. The stage names M4C-B2/B3, M4C-C, M4C-D and M4D below are HISTORICAL: they describe how M4 was staged, not what remains.
@@ -96,7 +96,7 @@ API or model, no paid dependency, free-tier terms of any external service checke
   workflows.
 - **Dependencies:** M2 and ARCHITECTURE sections 6-7. Needs a design for how incremental sync interacts with M4 plans, which are bound to an index anchor:
   sync must neither silently invalidate nor silently validate an approved plan.
-- **Design contract (owner-approved direction, documentation only):** [SYNC.md](SYNC.md) and D129-D144 in [DECISIONS.md](DECISIONS.md); M7 is still NOT implemented.
+- **Design contract (owner-approved direction, documentation only):** [SYNC.md](SYNC.md) and D129-D144 in [DECISIONS.md](DECISIONS.md); Status: M7A-M7C are implemented and merged (synthetic data only, not run against real Gmail); M8 is not implemented.
 - **Privacy:** metadata only; schedule logs are privacy-safe.
 - **Security boundaries:** `gmail.readonly` only; **no unattended Gmail mutation by default**; scheduled jobs run without access to the write Keychain item
   or write client; a schedule is persistent configuration and needs explicit approval.

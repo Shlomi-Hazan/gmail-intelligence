@@ -11,7 +11,7 @@ from test_analytics import fixture_messages
 
 import m7_support
 from sync_support import ACCOUNT, SRC, SyncCase, idx, sync_lease
-from gmail_intelligence import analytics, dashboard_server as ds
+from gmail_intelligence import analytics, dashboard_server as ds, sync_health
 
 STATIC = SRC / "gmail_intelligence" / "dashboard" / "static"
 LABELS = ("OK", "MISSING", "IN_PROGRESS", "INTERRUPTED", "NEEDS_RECONCILE", "FULL_SCAN_UNFINISHED", "STALE", "INCONSISTENT")
@@ -122,12 +122,29 @@ class FreshnessSyncTests(SyncCase):
             if label != "OK":
                 self.assertIn(f"fresh.sync.{label}", en, label)
                 self.assertIn(f"fresh.sync.{label}", he, label)
-        for key in ("explain.SYNC_FROM_LOCAL_RECORDS", "fresh.sync.hint", "dt.sync", "dt.sync.checkpoint", "dt.sync.last", "dt.sync.hours", "dt.sync.never", "dt.maint", "dt.maint.hint"):
+        for key in ("explain.SYNC_FROM_LOCAL_RECORDS", "fresh.sync.hint", "dt.sync", "dt.sync.checkpoint", "dt.sync.last", "dt.sync.hours", "dt.sync.never", "dt.sync.note", "dt.sync.note.label", "dt.maint", "dt.maint.hint"):
             self.assertIn(key, en)
             self.assertIn(key, he)
         self.assertTrue(re.search(r"[֐-׿]", he["fresh.sync.MISSING"]))
         self.assertIn("mailbox maintenance", en["fresh.sync.hint"])
         self.assertIn("mailbox maintenance", he["fresh.sync.hint"])
+
+    def test_scan_and_sync_freshness_stay_separate_and_both_languages_explain_it(self):
+        env = self.fresh(now=self.clock.now + timedelta(hours=30))  # 30 h: past the 24 h sync threshold, far inside the 7-day scan threshold
+        self.assertEqual(env["data"]["sync"]["state"], "STALE")
+        self.assertFalse(env["data"]["sync"]["healthy"])
+        self.assertNotIn("STALE", env["data"]["state"].upper().split("_"))  # the scan-based state is untouched by the sync threshold
+        self.assertFalse([i for i in env["data"]["issues"] if "SYNC" in i.upper()])  # sync freshness never leaks into the scan health issues
+        self.assertEqual((analytics.STALE_DAYS, sync_health.SYNC_MAX_AGE), (7, timedelta(hours=24)))  # neither threshold moved
+        en, he = catalogs()
+        for lang, cat in (("en", en), ("he", he)):
+            note = cat["dt.sync.note"]
+            self.assertTrue(cat["dt.sync.note.label"], lang)
+            self.assertIn("7", note, lang)
+            self.assertIn("24", note, lang)
+        self.assertTrue(re.search(r"[֐-׿]", he["dt.sync.note"]))
+        self.assertFalse(re.search(r"[֐-׿]", en["dt.sync.note"]))
+        self.assertIn('t("dt.sync.note")', (STATIC / "js/views.js").read_text(encoding="utf-8"))
 
     def test_the_screens_use_only_text_nodes_and_local_assets(self):
         views, comps = (STATIC / "js/views.js").read_text(encoding="utf-8"), (STATIC / "js/components.js").read_text(encoding="utf-8")
