@@ -112,7 +112,7 @@ class MigrationV5Tests(ExecBase):
     def test_v4_to_v5_preserves_rows_with_private_verified_backup(self):
         path = self.make_v4()
         before = self.rows(path)
-        with idx.Index(str(path)) as index:
+        with idx.Index(str(path), allow_upgrade=True) as index:
             self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (4, idx.SCHEMA_VERSION))  # M5D: the same chain now ends at v6
             for t in ("cleanup_execution", "cleanup_exec_slice", "cleanup_exec_item"):
                 self.assertEqual(index._q(f"SELECT COUNT(*) FROM {t}")[0][0], 0)
@@ -124,7 +124,7 @@ class MigrationV5Tests(ExecBase):
         self.assertEqual(b.execute("PRAGMA user_version").fetchone()[0], 4)
         self.assertEqual(b.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'cleanup_exec%'").fetchone()[0], 0)
         b.close()
-        with idx.Index(str(path)) as again:
+        with idx.Index(str(path), allow_upgrade=True) as again:
             self.assertIsNone(again.migrated_from)
         self.assertEqual(len([p for p in path.parent.iterdir() if "backup" in p.name]), 1)
 
@@ -133,7 +133,7 @@ class MigrationV5Tests(ExecBase):
         before = self.rows(path)
         with mock.patch.object(idx, "SCHEMA_V5", "CREATE TABLE cleanup_execution (x);CREATE TABLE cleanup_execution (x);"):
             with self.assertRaises(idx.IndexProblem) as cm:
-                idx.Index(str(path))
+                idx.Index(str(path), allow_upgrade=True)
         self.assertIn("backup was kept", str(cm.exception))
         c = sqlite3.connect(path)
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 4)
@@ -151,7 +151,7 @@ class MigrationV5Tests(ExecBase):
             raise sqlite3.OperationalError("disk full (simulated)")
         with mock.patch.object(idx, "_write_backup", side_effect=boom):
             with self.assertRaises(idx.IndexProblem):
-                idx.Index(str(path))
+                idx.Index(str(path), allow_upgrade=True)
         self.assertEqual([p for p in path.parent.iterdir() if "backup" in p.name], [])
         c = sqlite3.connect(path)
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 4)
@@ -1794,7 +1794,7 @@ class SourceGuards(unittest.TestCase):
                     names = [node.module or ""] + [f"{node.module}.{a.name}" for a in node.names]
                 if any(n.split(".")[-1] in ("cleanup_exec", "cleanup_exec_report") for n in names):
                     importers.append(path.name)
-        self.assertEqual(sorted(set(importers)), ["cleanup_canary.py", "cleanup_canary_cli.py", "cleanup_executor.py", "cleanup_recovery.py", "cleanup_undo.py", "cli.py"])  # only the executor, undo, recovery and the disabled canary besides the CLI
+        self.assertEqual(sorted(set(importers)), ["cleanup_canary.py", "cleanup_canary_cli.py", "cleanup_executor.py", "cleanup_recovery.py", "cleanup_undo.py", "cli.py", "sync_lease.py"])  # besides the CLI: the executor, undo, recovery and the disabled canary; M7A sync_lease imports it ONLY to verify the D145 guard handshake (constant + source of the sync-health refusal), never to call it
 
 
 if __name__ == "__main__":

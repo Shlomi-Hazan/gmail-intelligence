@@ -183,7 +183,7 @@ class MigrationTests(TempHome):
         path = self.tmp / "old" / "index.sqlite3"
         path.parent.mkdir(mode=0o700)
         self.make_v1(path)
-        with idx.Index(str(path)) as index:
+        with idx.Index(str(path), allow_upgrade=True) as index:
             self.assertEqual(index.migrated_from, 1)
             self.assertEqual(index.conn.execute("PRAGMA user_version").fetchone()[0], idx.SCHEMA_VERSION)
             self.assertEqual(index.overview(ACCT)["n"], 1)
@@ -196,7 +196,7 @@ class MigrationTests(TempHome):
         self.assertEqual(b.execute("PRAGMA user_version").fetchone()[0], 1)
         self.assertEqual(b.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
         b.close()
-        with idx.Index(str(path)) as again:  # second open: no new migration
+        with idx.Index(str(path), allow_upgrade=True) as again:  # second open: no new migration
             self.assertIsNone(again.migrated_from)
 
     def test_failed_upgrade_leaves_v1_intact(self):
@@ -205,7 +205,7 @@ class MigrationTests(TempHome):
         self.make_v1(path)
         with mock.patch.object(idx, "SCHEMA_V2", "CREATE TABLE class_rules (x);CREATE TABLE class_rules (x);"):
             with self.assertRaises(idx.IndexProblem):
-                idx.Index(str(path))
+                idx.Index(str(path), allow_upgrade=True)
         conn = sqlite3.connect(path)
         self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 1)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
@@ -217,7 +217,7 @@ class MigrationTests(TempHome):
             path = self.tmp / "bad.sqlite3"
             path.write_bytes(body)
             with self.assertRaises(idx.IndexProblem):
-                idx.Index(str(path))
+                idx.Index(str(path), allow_upgrade=True)
             self.assertEqual(path.read_bytes(), body)  # untouched
         with mock.patch.dict(os.environ, {config.HOME_ENV: str(self.tmp / "badhome")}):
             (self.tmp / "badhome").mkdir(mode=0o700)
@@ -241,7 +241,7 @@ class MigrationTests(TempHome):
         conn.commit()
         conn.close()
         with self.assertRaises(idx.IndexProblem):
-            idx.Index(str(path))
+            idx.Index(str(path), allow_upgrade=True)
 
 
 class StoreTests(TempHome):

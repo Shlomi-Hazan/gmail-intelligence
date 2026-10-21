@@ -41,6 +41,8 @@ from gmail_intelligence.cleanup_audit import sha256
 from gmail_intelligence.cleanup_plans import PlanError, _iso, _parse, _txn, _utc, short
 from gmail_intelligence.index import EXEC_ITEM_CODES
 
+SYNC_GUARD_CONTRACT = 1  # D145: see cleanup_plans.SYNC_GUARD_CONTRACT
+
 CANARY_SIZE = 25
 MAX_SLICE = 100
 LEASE_TTL = timedelta(minutes=5)
@@ -416,6 +418,7 @@ def reserve_execution(index, account, plan_id, confirmation, now=None):
         with _txn(index):
             cp._check_clock(index, account, now)
             plan = cp.get_plan(index, account, plan_id)
+            cp.require_sync_health(index, account, now)  # E5: before the lockout and before any state judgement; a refusal is neither audited nor counted
             since = _iso(now - cp.LOCKOUT_WINDOW)
             if audit.recent(index, account, plan_id, ("RESERVATION_REJECTED",), since) >= cp.MAX_FAILED_ATTEMPTS:
                 raise ExecError("LOCKED_OUT", "too many failed execution confirmations for this plan; try again later")
@@ -424,6 +427,8 @@ def reserve_execution(index, account, plan_id, confirmation, now=None):
             if index._q("SELECT 1 FROM cleanup_execution WHERE account=? AND plan_id=?", account, plan_id):
                 raise ExecError("PLAN_ALREADY_HAS_EXECUTION", "this plan's approval was already consumed by an execution")
             problems = cp.verify_approved(index, account, plan_id, now)
+            if cp.sync_only(problems):
+                raise ExecError("SYNC_NOT_HEALTHY", cp.sync_guard_error(problems).args[0])  # E5: prohibited, not stale; nothing consumed, recorded or counted
             if problems:
                 raise ExecError("NOT_EXECUTABLE", "plan is not executable: " + cp._describe(problems))
             sizes = plan_slices(plan["item_count"])
@@ -470,7 +475,7 @@ def reserve_execution(index, account, plan_id, confirmation, now=None):
     except sqlite3.IntegrityError:  # database-level refusal (trigger / constraint): fail closed with a generic code
         err = ExecError("DB_CONSTRAINT", "an unexpected database constraint stopped the reservation; nothing was consumed")
     if err is not None:
-        if err.code not in ("NO_SUCH_PLAN", "CLOCK_ROLLBACK", "LOCKED_OUT"):
+        if err.code not in ("NO_SUCH_PLAN", "CLOCK_ROLLBACK", "LOCKED_OUT", "SYNC_NOT_HEALTHY"):
             cp._reject(index, account, plan_id, "RESERVATION_REJECTED", at, err.code)
         raise err
     return get_execution(index, account, exec_id)
@@ -735,6 +740,7 @@ def confirm_slice(index, account, exec_id, slice_no, confirmation, now=None):
             cp._check_clock(index, account, now)
             ex = get_execution(index, account, exec_id)
             plan = cp.get_plan(index, account, ex["plan_id"])
+            cp.require_sync_health(index, account, now)  # E5
             if ex["state"] != "AWAITING_CONTINUATION":
                 raise ExecError("BAD_STATE", f"execution is {ex['state']}; only an AWAITING_CONTINUATION execution can continue")
             sl = _slice(index, account, exec_id, slice_no)
@@ -748,6 +754,8 @@ def confirm_slice(index, account, exec_id, slice_no, confirmation, now=None):
                 raise ExecError("BAD_CONFIRMATION", "continuation confirmation did not match; nothing was confirmed")
             remaining = [r["message_id"] for r in index._q("SELECT message_id FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='PENDING'", account, exec_id)]
             problems = cp.revalidate(index, account, plan, now, only_ids=remaining)
+            if cp.sync_only(problems):
+                raise ExecError("SYNC_NOT_HEALTHY", cp.sync_guard_error(problems).args[0])  # E5
             if problems:
                 raise ExecError("STALE", "the remaining targets are stale or inconsistent: " + cp._describe(problems))
             _set_slice(index, account, exec_id, ex["plan_id"], slice_no, "CONFIRMED", "PENDING", at, confirmed_at=at,
@@ -756,7 +764,7 @@ def confirm_slice(index, account, exec_id, slice_no, confirmation, now=None):
     except PlanError as exc:
         err = exc
     if err is not None:
-        if err.code not in ("NO_SUCH_EXECUTION", "CLOCK_ROLLBACK"):
+        if err.code not in ("NO_SUCH_EXECUTION", "CLOCK_ROLLBACK", "SYNC_NOT_HEALTHY"):
             ex = index._q("SELECT plan_id FROM cleanup_execution WHERE account=? AND exec_id=?", account, exec_id)
             if ex:
                 cp._reject(index, account, ex[0]["plan_id"], "RESERVATION_REJECTED", at, err.code)

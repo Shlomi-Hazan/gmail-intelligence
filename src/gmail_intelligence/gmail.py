@@ -17,6 +17,10 @@ class GmailNotFoundError(GmailApiError):
     """404: the message no longer exists."""
 
 
+class GmailHistoryNotFoundError(GmailNotFoundError):
+    """404 from history.list: the startHistoryId (or page token) is out of the available range or unknown."""
+
+
 class GmailAuthError(GmailApiError):
     """401/403: credentials rejected or insufficient."""
 
@@ -83,6 +87,38 @@ class GmailReader:
             userId="me", maxResults=max_results, pageToken=page_token, includeSpamTrash=True,
             fields="messages/id,nextPageToken"))
         return [m["id"] for m in data.get("messages", []) if m.get("id")], data.get("nextPageToken")
+
+    HISTORY_TYPES = ["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"]
+
+    def list_history(self, start_history_id, page_token=None, max_results=100):
+        """One page of mailbox change records after `start_history_id` (ids only; gmail.readonly). M7A.
+
+        Returns {"records": [{"id", "added", "deleted", "labels"}], "next": token or None, "history_id": current mailbox id or None}.
+        The message lists hold message ids only. A 404 raises GmailHistoryNotFoundError (expired or unknown id / token).
+        """
+        from googleapiclient.errors import HttpError
+
+        try:
+            data = self._service.users().history().list(
+                userId="me", startHistoryId=str(start_history_id), pageToken=page_token, maxResults=max_results, historyTypes=self.HISTORY_TYPES,
+                fields="history(id,messagesAdded/message/id,messagesDeleted/message/id,labelsAdded/message/id,labelsRemoved/message/id),nextPageToken,historyId"
+            ).execute(num_retries=self.RETRIES)
+        except HttpError as exc:
+            err = _translate(exc)
+            if isinstance(err, GmailNotFoundError):
+                raise GmailHistoryNotFoundError("Gmail history not found (HTTP 404)", 404) from None
+            raise err from None
+        except OSError:
+            raise GmailApiError("network error talking to the Gmail API") from None
+        records = []
+        for rec in data.get("history") or []:
+            def ids(key):
+                return [m["message"]["id"] for m in rec.get(key) or [] if isinstance(m, dict) and isinstance(m.get("message"), dict)
+                        and isinstance(m["message"].get("id"), str)]
+            records.append({"id": str(rec.get("id")), "added": ids("messagesAdded"), "deleted": ids("messagesDeleted"),
+                            "labels": ids("labelsAdded") + ids("labelsRemoved")})
+        hid = data.get("historyId")
+        return {"records": records, "next": data.get("nextPageToken"), "history_id": None if hid is None else str(hid)}
 
     def get_message_metadata(self, message_id):
         """Metadata only: ids, date, size, label ids and the From address. No snippet, body or attachments."""

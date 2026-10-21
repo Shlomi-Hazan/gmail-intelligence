@@ -17,10 +17,12 @@ import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from gmail_intelligence import classifier, cleanup_audit as audit, cleanup_candidates as cc, cleanup_protect, report
+from gmail_intelligence import classifier, cleanup_audit as audit, cleanup_candidates as cc, cleanup_protect, report, sync_health
 from gmail_intelligence.cleanup_audit import canonical, sha256
 
 FORMAT_VERSION = 1
+SYNC_GUARD_CONTRACT = 1  # D145: sync_lease refuses to start any run unless this exact contract version is declared (E1-E5 present)
+SYNC_CODES = frozenset(sync_health.CODES)
 ACTION = "ARCHIVE"
 MAX_PLAN_ITEMS = 500
 PLAN_TTL = timedelta(hours=48)
@@ -251,6 +253,8 @@ def revalidate(index, account, plan, now=None, _out=None, only_ids=None):
         bad("INDEX_NOT_COMPLETE")
     elif anchor != snap["index"]:
         bad("INDEX_RESCANNED")
+    for code in sync_codes(index, account, now):  # E1: index freshness uncertain -> prohibited (no writes; see sync_guard_error)
+        bad(code)
     wanted = None if only_ids is None else set(only_ids)  # continuation checks only the not-yet-executed targets
     ids = [i["id"] for i in snap["items"] if wanted is None or i["id"] in wanted]
     facts = _facts(index, account, ids)
@@ -274,6 +278,38 @@ def revalidate(index, account, plan, now=None, _out=None, only_ids=None):
             for code in (d.codes if d else ()):
                 bad("REASON_" + code)
     return problems
+
+
+PARTIAL_INDEX_CODES = frozenset({"INDEX_NOT_COMPLETE", "REASON_INDEX_PARTIAL", "ITEM_NOT_ELIGIBLE"})  # what the pre-M7 completeness check reports during a full scan
+
+
+def sync_codes(index, account, now):
+    """E1: the sync-health codes that currently apply (empty = healthy). Read-only."""
+    return sync_health.problems(index, account, now)
+
+
+def require_sync_health(index, account, now):
+    """E2/E3/E5: the first thing every guarded operation does INSIDE its write transaction, before any plan, approval, lockout or rejection logic.
+
+    An unhealthy index is a prohibition, not a plan problem: it raises SYNC_NOT_HEALTHY (never audited, never counted towards a lockout) whatever the
+    plan's own state is, so even a request about an expired or unknown plan cannot cause a rejection record while health is the real obstacle.
+    """
+    codes = sync_codes(index, account, now)
+    if codes:
+        raise sync_guard_error({c: 1 for c in codes})
+
+
+def sync_only(problems):
+    """True when the refusal is about index freshness, not about the plan: at least one sync-health code and nothing else except the pre-M7 partial-index
+    codes that an active or unfinished full scan produces by itself (ITEM_NOT_ELIGIBLE only counts when its sole reason is the partial index)."""
+    codes = set(problems)
+    return bool(codes & SYNC_CODES) and codes <= (SYNC_CODES | PARTIAL_INDEX_CODES)
+
+
+def sync_guard_error(problems):
+    """E3/E5: the distinct refusal for 'prohibited until sync health is restored'. It is not a stale plan and changes nothing."""
+    return PlanError("SYNC_NOT_HEALTHY", "this operation is prohibited until the local index is fresh again (" + _describe(problems)
+                     + "); the plan and its approval are unchanged. Run `mailbox sync` (or `mailbox scan --all`) and try again")
 
 
 def _has_execution(index, account, plan_id):
@@ -324,6 +360,7 @@ def _insert_plan(index, account, ids, min_age_days, now, parent=None, canary=Fal
     """Validate and insert a new DRAFT plan inside the caller's transaction. Returns the plan id."""
     at = _iso(now)
     ids = sorted(set(ids))
+    require_sync_health(index, account, now)  # E2: no plan is created while index freshness is uncertain
     if canary and (len(ids) != 1 or parent is not None):
         raise PlanError("BAD_INPUT", "a canary exception covers exactly one message and is never revised")
     res = cc.evaluate_all(index, account, now_ms=_ms(now), min_age_days=min_age_days, canary_ids=frozenset(ids) if canary else frozenset())
@@ -455,6 +492,7 @@ def _guard(index, account, plan_id, event, now, body, duplicate_check=False):
         with _txn(index):
             _check_clock(index, account, now)
             plan = get_plan(index, account, plan_id)
+            require_sync_health(index, account, now)  # E3/E4: before the lockout and before any plan-state judgement
             _lockout(index, account, plan_id, now)
             return body(plan)
     except sqlite3.IntegrityError:
@@ -466,7 +504,7 @@ def _guard(index, account, plan_id, event, now, body, duplicate_check=False):
         err = exc
     if err.code == "LOCKED_OUT":
         _note_lockout(index, account, plan_id, now)
-    elif err.code not in ("NO_SUCH_PLAN", "CLOCK_ROLLBACK") and not _reject(index, account, plan_id, event, at, err.code):
+    elif err.code not in ("NO_SUCH_PLAN", "CLOCK_ROLLBACK", "SYNC_NOT_HEALTHY") and not _reject(index, account, plan_id, event, at, err.code):
         err = PlanError(err.code, str(err) + " [warning: the audit entry for this failure could not be written]")
     raise err
 
@@ -480,6 +518,8 @@ def mark_reviewed(index, account, plan_id, phrase, now=None):
         if plan["state"] != "DRAFT":
             raise PlanError("BAD_STATE", f"plan is {plan['state']}; only a DRAFT plan can be reviewed")
         problems = revalidate(index, account, plan, now)
+        if sync_only(problems):
+            raise sync_guard_error(problems)  # E3
         if problems:
             raise PlanError("STALE", "plan is stale or inconsistent: " + _describe(problems) + ". Create a new plan.")
         if (phrase or "").strip() != review_phrase(plan):
@@ -502,6 +542,8 @@ def approve(index, account, plan_id, phrase, now=None):
         if plan["state"] != "REVIEWED":
             raise PlanError("BAD_STATE", f"plan is {plan['state']}; only a REVIEWED plan can be approved")
         problems = revalidate(index, account, plan, now)
+        if sync_only(problems):
+            raise sync_guard_error(problems)  # E3
         if problems:
             raise PlanError("STALE", "plan is stale or inconsistent: " + _describe(problems) + ". Create a new plan.")
         if (phrase or "").strip() != approval_phrase(plan):

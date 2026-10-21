@@ -337,14 +337,15 @@ class GmailAdapterTests(Base):
     def test_only_read_methods_are_exposed(self):
         public = {n for n in dir(gmail.GmailReader) if not n.startswith("_") and callable(getattr(gmail.GmailReader, n))}
         self.assertEqual(public, {"get_profile", "list_labels", "list_label_details", "list_message_ids",
-                                  "get_message_metadata"})
+                                  "get_message_metadata", "list_history"})  # M7A: list_history is the one intentional, read-only addition
         for banned in ("send", "modify", "batchModify", "trash", "delete", "insert", "import_", "drafts"):
             self.assertFalse(hasattr(gmail.GmailReader, banned), banned)
 
     def test_source_has_no_write_or_content_api_calls_and_no_broader_scopes(self):
         text = (SRC / "gmail_intelligence" / "gmail.py").read_text()
         self.assertIsNone(re.search(r"\.(send|modify|batchModify|trash|untrash|delete|batchDelete|insert|import_|"
-                                    r"drafts|settings|attachments|threads|history)\(", text))
+                                    r"drafts|settings|attachments|threads)\(", text))
+        self.assertEqual(set(re.findall(r"\.history\(\)\.(\w+)\(", text)), {"list"})  # M7A: history is read through list only
         # the only message calls allowed are read-only list/get
         self.assertEqual(set(re.findall(r"\.messages\(\)\.(\w+)\(", text)), {"list", "get"})
         self.assertEqual(set(re.findall(r"\.labels\(\)\.(\w+)\(", text)), {"list"})

@@ -79,7 +79,7 @@ class FakeReader:
 
 
 def fast_limiter():
-    return scanner.RateLimiter(10 ** 9, clock=lambda: 0.0, sleep=lambda s: None)
+    return scanner.RateLimiter(10 ** 9, clock=(lambda it=__import__('itertools').count(): next(it) * 1000.0), sleep=lambda s: None)
 
 
 class IndexCase(unittest.TestCase):
@@ -148,12 +148,12 @@ class ScanBehaviour(IndexCase):
 
             def __getattr__(self, name):
                 used.add(name)
-                if name not in ("list_label_details", "list_message_ids", "get_message_metadata"):
+                if name not in ("get_profile", "list_label_details", "list_message_ids", "get_message_metadata"):
                     raise AssertionError(f"scanner used {name}")
                 return getattr(self._inner, name)
 
         self.scan(Spy(FakeReader([mk(1), mk(2)])))
-        self.assertEqual(used, {"list_label_details", "list_message_ids", "get_message_metadata"})
+        self.assertEqual(used, {"get_profile", "list_label_details", "list_message_ids", "get_message_metadata"})
 
 
 class ResumeAndFailures(IndexCase):
@@ -259,7 +259,7 @@ class ResumeAndFailures(IndexCase):
 
     def test_complete_full_scan_prunes_messages_gone_from_gmail_but_limited_never_does(self):
         reader = FakeReader([mk(i) for i in range(5)])
-        self.scan(reader)
+        self.scan(reader, mode="limited", limit=5)  # M7A: a limited scan is refused once a checkpoint exists, so the limited scans come first
         reader.messages = reader.messages[:3]
         self.scan(reader, mode="limited", limit=2)
         self.assertEqual(self.count(), 5)

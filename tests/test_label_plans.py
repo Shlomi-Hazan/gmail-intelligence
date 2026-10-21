@@ -474,9 +474,9 @@ class MigrationTests(M5Base):
         c.close()
         return data
 
-    def test_fresh_database_is_v6_with_the_label_plan_tables(self):
-        self.assertEqual(idx.SCHEMA_VERSION, 6)
-        self.assertEqual(self.index.conn.execute("PRAGMA user_version").fetchone()[0], 6)
+    def test_fresh_database_is_v7_with_the_label_plan_tables(self):
+        self.assertEqual(idx.SCHEMA_VERSION, 7)  # M7A added v7 (sync state); the M5D label plan tables are unchanged
+        self.assertEqual(self.index.conn.execute("PRAGMA user_version").fetchone()[0], 7)
         tables = {r[0] for r in self.index._q("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"label_plan", "label_plan_op", "label_plan_approval", "cleanup_plan", "cleanup_audit"} <= tables)
         self.assertGreaterEqual(self.index._q("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'label_plan%'")[0][0], 12)
@@ -484,8 +484,8 @@ class MigrationTests(M5Base):
     def test_v5_to_v6_is_additive_with_a_private_verified_backup(self):
         path = self.make_v5()
         before = self.snapshot_rows(path)
-        with idx.Index(str(path)) as index:
-            self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (5, 6))
+        with idx.Index(str(path), allow_upgrade=True) as index:
+            self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (5, idx.SCHEMA_VERSION))
             self.assertEqual(index._q("SELECT COUNT(*) FROM label_plan")[0][0], 0)
             ok = audit.verify_chain(index, ACCT)
             self.assertEqual(ok, (True, 2, None))
@@ -493,7 +493,7 @@ class MigrationTests(M5Base):
             now_tables = {r[0] for r in index._q("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertIn("pre-m5-backup", backup.name)
         self.assertEqual(stat.S_IMODE(os.stat(backup).st_mode), 0o600)
-        self.assertEqual(now_tables - self.tables_before, {"label_plan", "label_plan_op", "label_plan_approval"})
+        self.assertEqual(now_tables - self.tables_before, {"label_plan", "label_plan_op", "label_plan_approval", "sync_state", "sync_run", "message_tombstone"})  # a v5 file now continues through v7
         self.assertEqual(self.snapshot_rows(path), before)  # M4 rows and the audit chain are byte-for-byte preserved
         b = sqlite3.connect(backup)
         self.assertEqual((b.execute("PRAGMA user_version").fetchone()[0], b.execute("PRAGMA quick_check").fetchone()[0]), (5, "ok"))
@@ -502,11 +502,11 @@ class MigrationTests(M5Base):
 
     def test_migration_is_idempotent_and_the_new_chain_extends_the_old_one(self):
         path = self.make_v5()
-        with idx.Index(str(path)):
+        with idx.Index(str(path), allow_upgrade=True):
             pass
-        with idx.Index(str(path)) as again:
+        with idx.Index(str(path), allow_upgrade=True) as again:
             self.assertIsNone(again.migrated_from)
-            self.assertEqual(again.conn.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(again.conn.execute("PRAGMA user_version").fetchone()[0], idx.SCHEMA_VERSION)
             self.assertEqual(len(list(path.parent.glob("*backup*"))), 1)
             again.save_labels(ACCT, [label("Label_1", "Work")])
             scan = again.start_scan(ACCT, "full")
@@ -520,7 +520,7 @@ class MigrationTests(M5Base):
         raw = path.read_bytes()
         with mock.patch.object(idx, "SCHEMA_V6", idx.SCHEMA_V6 + "\nSELECT * FROM table_that_does_not_exist;"):
             with self.assertRaises(idx.IndexProblem) as cm:
-                idx.Index(str(path))
+                idx.Index(str(path), allow_upgrade=True)
         self.assertIn("left unchanged", str(cm.exception))
         c = sqlite3.connect(path)
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 5)
@@ -528,15 +528,15 @@ class MigrationTests(M5Base):
         self.assertEqual(c.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         c.close()
         self.assertEqual(len(list(path.parent.glob("*pre-m5-backup*"))), 1)
-        with idx.Index(str(path)) as retry:  # a later run migrates cleanly
-            self.assertEqual(retry.conn.execute("PRAGMA user_version").fetchone()[0], 6)
+        with idx.Index(str(path), allow_upgrade=True) as retry:  # a later run migrates cleanly
+            self.assertEqual(retry.conn.execute("PRAGMA user_version").fetchone()[0], idx.SCHEMA_VERSION)
         del raw
 
     def test_a_backup_failure_changes_nothing(self):
         path = self.make_v5()
         with mock.patch.object(idx, "_write_backup", side_effect=sqlite3.OperationalError("disk full")):
             with self.assertRaises(idx.IndexProblem):
-                idx.Index(str(path))
+                idx.Index(str(path), allow_upgrade=True)
         c = sqlite3.connect(path)
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 5)
         c.close()
@@ -547,15 +547,15 @@ class MigrationTests(M5Base):
         path.parent.mkdir(mode=0o700)
         path.write_bytes(b"this is not a sqlite database" * 100)
         with self.assertRaises(idx.IndexProblem):
-            idx.Index(str(path))
+            idx.Index(str(path), allow_upgrade=True)
 
     def test_future_versions_are_still_refused(self):
-        path = self.make_v5("v7")
+        path = self.make_v5("v8")
         c = sqlite3.connect(path)
-        c.execute("PRAGMA user_version = 7")
+        c.execute("PRAGMA user_version = 8")
         c.close()
         with self.assertRaises(idx.IndexProblem):
-            idx.Index(str(path))
+            idx.Index(str(path), allow_upgrade=True)
 
 
 class CliTests(PlanBase):

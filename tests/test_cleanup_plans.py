@@ -641,7 +641,7 @@ class MigrationV4Tests(Base):
     def test_v3_upgrade_preserves_all_rows_with_private_backup(self):
         path = self.make_v3()
         before = self.logical(path)
-        with idx.Index(str(path)) as index:
+        with idx.Index(str(path), allow_upgrade=True) as index:
             self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (3, idx.SCHEMA_VERSION))
             for t in ("cleanup_plan", "cleanup_item", "cleanup_approval", "cleanup_audit"):
                 self.assertEqual(index._q(f"SELECT COUNT(*) FROM {t}")[0][0], 0)
@@ -654,7 +654,7 @@ class MigrationV4Tests(Base):
         self.assertEqual(b.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'cleanup_%'").fetchone()[0], 0)
         b.close()
         self.assertEqual(self.logical(backup), before)
-        with idx.Index(str(path)) as again:
+        with idx.Index(str(path), allow_upgrade=True) as again:
             self.assertIsNone(again.migrated_from)
         self.assertEqual(len(list(path.parent.glob("*backup*"))), 1)
 
@@ -663,7 +663,7 @@ class MigrationV4Tests(Base):
         before = self.logical(path)
         with mock.patch.object(idx, "SCHEMA_V4", "CREATE TABLE cleanup_plan (x);CREATE TABLE cleanup_plan (x);"):
             with self.assertRaises(idx.IndexProblem):
-                idx.Index(str(path))
+                idx.Index(str(path), allow_upgrade=True)
         c = sqlite3.connect(path)
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 3)
         self.assertEqual(c.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'cleanup_%'").fetchone()[0], 0)
@@ -680,7 +680,7 @@ class MigrationV4Tests(Base):
             return real(p, mode)
         with mock.patch.object(idx.os, "chmod", side_effect=picky):
             with self.assertRaises(idx.IndexProblem):
-                idx.Index(str(path))
+                idx.Index(str(path), allow_upgrade=True)
         c = sqlite3.connect(path)
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 3)
         c.close()
@@ -692,7 +692,7 @@ class MigrationV4Tests(Base):
             c = sqlite3.connect(path)
             c.executescript("BEGIN;" + idx.SCHEMA + (idx.SCHEMA_V2 if version == 2 else "") + f"PRAGMA user_version = {version};COMMIT;")
             c.close()
-            with idx.Index(str(path)) as index:
+            with idx.Index(str(path), allow_upgrade=True) as index:
                 self.assertEqual(index.conn.execute("PRAGMA user_version").fetchone()[0], idx.SCHEMA_VERSION)
                 self.assertEqual(index._q("SELECT COUNT(*) FROM cleanup_plan")[0][0], 0)
 
@@ -859,7 +859,7 @@ class CliTests(PlanBase):
 
 class SourceGuards(unittest.TestCase):
     MODULES = ("cleanup_plans.py", "cleanup_audit.py", "cleanup_plan_report.py")
-    ALLOWED_LOCAL = {"classifier", "cleanup_audit", "cleanup_candidates", "cleanup_protect", "cleanup_plans", "report", "classify",
+    ALLOWED_LOCAL = {"classifier", "cleanup_audit", "cleanup_candidates", "cleanup_protect", "cleanup_plans", "report", "classify", "sync_health",
                      "index", "config"}
 
     def test_m4b_modules_perform_no_gmail_network_or_execution(self):

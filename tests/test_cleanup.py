@@ -24,6 +24,9 @@ from gmail_intelligence import classifier, cleanup_candidates as cc, cleanup_pro
 from gmail_intelligence import index as idx  # noqa: E402
 from gmail_intelligence.classify import RuleError  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import m7_support  # noqa: E402
+
 ACCT, OTHER = "owner@example.invalid", "other@example.invalid"
 NOW = 1_800_000_000_000
 DAY = cc.DAY_MS
@@ -50,6 +53,7 @@ class Base(unittest.TestCase):
         self.addCleanup(guard.stop)
         self.index = idx.Index()
         self.addCleanup(self.index.close)
+        m7_support.pin_age_gate(self)
 
     def seed(self, messages, account=ACCT, complete=True, labels=None, classify=True):
         scan = self.index.start_scan(account, "full" if complete else "limited", None if complete else 5)
@@ -57,6 +61,8 @@ class Base(unittest.TestCase):
         if labels:
             self.index.save_labels(account, labels)
         self.index.finish_scan(scan, "completed")
+        if complete:
+            m7_support.seed_healthy_sync(self.index, account)  # M7A: plan operations need a healthy synthetic checkpoint
         if classify:
             classifier.run(self.index, account, persist=True)
         return scan
@@ -377,7 +383,7 @@ class MigrationTests(Base):
 
     def test_v2_upgrade_preserves_m2_and_m3_data_with_backup(self):
         path = self.make_db(2)
-        with idx.Index(str(path)) as index:
+        with idx.Index(str(path), allow_upgrade=True) as index:
             self.assertEqual((index.migrated_from, index.conn.execute("PRAGMA user_version").fetchone()[0]), (2, idx.SCHEMA_VERSION))
             self.assertEqual(index.overview(ACCT)["n"], 1)
             self.assertEqual(index._q("SELECT id FROM class_rules")[0][0], "u1")
@@ -390,13 +396,13 @@ class MigrationTests(Base):
         self.assertEqual(b.execute("PRAGMA user_version").fetchone()[0], 2)
         self.assertEqual(b.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='protect_rules'").fetchone()[0], 0)
         b.close()
-        with idx.Index(str(path)) as again:  # idempotent: no second migration, no second backup
+        with idx.Index(str(path), allow_upgrade=True) as again:  # idempotent: no second migration, no second backup
             self.assertIsNone(again.migrated_from)
         self.assertEqual(len(list(path.parent.glob("*backup*"))), 1)
 
     def test_v1_jumps_to_latest_in_one_step(self):
         path = self.make_db(1)
-        with idx.Index(str(path)) as index:
+        with idx.Index(str(path), allow_upgrade=True) as index:
             self.assertEqual(index.conn.execute("PRAGMA user_version").fetchone()[0], idx.SCHEMA_VERSION)
             self.assertEqual(index._q("SELECT COUNT(*) FROM class_rules")[0][0], 0)
             self.assertIn("pre-m3-backup", Path(index.backup_path).name)
@@ -405,7 +411,7 @@ class MigrationTests(Base):
         path = self.make_db(2)
         with mock.patch.object(idx, "SCHEMA_V3", "CREATE TABLE protect_rules (x);CREATE TABLE protect_rules (x);"):
             with self.assertRaises(idx.IndexProblem):
-                idx.Index(str(path))
+                idx.Index(str(path), allow_upgrade=True)
         conn = sqlite3.connect(path)
         self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM message_class").fetchone()[0], 1)
