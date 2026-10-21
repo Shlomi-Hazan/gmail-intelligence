@@ -110,7 +110,7 @@ def _run_locked(reader, index, account, lease, *, mode, limit, resume, limiter, 
     def call(cost, fn):
         def attempt():
             lease.beat_if_due()
-            limiter.acquire(cost)
+            lease.pace(limiter, cost, sleep)  # a caller-supplied limiter's own sleep must not outlast the lease
             return fn()
         return with_backoff(attempt, lease_sleep)
 

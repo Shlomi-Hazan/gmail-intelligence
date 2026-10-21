@@ -418,6 +418,7 @@ def reserve_execution(index, account, plan_id, confirmation, now=None):
         with _txn(index):
             cp._check_clock(index, account, now)
             plan = cp.get_plan(index, account, plan_id)
+            cp.require_sync_health(index, account, now)  # E5: before the lockout and before any state judgement; a refusal is neither audited nor counted
             since = _iso(now - cp.LOCKOUT_WINDOW)
             if audit.recent(index, account, plan_id, ("RESERVATION_REJECTED",), since) >= cp.MAX_FAILED_ATTEMPTS:
                 raise ExecError("LOCKED_OUT", "too many failed execution confirmations for this plan; try again later")
@@ -739,6 +740,7 @@ def confirm_slice(index, account, exec_id, slice_no, confirmation, now=None):
             cp._check_clock(index, account, now)
             ex = get_execution(index, account, exec_id)
             plan = cp.get_plan(index, account, ex["plan_id"])
+            cp.require_sync_health(index, account, now)  # E5
             if ex["state"] != "AWAITING_CONTINUATION":
                 raise ExecError("BAD_STATE", f"execution is {ex['state']}; only an AWAITING_CONTINUATION execution can continue")
             sl = _slice(index, account, exec_id, slice_no)

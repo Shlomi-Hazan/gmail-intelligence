@@ -253,7 +253,7 @@ def revalidate(index, account, plan, now=None, _out=None, only_ids=None):
         bad("INDEX_NOT_COMPLETE")
     elif anchor != snap["index"]:
         bad("INDEX_RESCANNED")
-    for code in sync_health.problems(index, account, now):  # E1: index freshness uncertain -> prohibited (no writes; see sync_guard_error)
+    for code in sync_codes(index, account, now):  # E1: index freshness uncertain -> prohibited (no writes; see sync_guard_error)
         bad(code)
     wanted = None if only_ids is None else set(only_ids)  # continuation checks only the not-yet-executed targets
     ids = [i["id"] for i in snap["items"] if wanted is None or i["id"] in wanted]
@@ -281,6 +281,22 @@ def revalidate(index, account, plan, now=None, _out=None, only_ids=None):
 
 
 PARTIAL_INDEX_CODES = frozenset({"INDEX_NOT_COMPLETE", "REASON_INDEX_PARTIAL", "ITEM_NOT_ELIGIBLE"})  # what the pre-M7 completeness check reports during a full scan
+
+
+def sync_codes(index, account, now):
+    """E1: the sync-health codes that currently apply (empty = healthy). Read-only."""
+    return sync_health.problems(index, account, now)
+
+
+def require_sync_health(index, account, now):
+    """E2/E3/E5: the first thing every guarded operation does INSIDE its write transaction, before any plan, approval, lockout or rejection logic.
+
+    An unhealthy index is a prohibition, not a plan problem: it raises SYNC_NOT_HEALTHY (never audited, never counted towards a lockout) whatever the
+    plan's own state is, so even a request about an expired or unknown plan cannot cause a rejection record while health is the real obstacle.
+    """
+    codes = sync_codes(index, account, now)
+    if codes:
+        raise sync_guard_error({c: 1 for c in codes})
 
 
 def sync_only(problems):
@@ -344,9 +360,7 @@ def _insert_plan(index, account, ids, min_age_days, now, parent=None, canary=Fal
     """Validate and insert a new DRAFT plan inside the caller's transaction. Returns the plan id."""
     at = _iso(now)
     ids = sorted(set(ids))
-    codes = sync_health.problems(index, account, now)  # E2: no plan is created while index freshness is uncertain
-    if codes:
-        raise sync_guard_error({c: 1 for c in codes})
+    require_sync_health(index, account, now)  # E2: no plan is created while index freshness is uncertain
     if canary and (len(ids) != 1 or parent is not None):
         raise PlanError("BAD_INPUT", "a canary exception covers exactly one message and is never revised")
     res = cc.evaluate_all(index, account, now_ms=_ms(now), min_age_days=min_age_days, canary_ids=frozenset(ids) if canary else frozenset())
@@ -478,6 +492,7 @@ def _guard(index, account, plan_id, event, now, body, duplicate_check=False):
         with _txn(index):
             _check_clock(index, account, now)
             plan = get_plan(index, account, plan_id)
+            require_sync_health(index, account, now)  # E3/E4: before the lockout and before any plan-state judgement
             _lockout(index, account, plan_id, now)
             return body(plan)
     except sqlite3.IntegrityError:

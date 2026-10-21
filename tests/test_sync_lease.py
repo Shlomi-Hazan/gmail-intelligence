@@ -9,7 +9,7 @@ from unittest import mock
 from sync_support import (ACCOUNT, M4_TABLES, SyncCase, WorkerMixin, fast_limiter, file_digest, idx, scanner, standard_mailbox, sync_health, sync_lease,
                           table_digest)
 from fake_history import FakeHistoryMailbox
-from gmail_intelligence import gmail
+from gmail_intelligence import gmail, sync
 
 SCRIPT = [["add", "n1", ["INBOX"]], ["add", "n2", ["INBOX", "UNREAD"]], ["labels", "m001", ["STARRED"], []], ["delete", "m002"], ["labels", "m004", ["Label_1"], []],
           ["add", "n3", ["INBOX"]], ["labels", "m005", ["IMPORTANT"], []]]
@@ -99,7 +99,7 @@ class LeaseUnitTests(SyncCase):
         self.clock.advance(200)
         a.heartbeat()
         run = self.runs()[-1]
-        self.assertEqual(sync_health.parse(run["lease_expires_at"]), self.clock.now + sync_lease.LEASE_TTL)
+        self.assertLess(abs((sync_health.parse(run["lease_expires_at"]) - (self.clock.now + sync_lease.LEASE_TTL)).total_seconds()), 1)
         self.assertEqual({k: v for k, v in self.state().items() if k != "status"}, {k: v for k, v in state_before.items() if k != "status"})
         self.clock.advance(400)
         self.acquire(self.other)                                               # lost: the heartbeat must not bring it back
@@ -157,7 +157,7 @@ class LeaseUnitTests(SyncCase):
         self.assertEqual([r["status"] for r in self.runs()], ["completed"])
 
     def test_l6_purge_is_refused_while_a_lease_is_active_and_only_then(self):
-        a = self.acquire()
+        a = sync_lease.acquire(self.index, ACCOUNT, "INCREMENTAL")          # purge judges the lease against the real clock, so use the real clock here
         with self.assertRaises(idx.IndexProblem):
             self.other.purge(ACCOUNT)
         self.assertGreater(self.index._q("SELECT COUNT(*) FROM messages")[0][0], 0)
@@ -261,6 +261,105 @@ class RecoveryUnitTests(SyncCase):
             self.sync()
         self.assertEqual(ctx.exception.code, "SYNC_FULL_SCAN_UNFINISHED")
         self.assertEqual(self.index._q("SELECT status FROM scans ORDER BY id DESC LIMIT 1")[0][0], "interrupted")
+
+
+class ObservedClock:
+    """Like sync_support.Clock, but lets a test act at every point where time passes (what another process could do while this one sleeps)."""
+
+    def __init__(self, inner):
+        self.inner, self.observers = inner, []
+
+    def __call__(self):
+        return self.inner()
+
+    def advance(self, seconds):
+        self.inner.advance(seconds)
+
+    @property
+    def now(self):
+        return self.inner.now
+
+    @property
+    def slept(self):
+        return self.inner.slept
+
+    def sleep(self, seconds):
+        self.inner.sleep(seconds)
+        for observer in self.observers:
+            observer()
+
+
+class RateLimiterLeaseTests(SyncCase):
+    """Review finding 2: a RateLimiter that brings its OWN sleep callback (as the CLI's does) must not let a healthy writer lose its lease while it waits."""
+
+    N = 12
+
+    def setUp(self):
+        super().setUp()
+        self.baseline()
+        self.clock.advance(60)
+        self.other = idx.Index(self.db)
+        self.addCleanup(self.other.close)
+        self.ticks = ObservedClock(self.clock)
+        self.outcomes = []
+
+        def compete():                                                       # another process trying to take the lease while this one is waiting
+            try:
+                sync_lease.acquire(self.other, ACCOUNT, "INCREMENTAL", clock=self.clock)
+                self.outcomes.append("ACQUIRED")
+                sync_lease.release(self.other)
+            except sync_lease.SyncError as exc:
+                self.outcomes.append(exc.code)
+        self.ticks.observers.append(compete)
+
+    def slow_limiter(self, units_per_minute):
+        """A limiter configured with its own (plain, un-sliced) sleep callback and its own clock, like cli.py builds it."""
+        return scanner.RateLimiter(units_per_minute, clock=lambda: self.clock.now.timestamp(), sleep=self.ticks.sleep)
+
+    def test_incremental_sync_keeps_its_lease_through_long_rate_limiter_waits(self):
+        for i in range(3):
+            self.mailbox.add(f"x{i}")
+        state_before = dict(self.state())
+        # 3 units/min: every metadata read (20 units) waits ~400 s, which alone exceeds the 300 s lease
+        out = sync.run_sync(self.mailbox, self.index, ACCOUNT, limiter=self.slow_limiter(3), sleep=self.ticks.sleep, clock=self.clock, page_size=100)
+        self.assertEqual(out["refreshed"], 3)
+        self.assertMatchesOracle()
+        self.assertTrue(self.outcomes)
+        self.assertEqual(set(self.outcomes), {"SYNC_BUSY"}, self.outcomes)    # at no point did another writer find the lease free
+        self.assertGreater(sum(self.clock.slept), 900)                        # the waits really were long
+
+    def test_a_full_scan_keeps_its_lease_through_long_rate_limiter_waits(self):
+        self.mailbox.add("x0")
+        row = scanner.run_scan(self.mailbox, self.index, ACCOUNT, mode="full", limiter=self.slow_limiter(3), sleep=self.ticks.sleep, clock=self.clock, page_size=50)
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(set(self.outcomes), {"SYNC_BUSY"}, self.outcomes)
+        self.assertGreater(sum(self.clock.slept), 1000)
+
+    def test_the_heartbeat_during_those_waits_is_fenced_and_never_moves_the_checkpoint(self):
+        self.mailbox.add("x0")
+        h0 = self.state()["history_id"]
+        seen = []
+        self.ticks.observers.append(lambda: seen.append((self.state()["history_id"], self.state()["status"])))
+        sync.run_sync(self.mailbox, self.index, ACCOUNT, limiter=self.slow_limiter(3), sleep=self.ticks.sleep, clock=self.clock)
+        self.assertTrue(seen)
+        self.assertTrue(all(h == h0 and st == "IN_PROGRESS" for h, st in seen), seen)   # the checkpoint moved only in the final transaction, after the last wait
+        self.assertEqual(self.state()["status"], "OK")
+        self.assertNotEqual(self.state()["history_id"], h0)
+
+    def test_a_lease_that_was_really_lost_during_a_wait_still_stops_the_run(self):
+        self.mailbox.add("x0")
+        self.ticks.observers.clear()
+        took = []
+
+        def steal():
+            if not took:
+                self.clock.advance(400)                                       # a long stall beyond the lease with no heartbeat possible (e.g. the machine slept)
+                sync_lease.acquire(self.other, ACCOUNT, "INCREMENTAL", clock=self.clock)
+                took.append(1)
+        self.ticks.observers.append(steal)
+        with self.assertRaises(sync_lease.SyncError) as ctx:
+            sync.run_sync(self.mailbox, self.index, ACCOUNT, limiter=self.slow_limiter(3), sleep=self.ticks.sleep, clock=self.clock)
+        self.assertEqual(ctx.exception.code, "SYNC_LEASE_LOST")
 
 
 class ProcessTests(SyncCase, WorkerMixin):

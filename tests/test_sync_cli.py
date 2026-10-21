@@ -34,7 +34,7 @@ class CliCase(SyncCase):
         out, err = io.StringIO(), io.StringIO()
         opener = mock.patch.object(cli, "_open_reader", return_value=(reader or self.mailbox, {"account": ACCOUNT}))
         real = scanner.RateLimiter
-        with opener, mock.patch.object(scanner, "RateLimiter", side_effect=lambda *a, **k: real(10 ** 9, clock=lambda: 0.0, sleep=lambda s: None)), \
+        with opener, mock.patch.object(scanner, "RateLimiter", side_effect=lambda *a, **k: real(10 ** 9, clock=(lambda it=__import__('itertools').count(): next(it) * 1000.0), sleep=lambda s: None)), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(argv)
         return code, out.getvalue(), err.getvalue()

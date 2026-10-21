@@ -79,7 +79,7 @@ class FakeReader:
 
 
 def fast_limiter():
-    return scanner.RateLimiter(10 ** 9, clock=lambda: 0.0, sleep=lambda s: None)
+    return scanner.RateLimiter(10 ** 9, clock=(lambda it=__import__('itertools').count(): next(it) * 1000.0), sleep=lambda s: None)
 
 
 class IndexCase(unittest.TestCase):

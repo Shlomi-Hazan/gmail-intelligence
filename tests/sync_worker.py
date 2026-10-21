@@ -46,7 +46,7 @@ def main():
             while not os.path.exists(args.release_file):
                 time.sleep(0.02)
 
-    fast = scanner.RateLimiter(10 ** 9, clock=lambda: 0.0, sleep=lambda s: None)
+    fast = scanner.RateLimiter(10 ** 9, clock=(lambda it=__import__('itertools').count(): next(it) * 1000.0), sleep=lambda s: None)
     try:
         with idx.Index(args.db, create=False) as index:
             if args.mode == "e2e":  # deterministic end-to-end digest (used to compare PYTHONHASHSEED values)

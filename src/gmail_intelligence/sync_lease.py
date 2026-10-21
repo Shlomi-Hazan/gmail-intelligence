@@ -8,6 +8,7 @@ One `sync_run` row per account may be `running` (a partial unique index enforces
 Nothing here contacts Gmail.
 """
 import secrets
+import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -44,16 +45,12 @@ def iso(dt):
 
 
 def guard_ok():
-    """D145 handshake: refuse before touching the database or Gmail unless the M4 sync-health guards (E1-E5) are present."""
-    import inspect
-
+    """D145 compatibility handshake: refuse before touching the database or Gmail unless the M4 modules declare the sync-health contract this build was
+    written against and expose its gate. This is only a lightweight version check; that the guards actually ENFORCE is proven by behavioural tests
+    (tests/test_sync_m4_guards.py), never by inspecting source text."""
     from gmail_intelligence import cleanup_exec as ce, cleanup_plans as cp
-    try:
-        ok = (cp.SYNC_GUARD_CONTRACT == GUARD_CONTRACT and ce.SYNC_GUARD_CONTRACT == GUARD_CONTRACT
-              and "sync_health" in inspect.getsource(cp.revalidate) and "sync_health" in inspect.getsource(cp._insert_plan)
-              and "SYNC_NOT_HEALTHY" in inspect.getsource(ce.reserve_execution) and "SYNC_NOT_HEALTHY" in inspect.getsource(ce.confirm_slice))
-    except (AttributeError, OSError, TypeError):
-        ok = False
+    ok = (getattr(cp, "SYNC_GUARD_CONTRACT", None) == GUARD_CONTRACT and getattr(ce, "SYNC_GUARD_CONTRACT", None) == GUARD_CONTRACT
+          and callable(getattr(cp, "require_sync_health", None)) and callable(getattr(cp, "sync_codes", None)))
     if not ok:
         raise SyncError("SYNC_GUARD_MISSING", "the M4 sync-health guards are not present in this build; synchronization and scanning are disabled")
 
@@ -106,6 +103,20 @@ class Lease:
             real_sleep(step)
             remaining -= step
             self.beat_if_due()
+
+    def pace(self, limiter, cost, real_sleep=time.sleep):
+        """Take `cost` units from the rate limiter while keeping the lease alive.
+
+        A limiter built by the caller (the CLI does) carries its OWN sleep callback, which would wait unbroken and could outlast the lease. For the duration
+        of this one wait its sleep is replaced by the lease-aware sliced sleep (renewing through the same fence between slices); the limiter's accounting
+        (clock, budget) is untouched and its original callback is restored afterwards.
+        """
+        saved = limiter.sleep
+        limiter.sleep = lambda seconds: self.sleep(seconds, real_sleep)
+        try:
+            limiter.acquire(cost)
+        finally:
+            limiter.sleep = saved
 
     def set_state(self, status, reason=None):
         """Inside an open fenced transaction: move the account's sync_state row (if any). Only run-completion code may pass 'OK'."""
@@ -184,7 +195,10 @@ def acquire(index, account, kind, *, clock=utc_now):
     if conn.in_transaction:
         raise RuntimeError("nested sync transaction")
     now = clock()
-    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError:  # another writer (for example an M4 approval) holds the write lock past the busy timeout
+        raise SyncError("SYNC_BUSY", "the index is busy with another write; nothing was changed. Try again in a moment") from None
     committed = False
     try:
         reaped = _reap(index, account, now)
