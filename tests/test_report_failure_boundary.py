@@ -21,7 +21,7 @@ sys.path.insert(0, str(HERE))
 from gmail_intelligence import cli, config, maintenance, plan_impact, sync_report  # noqa: E402
 from gmail_intelligence import index as idx  # noqa: E402
 
-LEAK_MARK = "SyntheticLeakMarker7731"
+MARKER = "synthetic marker text 7731"
 ACCOUNT = "owner@example.test"
 GENERIC = "error: " + cli._REPORT_UNEXPECTED + "\n"
 
@@ -62,12 +62,12 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(code, 1, argv)
         self.assertEqual(err, GENERIC, argv)
         self.assertEqual(out, "", argv)  # no partial report that could look like success
-        self.assertNotIn(SECRET, out + err)
+        self.assertNotIn(MARKER, out + err)
         self.assertNotIn("Traceback", out + err)
         self.assertNotIn("RuntimeError", out + err)
 
     def test_an_unexpected_error_in_the_report_builder_is_generic_in_text_and_json(self):
-        boom = RuntimeError(f"failure containing {SECRET}")
+        boom = RuntimeError(f"failure containing {MARKER}")
         with mock.patch.object(maintenance, "run", side_effect=boom), mock.patch.object(sync_report, "changes_report", side_effect=boom), \
                 mock.patch.object(plan_impact, "impact_report", side_effect=boom):
             before = tree(self.dir)
@@ -76,7 +76,7 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(tree(self.dir), before)
 
     def test_an_unexpected_error_while_rendering_is_generic_and_prints_nothing(self):
-        boom = RuntimeError(SECRET)
+        boom = RuntimeError(MARKER)
         with mock.patch.object(maintenance, "render_text", side_effect=boom), mock.patch.object(sync_report, "changes_text", side_effect=boom), \
                 mock.patch.object(plan_impact, "impact_text", side_effect=boom):
             before = tree(self.dir)
@@ -86,10 +86,10 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(tree(self.dir), before)
 
     def test_unexpected_error_in_a_deep_check_and_in_the_account_lookup(self):
-        with mock.patch.object(maintenance, "_audit_checks", side_effect=RuntimeError(SECRET)):
+        with mock.patch.object(maintenance, "_audit_checks", side_effect=RuntimeError(MARKER)):
             argv = ["mailbox", "maintenance", "--account", ACCOUNT, "--json"]
             self.assertGeneric(argv, *self.run_cli(argv))
-        with mock.patch.object(cli, "_local_account", side_effect=RuntimeError(SECRET)):
+        with mock.patch.object(cli, "_local_account", side_effect=RuntimeError(MARKER)):
             argv = ["mailbox", "changes", "--json"]
             self.assertGeneric(argv, *self.run_cli(argv))
 
@@ -108,16 +108,16 @@ class BoundaryTests(unittest.TestCase):
             self.assertIn("no local index yet", err)
             self.assertNotIn(cli._REPORT_UNEXPECTED, err)
         idx.Index().close()
-        with mock.patch.object(sync_report, "changes_report", side_effect=sqlite3.DatabaseError(SECRET)):
+        with mock.patch.object(sync_report, "changes_report", side_effect=sqlite3.DatabaseError(MARKER)):
             code, out, err = self.run_cli(["mailbox", "changes", "--account", ACCOUNT])
         self.assertEqual(code, 1)
         self.assertIn("reported an error", err)
-        self.assertNotIn(SECRET, err)
+        self.assertNotIn(MARKER, err)
         code, out, err = self.run_cli(["mailbox", "changes", "--account", ACCOUNT, "--runs", "0"])
         self.assertEqual((code, "between 1 and 50" in err), (1, True))
 
     def test_the_boundary_is_narrow_other_commands_are_not_wrapped(self):
-        with mock.patch.object(cli, "_with_index", side_effect=RuntimeError(SECRET)):
+        with mock.patch.object(cli, "_with_index", side_effect=RuntimeError(MARKER)):
             with self.assertRaises(RuntimeError):
                 cli.main(["mailbox", "status", "--account", ACCOUNT])
 
