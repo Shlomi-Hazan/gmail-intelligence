@@ -67,6 +67,11 @@ The project must incur zero additional financial cost. Security-relevant consequ
 - **Existing files are judged before they are touched (post-M7 correction).** A file already at the index path is inspected with plain reads of its header (no SQLite connection, so no journal/WAL/SHM, lock or write). A non-empty SQLite database without a schema version is never adopted, and a file refused for any reason (foreign, v1-v6 without `index upgrade`, unsupported version, unreadable) keeps its bytes, mtime and mode, and its directory keeps its mode. The decision is repeated on the connection that will write, and a different file swapped in meanwhile is refused. Permissions are tightened only after validation.
 - **Reporting boundary.** An unexpected internal error in `mailbox maintenance`, `mailbox changes` or `cleanup plan impact` ends with a non-zero exit code and one fixed message: no traceback, no exception text, no partial report.
 
+## 1g. M8A-1 attention boundary (implemented against synthetic data; not run against real Gmail)
+- `mailbox attention` is read-only: it opens `ReadOnlyIndex`, writes nothing (no journal, WAL, SHM or temporary files), contacts no Gmail API, uses no OAuth or Keychain and imports no write, live or network module. Metadata only: no subject, snippet, body or attachment; no new scope, dependency or schema change.
+- Sender addresses are untrusted: sanitised with `clean()`, masked by default, never used to build a URL or markup. Cursors and error messages contain no account, sender, message id, thread id or text.
+- Fail closed and complete: an incomplete or inconsistent computation produces an explicit error and no items. There are no Gmail links and no link flags in this milestone.
+
 ## 2. Assets
 OAuth refresh/access tokens · local SQLite metadata (reveals contacts, habits, subjects) · audit logs · Google Cloud client credentials · the user's real mailbox · repository integrity.
 
