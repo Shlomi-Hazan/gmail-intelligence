@@ -1285,6 +1285,25 @@ def cmd_mailbox_maintenance(args):
     return 0
 
 
+def cmd_mailbox_attention(args):
+    """M8A-1: possibly-important messages from indexed metadata. Read-only; fixed-text errors; never contacts Gmail."""
+    from gmail_intelligence import attention
+
+    def go(index, account):
+        try:
+            res = attention.compute(index, account, limit=args.limit, cursor=args.cursor, sort=args.sort, signals=args.signal or (), min_tier=args.min_tier,
+                                    sender_limit=args.sender_limit, collapse=not args.no_collapse, include_low_score=args.include_low_score,
+                                    reveal_senders=args.reveal_senders)
+            out = attention.as_json(res) if args.json else attention.render_text(res)  # built completely before anything is printed
+        except attention.AttentionError as exc:
+            return _fail(exc.message)
+        except ValueError as exc:
+            return _fail(exc)
+        print(out)
+        return 0
+    return _with_readonly_index(args, go)
+
+
 def cmd_cleanup_plan_impact(args):
     import json
 
@@ -1389,7 +1408,7 @@ def build_parser():
         return q
 
     mb = sub.add_parser("mailbox", help="read-only mailbox index and reports (M2)")
-    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,changes,maintenance,status,report,insights,top-senders,purge}")
+    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,changes,maintenance,attention,status,report,insights,top-senders,purge}")
     q = account_opt(msub.add_parser("insights", help="aggregate, explainable analytics of the local index (M6A; local only, human-readable or --json)"))
     q.add_argument("section", nargs="?", default="overview", choices=("all", "freshness", "overview", "volume", "categories", "senders", "subscriptions", "cleanup-summary", "cleanup-history", "organization"))
     q.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1417,6 +1436,18 @@ def build_parser():
     q.add_argument("--deep", action="store_true", help="also run SQLite's full integrity_check on the index and the backups (slower)")
     q.add_argument("--json", action="store_true", help="machine-readable output")
     q.set_defaults(func=cmd_mailbox_maintenance)
+    q = account_opt(msub.add_parser("attention", help="messages that may deserve attention, from indexed metadata only (M8A-1; read-only, explainable, weights provisional)"))
+    q.add_argument("--limit", type=int, default=25, metavar="N", help="items per page (1-100, default 25)")
+    q.add_argument("--cursor", metavar="C", help="continue after the previous page (opaque; fails explicitly if the list changed)")
+    q.add_argument("--sort", choices=("priority", "date", "oldest"), default="priority")
+    q.add_argument("--signal", action="append", choices=("starred", "important", "unread", "rule"), metavar="SIGNAL", help="only messages with this signal (repeatable: any of)")
+    q.add_argument("--min-tier", choices=("low", "medium", "high"), help="only this tier or higher")
+    q.add_argument("--sender-limit", type=int, default=3, metavar="N", help="at most N items per sender (0-10, 0 = off; default 3)")
+    q.add_argument("--no-collapse", action="store_true", help="one item per message instead of per thread")
+    q.add_argument("--include-low-score", action="store_true", help="also show items scoring 1-14 (normally hidden)")
+    q.add_argument("--reveal-senders", action="store_true", help="show full sender addresses (masked by default)")
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_mailbox_attention)
     p = msub.add_parser("sync", help="apply recent Gmail changes to the local index from the saved history checkpoint (contacts Gmail, read-only)")
     p.add_argument("--status", action="store_true", help="show the local sync state and exit (no Gmail contact)")
     p.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the logged-in account)")
