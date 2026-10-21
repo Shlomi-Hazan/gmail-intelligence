@@ -16,6 +16,8 @@ gmail-intelligence mailbox purge              # delete this account's locally in
 gmail-intelligence mailbox sync               # M7A: apply recent Gmail changes from the saved history checkpoint (read-only; needs a completed `scan --all` first)
 gmail-intelligence mailbox sync --status      # sync state, last runs (aggregates only) and whether cleanup plan operations are allowed (local)
 gmail-intelligence index upgrade              # M7A: explicitly upgrade an older local index to schema v7 (real terminal, type UPGRADE; a private backup is made first)
+gmail-intelligence mailbox changes [--runs N] [--json]   # M7B: what each sync/scan run changed (aggregates; partial runs labelled; local, read-only)
+gmail-intelligence cleanup plan impact [--json]          # M7B: how the current index affects stored plans (every reason listed; read-only, changes nothing)
 ```
 `scan` and `sync` contact Gmail (history is read through `history.list`, ids only, with the existing `gmail.readonly` scope). Nothing runs in the background or on a schedule. **Cleanup plans cannot be created, reviewed, approved or executed unless the sync state is fresh** (a completed `scan --all` or `sync` within 24 hours, no run or full scan unfinished, no `NEEDS_RECONCILE`); see [SYNC.md](SYNC.md). `scan --limit` is refused once a checkpoint exists. `scan --all` has two review flags, `--accept-count-mismatch` and `--allow-large-prune`, for the cases its safety checks stop on.
 

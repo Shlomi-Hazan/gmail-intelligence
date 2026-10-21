@@ -1,6 +1,6 @@
 # Incremental sync and maintenance (M7) — design contract
 
-> **Status: M7A (#20) is IMPLEMENTED against synthetic data only (this includes the E1-E5 guards, the lease, the explicit `index upgrade`, schema v7 and `mailbox sync`); M7B and M7C are NOT started, and nothing has run against real Gmail or the owner's index. See "Implementation notes (M7A)" at the end.** It is the authoritative design for M7A ([#20](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/20)), M7B ([#21](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/21)) and M7C ([#22](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/22)). The owner approved this direction for documentation and synthetic-only implementation planning. It does **not** authorize: any Gmail call, any change to the personal index, any migration, any Gmail write, scheduling, or the M4 code changes in section 9 (those need the owner's explicit approval when M7A is started; they ship in the same PR as the first operational sync path, section 14.1). Decisions are recorded as D129-D146 in [DECISIONS.md](DECISIONS.md).
+> **Status: M7A (#20) and M7B (#21: change/deletion reporting and plan-impact explanation) are IMPLEMENTED against synthetic data only (guards E1-E5, lease, explicit `index upgrade`, schema v7, `mailbox sync`, `mailbox changes`, `cleanup plan impact`); M7C is NOT started, and nothing has run against real Gmail or the owner's index. See sections 16 and 17.** It is the authoritative design for M7A ([#20](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/20)), M7B ([#21](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/21)) and M7C ([#22](https://github.com/Shlomi-Hazan/gmail-intelligence/issues/22)). The owner approved this direction for documentation and synthetic-only implementation planning. It does **not** authorize: any Gmail call, any change to the personal index, any migration, any Gmail write, scheduling, or the M4 code changes in section 9 (those need the owner's explicit approval when M7A is started; they ship in the same PR as the first operational sync path, section 14.1). Decisions are recorded as D129-D146 in [DECISIONS.md](DECISIONS.md).
 
 Tags: **[Implemented]** exists in `main` · **[Design]** decided here, not built · **[Verified]** checked against the cited official Google page on 2026-10-20 · **[Unverified]** an assumption that must be checked before it is relied on · **OWNER-APPROVAL-REQUIRED** changes an existing security contract.
 
@@ -403,3 +403,44 @@ Where the code made a choice the design left open, or clarified it. Behaviour an
 | Lock contention | `acquire` turns a SQLite "database is locked" (an M4 write transaction held past the busy timeout) into a clean `SYNC_BUSY` refusal |
 | Upgrade | `Index()` and `ReadOnlyIndex` refuse any file below v7; `index upgrade` needs a real terminal and the typed word `UPGRADE`, prints no path, and the failure message names the backup file by name only |
 | Tests | `tests/test_sync_core.py`, `test_sync_lease.py`, `test_sync_health.py`, `test_sync_m4_guards.py`, `test_sync_upgrade.py`, `test_sync_cli.py`, helpers `fake_history.py`, `sync_support.py`, `sync_worker.py`, `m7_support.py`; existing tests were adapted narrowly (v6 -> v7 expectations, explicit `allow_upgrade=True` in migration tests, a healthy synthetic checkpoint seeded for the M4 fixtures) |
+
+## 17. Change and deletion reporting, and plan impact (M7B)
+Two read-only commands; neither contacts Gmail, neither needs an unlocked Keychain, neither writes (they open the index with `ReadOnlyIndex`, i.e. SQLite `mode=ro` + `query_only`, so a hidden write would fail inside SQLite). **No schema change**: they reuse the v7 counters, the linked `scans` row and the tombstones.
+
+### 17.1 `mailbox changes [--runs N] [--json]`
+Per run (newest first) plus the checkpoint status, the sync-health codes, the last completed incremental sync and the last completed full scan, and the tombstone totals by reason.
+
+| Reported | Source (stored evidence) | Not claimed |
+|---|---|---|
+| history pages, records, messages affected | `sync_run` counters | - |
+| **new or changed** | `sync_run.refreshed` (one combined counter) | **new vs changed is reported as "not recorded"**; it is never derived |
+| unchanged | `sync_run.unchanged` | - |
+| deleted | `sync_run.tombstoned`, cross-checked against the tombstone rows of that run | a move to Trash is a label change, counted inside "new or changed", never as deleted |
+| never indexed and gone | `sync_run.vanished` | - |
+| failed refreshes | `sync_run.failed` | - |
+| FULL/LIMITED runs: ids listed, fetched or refreshed, failed, removed by reconciliation | the linked `scans` row; removal tombstones (`FULL_RECONCILE`) of that run | new vs changed again unavailable; an unfinished scan removes nothing |
+| phase | `COMPLETED`, or `PARTIAL_*` from the run status; a `running` row is `PARTIAL_RUNNING_LEASE_ACTIVE` or `PARTIAL_ABANDONED_LEASE_EXPIRED` judged from the stored lease only | - |
+
+Counters of a partial run are what was durably applied (the counters are written in the same transaction as the chunk); the history checkpoint did not move for it. A replayed range counts the same messages in both runs (`messages affected`), so runs must never be added together; the text says so. Output is aggregate only: no message ids, senders, label names, account address or paths; free-text notes from a run are reduced to a safe character set.
+
+### 17.2 `cleanup plan impact [--json]`
+For every active plan (DRAFT, REVIEWED, APPROVED) the current local index is compared with the stored plan using the existing checks only (`revalidate`, or `verify_approved` for an approved plan; both only SELECT). It never calls `expire_due`, a `_plan_cmd` helper or anything that writes: it does not expire a plan, consume or revoke an approval, reserve an execution, append an audit event or count towards a lockout.
+
+Reason categories (a plan lists ALL that apply; the headline is only a summary, in the order EXPIRED, STORED_PLAN_INCONSISTENT, STALE_AND_BLOCKED, STALE, BLOCKED_BY_SYNC, NOT_EXECUTABLE_APPROVAL, FRESH; closed plans are `NON_EXECUTABLE`):
+
+| Category | Stored-evidence source |
+|---|---|
+| `TARGET_CHANGED` | the snapshot digests of a target differ from the current index; the report says WHICH field differs (labels, read state, sender, thread, received time, classification) or that only the scan stamp differs (`rescan_stamp_only`, e.g. after a full rescan) |
+| `TARGET_DELETED_OR_ABSENT` | the target is not in the index; split by the recorded tombstone reason, or `NO_TOMBSTONE` when nothing records why |
+| `CLASSIFICATION_NOT_CURRENT` | the classification of a target is stale or missing (every message a sync changed needs `classify run` again) or the rule set changed |
+| `ELIGIBILITY_OR_RULES_CHANGED` | policy or protection rules changed, or a target stopped being an eligible candidate for another reason |
+| `ANCHOR_CHANGED_BY_FULL_SCAN` | the plan anchor (`last_full_scan`) differs from the plan's |
+| `INDEX_INCOMPLETE` | an active or unfinished full scan; an `ITEM_NOT_ELIGIBLE` caused only by the partial index is attributed here, not to the plan |
+| `SYNC_NOT_HEALTHY` | the `sync_health` codes of section 9 |
+| `EXPIRED` | the plan's `expires_at` has passed. If the stored state is still DRAFT/REVIEWED/APPROVED the report says "expiry not yet recorded": recording it is a write that only plan operations perform |
+| `APPROVAL_NOT_USABLE` | the approval record fails its checks (past its term, not the single VALID one, audit mismatch) |
+| `STORED_PLAN_INCONSISTENT` | the stored plan fails its own integrity check; no target analysis is attempted |
+
+Findings made while the sync state is unhealthy are marked `evidence: UNCERTAIN_INDEX` (observed against an index of uncertain freshness). Approval rows are always reported as retained and immutable: a stale plan's VALID approval "can no longer authorize anything" but is never described as deleted or revoked. Stale plans are never edited or regenerated.
+
+Limits: observations of the LOCAL index only; the executor re-reads live Gmail before any write regardless; the report is a snapshot at the time it runs.
