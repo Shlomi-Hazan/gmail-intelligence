@@ -29,7 +29,7 @@ hidden unless you start the server with `--reveal-senders` / `--reveal-names`. T
 Every chart has a text equivalent (a keyboard-operable readout and a "View as table" alternative). Every panel loads on its own, so one failing request shows an error inside that panel only.
 
 ## 3. Honest data
-Every number carries its **basis** (OBSERVED, INFERRED, MIXED), the age of the data and the index state. The header chip and a notice show when the index is partial or empty, when the last scan is older than 7 days, and
+Every number carries its **basis** (OBSERVED, INFERRED, MIXED), the age of the data and the index state. The Data screen explains (English and Hebrew) that two freshness checks are separate: the scan (stale after 7 days) and the sync that keeps M4 plans safe (stale after 24 hours); one can be fresh while the other is stale. The header chip and a notice show when the index is partial or empty, when the last scan is older than 7 days, and
 when classification rules changed after messages were classified (those messages are counted as unclassified, never as current). Months follow each message's own date; the month of the last scan is hatched because it may be incomplete.
 A message with two compatible types (for example TRANSACTIONAL and FINANCIAL) is counted once, under the first in the fixed type order (`classify.TYPES`), so every breakdown adds up to the indexed total.
 Cleanup figures are recommendations from the existing candidate engine (protected and potentially important mail excluded) and ledger records; they are not the current state of Gmail.

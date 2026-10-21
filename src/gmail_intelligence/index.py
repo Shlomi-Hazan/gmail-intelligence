@@ -7,6 +7,7 @@ Up to v6 an old file was upgraded automatically by any command. From v7 on an ex
 """
 import os
 import sqlite3
+import stat
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
@@ -461,44 +462,120 @@ def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_CORRUPT_MSG = ("the local index file is unreadable or corrupt; nothing was changed. Restore a backup "
+                "(e.g. index.sqlite3.pre-m3-backup-*) or remove the file and rescan")
+_FOREIGN_MSG = ("the file at the index location is a non-empty SQLite database that is not this tool's index; it was not adopted and nothing was changed. "
+                "Point GMAIL_INTELLIGENCE_HOME at another directory, or move the file away yourself")
+
+
+def _inspect_existing(fd):
+    """Read-only look at an EXISTING index file through the descriptor we already hold: (user_version, genuinely_empty).
+
+    It parses the 100-byte SQLite header and the first b-tree page header with plain reads: no SQLite connection, so it cannot create a journal,
+    WAL or SHM file, take a lock, roll anything back or write a byte. Anything it cannot read safely is refused (fail closed).
+    """
+    size = os.fstat(fd).st_size
+    if size == 0:
+        return 0, True  # a zero-byte file is a database that was never written
+    head = os.pread(fd, 112, 0)
+    if len(head) < 108 or head[:16] != _SQLITE_MAGIC:
+        raise IndexProblem(_CORRUPT_MSG)
+    version = int.from_bytes(head[60:64], "big", signed=True)
+    wal_mode = head[18] == 2 or head[19] == 2  # committed data may live in a -wal file we do not read: never call such a file empty
+    return version, (int.from_bytes(head[103:105], "big") == 0 and not wal_mode)
+
+
 class Index:
     def __init__(self, path=None, create=True, allow_upgrade=False):
         self.path = path if path is not None else config.index_path()
         parent = os.path.dirname(self.path) or "."
-        if not os.path.exists(self.path) and not create:
+        existed = os.path.lexists(self.path)
+        if not existed and not create:
             raise IndexProblem("no local index yet; run `mailbox scan --limit 100` first")
-        os.makedirs(parent, mode=0o700, exist_ok=True)
-        os.chmod(parent, 0o700)
-        self.conn = sqlite3.connect(self.path)
-        os.chmod(self.path, 0o600)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        # PRAGMAs are per connection. Without recursive_triggers, INSERT OR REPLACE deletes the old row WITHOUT firing the BEFORE DELETE
-        # (no-delete) triggers. Every production connection is opened here; the setting is verified, not assumed.
-        self.conn.execute("PRAGMA recursive_triggers = ON")
-        if self.conn.execute("PRAGMA recursive_triggers").fetchone()[0] != 1:
-            self.conn.close()
-            raise IndexProblem("could not enable recursive_triggers; refusing to open the index")
-        self.migrated_from = self.backup_path = None
-        self.lease = None  # set while a sync/scan run owns the writer lease: every Gmail-derived write is then fenced (docs/SYNC.md section 5)
+        # An existing file is judged BEFORE anything is created, chmod-ed or opened for writing; a refusal leaves file, directory and mode untouched.
+        fd = identity = None
+        if existed:
+            try:
+                fd = os.open(self.path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                st = os.fstat(fd)
+                identity = (st.st_dev, st.st_ino)
+                if not stat.S_ISREG(st.st_mode):
+                    raise IndexProblem(_CORRUPT_MSG)
+                pre_version, pre_empty = _inspect_existing(fd)
+                self._refuse_unusable(pre_version, pre_empty, allow_upgrade)
+            except OSError:
+                if fd is not None:
+                    os.close(fd)
+                raise IndexProblem(_CORRUPT_MSG) from None
+            except IndexProblem:
+                os.close(fd)
+                raise
+        else:
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+            os.chmod(parent, 0o700)
         try:
-            version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        except sqlite3.DatabaseError:
-            self.conn.close()
-            raise IndexProblem("the local index file is unreadable or corrupt; nothing was changed. Restore a backup "
-                               "(e.g. index.sqlite3.pre-m3-backup-*) or remove the file and rescan") from None
+            self.conn = sqlite3.connect(self.path)
+            if identity is not None and self._identity(self.path) != identity:  # the path now names a different file than the one we validated
+                self.conn.close()
+                raise IndexProblem("the index file changed while it was being opened; nothing was adopted or changed")
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys = ON")
+            # PRAGMAs are per connection. Without recursive_triggers, INSERT OR REPLACE deletes the old row WITHOUT firing the BEFORE DELETE
+            # (no-delete) triggers. Every production connection is opened here; the setting is verified, not assumed.
+            self.conn.execute("PRAGMA recursive_triggers = ON")
+            if self.conn.execute("PRAGMA recursive_triggers").fetchone()[0] != 1:
+                self.conn.close()
+                raise IndexProblem("could not enable recursive_triggers; refusing to open the index")
+            self.migrated_from = self.backup_path = None
+            self.lease = None  # set while a sync/scan run owns the writer lease: every Gmail-derived write is then fenced (docs/SYNC.md section 5)
+            try:
+                version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+                tables = self.conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0]
+            except sqlite3.DatabaseError:
+                self.conn.close()
+                raise IndexProblem(_CORRUPT_MSG) from None
+            # The decision is re-made on the connection that will write (a new path, or a file swapped in after the preflight, is judged here too).
+            self._refuse_unusable(version, tables == 0, allow_upgrade, close=True)
+            # Only now, with the file validated, are permissions tightened (the descriptor, not the path, so a swapped file cannot be chmod-ed).
+            if existed:
+                os.chmod(parent, 0o700)
+                os.fchmod(fd, 0o600)
+            else:
+                os.chmod(self.path, 0o600)
+        finally:
+            if fd is not None:
+                os.close(fd)
         if version == 0:
             with self.conn:
                 self.conn.executescript("BEGIN;" + SCHEMA + SCHEMA_V2 + SCHEMA_V3 + SCHEMA_V4 + SCHEMA_V5 + SCHEMA_V6 + SCHEMA_V7 + f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version in (1, 2, 3, 4, 5, 6):
-            if not allow_upgrade:  # D146: never an implicit upgrade; nothing was written to the file
-                self.conn.close()
-                raise IndexProblem(f"the local index has schema version {version} and this version needs {SCHEMA_VERSION}. It is never upgraded implicitly: "
-                                   "run `gmail-intelligence index upgrade` (a verified private backup is made first)")
             self._migrate(version)
+
+    @staticmethod
+    def _identity(path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino)
+
+    def _refuse_unusable(self, version, empty, allow_upgrade, close=False):
+        """The refusal rules, shared by the preflight (no connection yet) and the check on the writing connection."""
+        problem = None
+        if version == 0:
+            if not empty:
+                problem = _FOREIGN_MSG  # a non-empty database with no schema version is somebody else's: never adopted
+        elif version in (1, 2, 3, 4, 5, 6):
+            if not allow_upgrade:  # D146: never an implicit upgrade; nothing was written to the file
+                problem = (f"the local index has schema version {version} and this version needs {SCHEMA_VERSION}. It is never upgraded implicitly: "
+                           "run `gmail-intelligence index upgrade` (a verified private backup is made first)")
         elif version != SCHEMA_VERSION:
-            self.conn.close()
-            raise IndexProblem(f"unsupported index schema version {version} (expected {SCHEMA_VERSION})")
+            problem = f"unsupported index schema version {version} (expected {SCHEMA_VERSION})"
+        if problem:
+            if close:
+                self.conn.close()
+            raise IndexProblem(problem)
 
     def _migrate(self, version):
         """Back up the database file, then add the missing tables in one transaction (all-or-nothing).

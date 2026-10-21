@@ -14,7 +14,7 @@ A local-first command-line tool that connects to **your own Gmail account with r
 
 - **M6** a local, **read-only dashboard** (`dashboard serve`) and aggregate analytics (`mailbox insights`): overview, trends, senders, cleanup recommendations and history, label organization, and honest data-freshness indicators. English and Hebrew (RTL), light/dark, desktop and mobile. It listens on `127.0.0.1` only with a per-launch token, opens the index read-only, has no action buttons and needs no new dependency ([docs/DASHBOARD.md](docs/DASHBOARD.md)).
 ## Planned, not implemented
-M5F (executing label changes), M7 incremental sync and later milestones. Any feature that changes a mailbox needs its own explicit design, owner approval and, where required, extra OAuth scopes.
+M5F (executing label changes) and M8 and later milestones. M7A (incremental sync), M7B (change and deletion reporting) and M7C (maintenance report) are implemented and merged, verified against synthetic data only. An independent synthetic acceptance audit found one small correction, delivered in a follow-up change. Real Gmail acceptance has NOT occurred; upgrading a personal index and live scanning are NOT approved; Gmail write execution remains disabled (`LIVE_EXECUTION_ENABLED = False`); M8 is not implemented. See [SYNC.md](docs/SYNC.md). Any feature that changes a mailbox needs its own explicit design, owner approval and, where required, extra OAuth scopes.
 
 ## Requirements and limitations
 - macOS (tokens use the macOS Keychain), Python 3.10+, and a Google account.

@@ -1228,6 +1228,9 @@ def cmd_labels_approve(args):
     return _label_plan_cmd(args, go)
 
 
+_REPORT_UNEXPECTED = "the report could not be produced (unexpected internal error); nothing was changed"
+
+
 def _with_readonly_index(args, fn):
     """Reports that must not be able to write: the index is opened with SQLite's own `mode=ro` + `query_only` (a hidden write would fail), never upgraded, never created."""
     from gmail_intelligence import index as idx
@@ -1237,10 +1240,14 @@ def _with_readonly_index(args, fn):
         ro = idx.ReadOnlyIndex(config.index_path())
     except (ValueError, idx.IndexProblem) as exc:
         return _fail(exc)
+    except Exception:  # noqa: BLE001 - the reporting boundary (see below)
+        return _fail(_REPORT_UNEXPECTED)
     try:
         return fn(ro, account)
     except sqlite3.DatabaseError:
         return _fail("the local index database reported an error (corrupt or locked); nothing was changed")
+    except Exception:  # noqa: BLE001 - the reporting boundary: never a traceback, never exception text (it could carry stored data)
+        return _fail(_REPORT_UNEXPECTED)
     finally:
         ro.close()
 
@@ -1269,8 +1276,12 @@ def cmd_mailbox_maintenance(args):
         account = _local_account(args)
     except ValueError:
         account = None  # file-level checks still run
-    rep = maintenance.run(config.index_path(), account, deep=args.deep)
-    print(json.dumps(rep, indent=2, sort_keys=True) if args.json else maintenance.render_text(rep))
+    try:
+        rep = maintenance.run(config.index_path(), account, deep=args.deep)
+        out = json.dumps(rep, indent=2, sort_keys=True) if args.json else maintenance.render_text(rep)  # built completely before anything is printed
+    except Exception:  # noqa: BLE001 - the reporting boundary: no traceback, no exception text, a non-zero exit (never a silent "success")
+        return _fail(_REPORT_UNEXPECTED)
+    print(out)
     return 0
 
 
