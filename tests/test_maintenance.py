@@ -128,6 +128,87 @@ class SqliteIntegrityTests(Case):
         self.index = idx.Index.__new__(idx.Index)
         self.index.conn = sqlite3.connect(":memory:")
 
+    def zero_version_file(self, data_tables=True):
+        self.index.close()
+        os.remove(self.db)
+        c = sqlite3.connect(self.db)
+        if data_tables:
+            c.execute("CREATE TABLE notes (x TEXT)")
+            c.execute("INSERT INTO notes VALUES ('S3cretPersonalValue99')")
+        c.commit()
+        c.close()
+        os.chmod(self.db, 0o600)
+        self.assertEqual(sqlite3.connect(self.db).execute("PRAGMA user_version").fetchone()[0], 0)
+
+    def test_a_valid_sqlite_file_with_schema_version_zero_is_not_called_healthy(self):
+        for with_tables in (True, False):
+            self.zero_version_file(with_tables)
+            before = tree_state(self.tmp)
+            for deep in (False, True):
+                rep = maintenance.run(self.db, ACCOUNT, deep=deep, now=self.clock.now)
+                db = rep["properties"]["local_database"]
+                self.assertEqual((db["sqlite_integrity"], db["application_schema"], db["status"], db["schema_version"]), ("OK", "UNRECOGNISED", "UNSUPPORTED_SCHEMA", 0))
+                self.assertNotEqual(db["status"], "HEALTHY")
+                f = self.assertFinding(rep, "INDEX_SCHEMA_UNRECOGNISED", "WARN", "OBSERVED")
+                self.assertIn("changed nothing", f["recommendation"])
+                for code in ("SQLITE_INTEGRITY_FAILED", "INDEX_UNREADABLE_OR_CORRUPT", "INDEX_SCHEMA_OLD"):
+                    self.assertNoFinding(rep, code)                       # structure is fine; only the application schema is unrecognised
+                self.assertFalse([c for c in self.by_code(rep) if c.startswith(("ORPHAN", "INVALID_SCAN", "TOMBSTONE", "CHECKPOINT", "SYNC_", "AUDIT"))])   # row-level M7 checks skipped
+                self.assertEqual(rep["properties"]["mailbox_index_freshness"]["status"], "UNKNOWN")
+                text = maintenance.render_text(rep)
+                self.assertIn("UNSUPPORTED_SCHEMA", text)
+                self.assertIn("SQLite integrity OK", text)
+                blob = text + json.dumps(rep)
+                for needle in ("S3cretPersonalValue99", "notes", self.db, str(self.tmp)):
+                    self.assertNotIn(needle, blob)
+            self.assertEqual(before, tree_state(self.tmp))                # not migrated, not touched
+            c = sqlite3.connect(self.db)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 0)
+            c.close()
+        self.index = idx.Index.__new__(idx.Index)
+        self.index.conn = sqlite3.connect(":memory:")
+
+    def test_integrity_and_schema_are_separate_conclusions_for_every_schema_state(self):
+        expect = {7: ("OK", "SUPPORTED", "HEALTHY")}
+        rep = self.run_m()
+        db = rep["properties"]["local_database"]
+        self.assertEqual((db["sqlite_integrity"], db["application_schema"], db["status"]), expect[7])
+        self.index.close()
+        downgrade_to_v6(self.db)
+        db = maintenance.run(self.db, ACCOUNT, now=self.clock.now)["properties"]["local_database"]
+        self.assertEqual((db["sqlite_integrity"], db["application_schema"], db["status"]), ("OK", "OLDER", "UNSUPPORTED_SCHEMA"))
+        c = sqlite3.connect(self.db)
+        c.execute("PRAGMA user_version = 9")
+        c.commit()
+        c.close()
+        db = maintenance.run(self.db, ACCOUNT, now=self.clock.now)["properties"]["local_database"]
+        self.assertEqual((db["sqlite_integrity"], db["application_schema"], db["status"]), ("OK", "NEWER", "UNSUPPORTED_SCHEMA"))
+        Path(self.db).write_bytes(b"garbage" * 500)
+        db = maintenance.run(self.db, ACCOUNT, now=self.clock.now)["properties"]["local_database"]
+        self.assertEqual((db["sqlite_integrity"], db["application_schema"], db["status"]), ("FAILED", "NOT_VERIFIED", "PROBLEMS_DETECTED"))
+        self.index = idx.Index.__new__(idx.Index)
+        self.index.conn = sqlite3.connect(":memory:")
+
+    def test_the_cli_reports_schema_zero_without_touching_the_file(self):
+        env = mock.patch.dict(os.environ, {config.HOME_ENV: str(self.tmp / "zero-home")})
+        env.start()
+        self.addCleanup(env.stop)
+        os.makedirs(config.app_dir(), exist_ok=True)
+        c = sqlite3.connect(config.index_path())
+        c.execute("CREATE TABLE t (x)")
+        c.commit()
+        c.close()
+        os.chmod(config.index_path(), 0o600)
+        store = mock.Mock()
+        store.load.return_value = {"account": ACCOUNT}
+        before = tree_state(config.app_dir())
+        out = io.StringIO()
+        with mock.patch.object(cli, "_store", return_value=store), mock.patch.object(cli, "_open_reader", side_effect=AssertionError("no Gmail")), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["mailbox", "maintenance", "--json"]), 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["properties"]["local_database"]["status"], "UNSUPPORTED_SCHEMA")
+        self.assertEqual(before, tree_state(config.app_dir()))
+
     def test_a_damaged_page_is_detected_by_the_deep_check_without_revealing_values(self):
         self.sql(("UPDATE messages SET sender=?", (f"{LEAK}@private.example.test",)))
         self.index.conn.execute("PRAGMA wal_checkpoint")
@@ -384,6 +465,49 @@ class BackupTests(Case):
             downgrade_to_v6(path)
         os.chmod(path, mode)
         return path
+
+    def test_an_unknown_version_tag_is_never_verified_never_counted_and_never_opened(self):
+        path = self.make_backup(tag="pre-m99")                         # a perfectly valid SQLite file, but this tool does not know that tag
+        real, opened = sqlite3.connect, []
+        before = tree_state(self.tmp)
+        for deep in (False, True):
+            with mock.patch.object(maintenance.sqlite3, "connect", lambda target, *a, **k: (opened.append(target), real(target, *a, **k))[1]):
+                rep = self.run_m(deep=deep)
+            b = rep["properties"]["backups"]
+            item = b["items"][0]
+            self.assertEqual((item["status"], item["schema_version"], item["expected_schema_version"]), ("UNSUPPORTED_TAG", None, None))
+            self.assertEqual((b["found"], b["verified"], b["status"]), (1, 0, "NOT_FULLY_VERIFIED"))
+            self.assertNotEqual(b["status"], "ALL_VERIFIED")
+            self.assertNoFinding(rep, "BACKUPS_VERIFIED")
+            f = self.assertFinding(rep, "BACKUP_UNSUPPORTED_TAG", "WARN", "UNKNOWN", count=1)
+            self.assertIn("NOT verified", f["explanation"])
+            for code in ("BACKUP_CORRUPT", "BACKUP_INVALID", "BACKUP_SCHEMA_VERSION_MISMATCH"):
+                self.assertNoFinding(rep, code)                          # an unfamiliar tag is not evidence of damage
+            blob = maintenance.render_text(rep) + json.dumps(rep)
+            self.assertNotIn("pre-m99", blob)
+            self.assertIn("UNSUPPORTED_TAG", blob)
+        self.assertFalse([t for t in opened if "pre-m99" in str(t)])      # it was not even opened
+        self.assertEqual(before, tree_state(self.tmp))
+
+    def test_an_unknown_tag_beside_a_valid_backup_keeps_the_aggregate_honest(self):
+        self.make_backup(stamp="20261020T110000Z")
+        self.make_backup(tag="pre-m99", stamp="20261020T110001Z")
+        corrupt = self.make_backup(tag="pre-m100", stamp="20261020T110002Z")
+        Path(corrupt).write_bytes(b"not a database" * 100)             # even garbage under an unknown tag is not opened, so it is not called corrupt
+        os.chmod(corrupt, 0o600)
+        rep = self.run_m(deep=True)
+        b = rep["properties"]["backups"]
+        self.assertEqual((b["found"], b["verified"], b["status"]), (3, 1, "NOT_FULLY_VERIFIED"))
+        self.assertFinding(rep, "BACKUPS_VERIFIED", "INFO", "OBSERVED", count=1)
+        self.assertFinding(rep, "BACKUP_UNSUPPORTED_TAG", "WARN", "UNKNOWN", count=2)
+        self.assertNoFinding(rep, "BACKUP_INVALID")
+        self.assertEqual(sorted(i["status"] for i in b["items"]), ["UNSUPPORTED_TAG", "UNSUPPORTED_TAG", "VERIFIED"])
+
+    def test_a_recognised_valid_backup_is_unchanged_by_this_rule(self):
+        self.make_backup()
+        rep = self.run_m(deep=True)
+        self.assertEqual(rep["properties"]["backups"]["status"], "ALL_VERIFIED")
+        self.assertNoFinding(rep, "BACKUP_UNSUPPORTED_TAG")
 
     def test_absence_is_information_not_corruption(self):
         rep = self.run_m()

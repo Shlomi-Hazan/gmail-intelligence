@@ -37,6 +37,7 @@ TEXT = {
     "INDEX_NOT_READABLE": ("A", "The local index file exists but this account cannot read it.", "Check the file's owner and permissions yourself; this command changed nothing."),
     "INDEX_UNREADABLE_OR_CORRUPT": ("A", "SQLite could not read the local index file (it may be corrupt or not a database).", "Stop using the tool on this file, keep a copy of it, and consider restoring a verified backup after review. Nothing was changed."),
     "INDEX_AUX_FILES_PRESENT": ("A", "A journal/WAL file exists next to the index: another process may be writing, or a write was interrupted. The index was NOT opened, because opening could need recovery, which writes.", "Wait for any running sync/scan to finish and run this again. If it persists, keep a copy of the files before doing anything else."),
+    "INDEX_SCHEMA_UNRECOGNISED": ("A", "The file is a structurally valid SQLite database but carries no application schema version (user_version 0), so it is not recognised as this tool's index (it may be empty or belong to something else). Row-level checks were skipped.", "If this is meant to be your index, restore a verified backup or build a fresh index with `mailbox scan --limit 100` (contacts Gmail read-only, needs your own go-ahead). This command changed nothing and did not migrate it."),
     "INDEX_SCHEMA_OLD": ("A", "The local index uses an older schema than this version expects; row-level checks were skipped.", "Run `gmail-intelligence index upgrade` (it makes a verified private backup first)."),
     "INDEX_SCHEMA_NEWER": ("A", "The local index uses a newer schema than this version understands; row-level checks were skipped.", "Use the newer version of the tool for this index."),
     "INDEX_PERMISSIONS_TOO_OPEN": ("A", "The index file is readable by other accounts (expected owner-only).", "Restrict it yourself, for example `chmod 600` on the index file. This command does not change permissions."),
@@ -83,6 +84,7 @@ TEXT = {
     "BACKUP_INVALID": ("D", "Some backup files are not SQLite databases.", "Do not restore from them. Nothing was deleted."),
     "BACKUP_UNREADABLE": ("D", "Some backups could not be read; whether they are valid is not verified.", "Check their owner and permissions yourself."),
     "BACKUP_NOT_VERIFIED_AUX_FILES": ("D", "Some backups have a journal/WAL file next to them; they were not opened, because opening could modify them.", "Inspect those files yourself; nothing was touched."),
+    "BACKUP_UNSUPPORTED_TAG": ("D", "Some backup names carry a version tag this tool does not know, so which schema version to expect is unknown. They were not opened and are NOT verified; this does not mean they are damaged.", "Check them with the tool version that created them, or inspect them yourself. Nothing was changed."),
     "BACKUP_NOT_REGULAR_FILE": ("D", "Some backup names are not regular files (for example links); they were not followed.", "Inspect them yourself."),
     # E. audit and executions
     "AUDIT_CHAIN_BROKEN": ("E", "The cleanup audit chain does not verify: an entry was altered, removed or reordered.", "Stop using cleanup plans on this index, keep a copy of the file, and consider restoring a verified backup after review. Nothing was repaired."),
@@ -157,7 +159,7 @@ def _count(conn, sql, *params):
 
 # ---------------------------------------------------------------- A / B / C / E on the main index
 def _file_checks(path, deep, f, out):
-    out["local_database"] = {"status": "NOT_VERIFIED", "mode": "deep" if deep else "quick", "schema_version": None}
+    out["local_database"] = {"status": "NOT_VERIFIED", "mode": "deep" if deep else "quick", "schema_version": None, "sqlite_integrity": "NOT_VERIFIED", "application_schema": "NOT_VERIFIED"}
     if not os.path.lexists(path):
         f.add("INDEX_MISSING", "WARN", "OBSERVED")
         return None
@@ -179,9 +181,10 @@ def _file_checks(path, deep, f, out):
         conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
     except sqlite3.Error:
         f.add("INDEX_UNREADABLE_OR_CORRUPT", "CRITICAL", "OBSERVED")
-        out["local_database"]["status"] = "PROBLEMS_DETECTED"
+        out["local_database"].update(status="PROBLEMS_DETECTED", sqlite_integrity="FAILED")
         return None
-    out["local_database"]["schema_version"] = version if isinstance(version, int) else None
+    db = out["local_database"]
+    db["schema_version"] = version if isinstance(version, int) else None
     problems = 0
     try:
         ok, n = _pragma_problems(conn, "integrity_check" if deep else "quick_check")
@@ -198,23 +201,24 @@ def _file_checks(path, deep, f, out):
             f.add("FOREIGN_KEY_VIOLATIONS", "ERROR", "OBSERVED", count=len(fk), detail=by)
     except sqlite3.Error:
         f.add("INDEX_UNREADABLE_OR_CORRUPT", "CRITICAL", "OBSERVED")
-        out["local_database"]["status"] = "PROBLEMS_DETECTED"
+        db.update(status="PROBLEMS_DETECTED", sqlite_integrity="FAILED")
         conn.close()
         return None
-    if version == 0:
-        out["local_database"]["status"] = "PROBLEMS_DETECTED" if problems else "HEALTHY"
-        conn.close()
-        return None
-    if version < CURRENT_SCHEMA:
+    # two separate conclusions: is the FILE structurally sound, and is it a schema this tool understands
+    db["sqlite_integrity"] = "FAILED" if problems else "OK"
+    schema = "SUPPORTED" if version == CURRENT_SCHEMA else "UNRECOGNISED" if version == 0 else "OLDER" if isinstance(version, int) and version < CURRENT_SCHEMA else "NEWER"
+    db["application_schema"] = schema
+    if schema == "UNRECOGNISED":
+        f.add("INDEX_SCHEMA_UNRECOGNISED", "WARN", "OBSERVED")
+    elif schema == "OLDER":
         f.add("INDEX_SCHEMA_OLD", "WARN", "OBSERVED")
-        out["local_database"]["status"] = "PROBLEMS_DETECTED" if problems else "HEALTHY"
-        conn.close()
-        return None
-    if version > CURRENT_SCHEMA:
+    elif schema == "NEWER":
         f.add("INDEX_SCHEMA_NEWER", "ERROR", "OBSERVED")
+    # HEALTHY only when the structure is sound AND the schema is the supported one; an unsupported schema never gets an unqualified HEALTHY
+    db["status"] = "PROBLEMS_DETECTED" if problems else "HEALTHY" if schema == "SUPPORTED" else "UNSUPPORTED_SCHEMA"
+    if schema != "SUPPORTED":
         conn.close()
         return None
-    out["local_database"]["status"] = "PROBLEMS_DETECTED" if problems else "HEALTHY"
     return conn
 
 
@@ -384,6 +388,11 @@ def _backups(index_path, deep, now, f, out):
         item = {"tag": tag if tag in EXPECTED_BACKUP_VERSION else "other", "age_hours": age, "status": "NOT_VERIFIED", "schema_version": None,
                 "expected_schema_version": EXPECTED_BACKUP_VERSION.get(tag), "permissions_ok": None}
         items.append(item)
+        if tag not in EXPECTED_BACKUP_VERSION:
+            # without a known tag there is no schema version to check against: it is never opened, never VERIFIED, never counted, and never called corrupt
+            item["status"] = "UNSUPPORTED_TAG"
+            bad("BACKUP_UNSUPPORTED_TAG")
+            continue
         try:
             st = os.lstat(path)
         except OSError:
@@ -432,13 +441,13 @@ def _backups(index_path, deep, now, f, out):
             bad("BACKUP_UNREADABLE")
         finally:
             conn.close()
-    verified = sum(1 for i in items if i["status"] == "VERIFIED" and i["permissions_ok"])
+    verified = sum(1 for i in items if i["status"] == "VERIFIED" and i["permissions_ok"] and i["expected_schema_version"] is not None)
     if not items:
         f.add("NO_BACKUPS_FOUND", "INFO", "OBSERVED")
     for code, count in problems.items():
         sev, cert = {"BACKUP_PERMISSIONS_TOO_OPEN": ("WARN", "OBSERVED"), "BACKUP_SCHEMA_VERSION_MISMATCH": ("ERROR", "OBSERVED"), "BACKUP_CORRUPT": ("ERROR", "OBSERVED"),
                      "BACKUP_INVALID": ("ERROR", "OBSERVED"), "BACKUP_UNREADABLE": ("WARN", "UNKNOWN"), "BACKUP_NOT_VERIFIED_AUX_FILES": ("WARN", "UNKNOWN"),
-                     "BACKUP_NOT_REGULAR_FILE": ("WARN", "OBSERVED")}[code]
+                     "BACKUP_NOT_REGULAR_FILE": ("WARN", "OBSERVED"), "BACKUP_UNSUPPORTED_TAG": ("WARN", "UNKNOWN")}[code]
         f.add(code, sev, cert, count=count)
     if verified:
         f.add("BACKUPS_VERIFIED", "INFO", "OBSERVED", count=verified)
@@ -467,7 +476,7 @@ def run(index_path, account=None, deep=False, now=None):
                 f.add("ACCOUNT_UNKNOWN", "INFO", "OBSERVED")
         except sqlite3.Error:
             f.add("INDEX_UNREADABLE_OR_CORRUPT", "CRITICAL", "OBSERVED")
-            out["local_database"]["status"] = "PROBLEMS_DETECTED"
+            out["local_database"].update(status="PROBLEMS_DETECTED", sqlite_integrity="FAILED")
         finally:
             conn.close()
     _backups(index_path, deep, now, f, out)
@@ -487,7 +496,8 @@ def render_text(rep):
     out = [f"Maintenance report ({rep['mode']} checks; local only, read-only; Gmail was not contacted)"]
     db, fr, bk, m4, au = p["local_database"], p["mailbox_index_freshness"], p["backups"], p["m4_plan_operations"], p["audit_chain"]
     out += ["", "Properties (separate things):",
-            f"  local database:        {db['status']}" + (f" (schema v{db['schema_version']})" if db.get("schema_version") is not None else ""),
+            f"  local database:        {db['status']}" + (f" (SQLite integrity {db['sqlite_integrity']}; schema {db['application_schema'].lower()}"
+                                                      + (f" v{db['schema_version']}" if db.get("schema_version") is not None else "") + ")"),
             f"  mailbox index fresh:   {fr['status']}" + (" (" + ", ".join(fr["codes"]) + ")" if fr["codes"] else "") + " - judged from local sync records; Gmail is not verified",
             f"  backups:               {bk['status']} ({bk['verified']} verified of {bk['found']} found)",
             f"  cleanup plan operations: {m4['status'].replace('_', ' ').lower()} - index freshness only; see `cleanup plan impact` for individual plans",
