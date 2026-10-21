@@ -562,5 +562,24 @@ class DeterminismTests(MailboxCase):
         mb.conn = sqlite3.connect(mb.path)
 
 
+class BoundaryTests(unittest.TestCase):
+    FORBIDDEN = ("gmail_intelligence.gmail_write", "gmail_intelligence.gmail", "gmail_intelligence.oauth", "gmail_intelligence.keystore", "gmail_intelligence.exec_live_mailbox",
+                 "gmail_intelligence.cleanup_exec", "gmail_intelligence.cleanup_plans", "gmail_intelligence.dashboard_server", "googleapiclient", "google", "keyring", "socket",
+                 "urllib.request", "http.client", "subprocess", "httplib2")
+
+    def test_importing_the_engine_pulls_in_no_gmail_oauth_keychain_write_or_network_module(self):
+        code = ("import sys; sys.path[:0]=[%r]\nimport gmail_intelligence.attention, gmail_intelligence.cli\n"
+                "print(sorted(m for m in sys.modules if m in %r or m.split('.')[0] in ('googleapiclient','google','keyring','httplib2')))" % (str(S.SRC), self.FORBIDDEN))
+        # the attention module itself, without the CLI (which lazily imports other commands only when they run)
+        code_engine = code.replace("import gmail_intelligence.attention, gmail_intelligence.cli", "import gmail_intelligence.attention")
+        out = subprocess.run([sys.executable, "-I", "-c", code_engine], check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(out, "[]")
+
+    def test_the_source_contains_no_url_and_no_link_building(self):
+        source = open(S.SRC / "gmail_intelligence" / "attention.py", encoding="utf-8").read()
+        for needle in ("http://", "https://", "mail.google", "/u/0", "href", "urlopen", "requests", "INSERT", "UPDATE ", "DELETE ", "CREATE "):
+            self.assertNotIn(needle, source, needle)
+
+
 if __name__ == "__main__":
     unittest.main()
