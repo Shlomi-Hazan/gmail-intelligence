@@ -36,6 +36,7 @@ class Mailbox:
         with idx.Index(self.path):
             pass
         self.conn = sqlite3.connect(self.path)
+        self.conn.row_factory = sqlite3.Row
         self.n = 0
         self.scan(ACCOUNT)
 
@@ -48,9 +49,10 @@ class Mailbox:
                           (account, "2026-10-21T10:00:00Z", finished or "2026-10-21T11:00:00Z"))
         self.conn.commit()
 
-    def add(self, mid=None, *, account=ACCOUNT, thread="auto", age_days=1.0, sender="friend@example.test", labels=("INBOX",), unread=None, ms="auto"):
+    def add(self, mid=None, *, account=ACCOUNT, thread="auto", age_days=1.0, sender="auto", labels=("INBOX",), unread=None, ms="auto"):
         self.n += 1
         mid = mid or f"{self.n:08x}"
+        sender = f"s{self.n}@example.test" if sender == "auto" else sender
         thread = f"t{mid}" if thread == "auto" else thread
         when = ms_ago(age_days) if ms == "auto" else ms
         flag = ("UNREAD" in labels) if unread is None else unread
@@ -61,6 +63,10 @@ class Mailbox:
         self.conn.commit()
         return mid
 
+    def sql(self, statement, *params):
+        self.conn.execute(statement, params)
+        self.conn.commit()
+
     def set_labels(self, mid, labels, account=ACCOUNT):
         self.conn.execute("DELETE FROM message_labels WHERE account=? AND message_id=?", (account, mid))
         self.conn.executemany("INSERT OR IGNORE INTO message_labels VALUES (?,?,?)", [(account, mid, lab) for lab in labels])
@@ -68,6 +74,8 @@ class Mailbox:
         self.conn.commit()
 
     def add_rule(self, **fields):
+        fields.setdefault("priority", 0)
+        fields.setdefault("note", None)
         class Wrap:
             conn = self.conn
 
