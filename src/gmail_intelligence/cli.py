@@ -568,7 +568,7 @@ def sync_status_text(index, account):
     """Aggregate, privacy-safe sync status: states, ages and counters only (no ids, labels, addresses or paths)."""
     from datetime import datetime, timezone
 
-    from gmail_intelligence import sync_health
+    from gmail_intelligence import sync_health, sync_report
 
     state = sync_health.state_row(index, account)
     lines = ["Sync status (local only; Gmail was not contacted)"]
@@ -581,12 +581,15 @@ def sync_status_text(index, account):
             age = f", last advanced {hours:.1f} hours ago"
         except (ValueError, TypeError):
             pass
-        lines.append(f"  state: {state['status']}" + (f" ({state['reason']})" if state["reason"] else "") + age)
+        status = state["status"] if state["status"] in ("OK", "IN_PROGRESS", "INTERRUPTED", "NEEDS_RECONCILE") else "UNRECOGNISED"
+        reason = sync_report.safe_reason(state["reason"])
+        lines.append(f"  state: {status}" + (f" ({reason})" if reason else "") + age)
     runs = index._q("SELECT kind, status, pages, records, affected, refreshed, unchanged, tombstoned, vanished, failed, error FROM sync_run WHERE account=? "
                     "ORDER BY id DESC LIMIT 3", account)
     for r in runs:
-        lines.append(f"  run [{r['kind']}] {r['status']}: pages {r['pages']}, records {r['records']}, affected {r['affected']}, refreshed {r['refreshed']}, "
-                     f"unchanged {r['unchanged']}, tombstoned {r['tombstoned']}, vanished {r['vanished']}, failed {r['failed']}" + (f" ({r['error']})" if r["error"] else ""))
+        lines.append(f"  run [{r['kind']}] {r['status']}: collected pages {r['pages']}, records {r['records']}, affected {r['affected']}; applied refreshed {r['refreshed']}, "
+                     f"unchanged {r['unchanged']}, tombstoned {r['tombstoned']}, vanished {r['vanished']}, failed {r['failed']}"
+                     + (f" ({sync_report.classify_note(r['error'])[0]})" if r["error"] else "") + ("" if r["status"] == "completed" else " [partial: see `mailbox changes`]"))
     codes = sync_health.problems(index, account)
     lines.append("  cleanup plan operations: " + ("allowed (index is fresh)" if not codes else "PROHIBITED until sync health is restored: " + ", ".join(codes)))
     return "\n".join(lines)
@@ -1225,6 +1228,49 @@ def cmd_labels_approve(args):
     return _label_plan_cmd(args, go)
 
 
+def _with_readonly_index(args, fn):
+    """Reports that must not be able to write: the index is opened with SQLite's own `mode=ro` + `query_only` (a hidden write would fail), never upgraded, never created."""
+    from gmail_intelligence import index as idx
+
+    try:
+        account = _local_account(args)
+        ro = idx.ReadOnlyIndex(config.index_path())
+    except (ValueError, idx.IndexProblem) as exc:
+        return _fail(exc)
+    try:
+        return fn(ro, account)
+    except sqlite3.DatabaseError:
+        return _fail("the local index database reported an error (corrupt or locked); nothing was changed")
+    finally:
+        ro.close()
+
+
+def cmd_mailbox_changes(args):
+    import json
+
+    from gmail_intelligence import sync_report
+    if not 1 <= args.runs <= 50:
+        return _fail("--runs must be between 1 and 50")
+
+    def go(index, account):
+        rep = sync_report.changes_report(index, account, runs=args.runs)
+        print(json.dumps(rep, indent=2, sort_keys=True) if args.json else sync_report.changes_text(rep))
+        return 0
+    return _with_readonly_index(args, go)
+
+
+def cmd_cleanup_plan_impact(args):
+    import json
+
+    from gmail_intelligence import plan_impact
+
+    def go(index, account):
+        rep = plan_impact.impact_report(index, account)
+        print(json.dumps(rep, indent=2, sort_keys=True) if args.json else plan_impact.impact_text(rep))
+        return 0
+    return _with_readonly_index(args, go)
+
+
 def cmd_mailbox_insights(args):
     from gmail_intelligence import analytics, analytics_report
 
@@ -1317,7 +1363,7 @@ def build_parser():
         return q
 
     mb = sub.add_parser("mailbox", help="read-only mailbox index and reports (M2)")
-    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,status,report,insights,top-senders,purge}")
+    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,changes,status,report,insights,top-senders,purge}")
     q = account_opt(msub.add_parser("insights", help="aggregate, explainable analytics of the local index (M6A; local only, human-readable or --json)"))
     q.add_argument("section", nargs="?", default="overview", choices=("all", "freshness", "overview", "volume", "categories", "senders", "subscriptions", "cleanup-summary", "cleanup-history", "organization"))
     q.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1337,6 +1383,10 @@ def build_parser():
     p.add_argument("--accept-count-mismatch", action="store_true", help="full scan: accept a reviewed difference between the listed count and Gmail's estimate")
     p.add_argument("--allow-large-prune", action="store_true", help="full scan: allow removing more than 20%% of the indexed messages (reviewed)")
     p.set_defaults(func=cmd_mailbox_scan)
+    q = account_opt(msub.add_parser("changes", help="what synchronization changed: per-run counters, deletions, partial runs (M7B; local only, read-only, aggregates only)"))
+    q.add_argument("--runs", type=int, default=5, metavar="N", help="how many recent runs to show (1-50)")
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_mailbox_changes)
     p = msub.add_parser("sync", help="apply recent Gmail changes to the local index from the saved history checkpoint (contacts Gmail, read-only)")
     p.add_argument("--status", action="store_true", help="show the local sync state and exit (no Gmail contact)")
     p.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the logged-in account)")
@@ -1454,6 +1504,9 @@ def build_parser():
     q.add_argument("--min-age-days", type=int, default=90, metavar="N", help="minimum age in days (90 or more)")
     q.set_defaults(func=cmd_cleanup_plan_create)
     account_opt(plsub.add_parser("list", help="list plans")).set_defaults(func=cmd_cleanup_plan_list)
+    q = account_opt(plsub.add_parser("impact", help="how the current index state affects stored plans (M7B; local, read-only, changes nothing)"))
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_cleanup_plan_impact)
     q = account_opt(plsub.add_parser("show", help="plan summary, freshness and (optionally) one page of targets"))
     q.add_argument("plan_id")
     q.add_argument("--page", type=int, metavar="N", help="show target page N")

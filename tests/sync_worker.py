@@ -59,6 +59,20 @@ def main():
                 labs = [tuple(r) for r in index.conn.execute("SELECT * FROM message_labels ORDER BY 1,2,3")]
                 tomb = [tuple(r)[:2] + tuple(r)[3:] for r in index.conn.execute("SELECT * FROM message_tombstone ORDER BY 1,2")]
                 out = {"digest": hashlib.sha256(repr((rows, labs, tomb)).encode()).hexdigest()}
+            elif args.mode == "e2e-report":  # deterministic digest of the M7B report (times are removed: they are the only run-dependent values)
+                import hashlib
+                from gmail_intelligence import sync_report
+                base = standard_mailbox(args.n)
+                scanner.run_scan(base, index, ACCOUNT, mode="full", limiter=fast, sleep=lambda s: None, clock=clock, page_size=3)
+                base.script(json.loads(args.script))
+                sync.run_sync(base, index, ACCOUNT, limiter=fast, sleep=lambda s: None, clock=clock, page_size=2, chunk=3)
+                rep = sync_report.changes_report(index, ACCOUNT, runs=10, now=clock())
+
+                def scrub(o):
+                    if isinstance(o, dict):
+                        return {k: scrub(v) for k, v in o.items() if not (k.endswith("_at") or k.startswith("last_completed") or k == "age_hours")}
+                    return [scrub(x) for x in o] if isinstance(o, list) else o
+                out = {"digest": hashlib.sha256(json.dumps(scrub(rep), sort_keys=True).encode()).hexdigest()}
             elif args.mode == "sync":
                 out = sync.run_sync(mailbox, index, ACCOUNT, limiter=fast, sleep=lambda s: None, clock=clock, hook=hook, chunk=args.chunk)
             else:
