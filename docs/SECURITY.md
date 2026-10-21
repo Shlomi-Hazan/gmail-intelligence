@@ -63,6 +63,8 @@ The project must incur zero additional financial cost. Security-relevant consequ
 - Tombstones hold message ids only; reports and logs stay aggregate (no addresses, label names, ids or paths). The maintenance report is manual and read-only and never repairs or contacts Gmail.
 - Limits: the local database can be rewritten by anyone who controls the macOS account; Gmail does not document history ordering, duplicates or truncation, so the design never relies on them and a silently truncated history response remains a documented residual risk; the Gmail quota page lists a billing threshold that must be re-confirmed before live use. See [SYNC.md](SYNC.md).
 
+- **M7C maintenance report (read-only).** `mailbox maintenance` opens the index `mode=ro` + `query_only` and backups `mode=ro&immutable=1`, refuses to open any database that has a journal/WAL/SHM file beside it, runs only `SELECT` and read pragmas, never uses the writable `Index` class, never contacts Gmail and never repairs, restores, chmods, deletes, expires, consumes or audits anything. Output is static text, fixed codes, backup tags and counts: stored text (errors, reasons, ids, labels, paths) is never echoed. A clean report verifies neither Gmail nor the mailbox index against it, and the audit check cannot detect deletion of the newest entries without an external head checkpoint. The dashboard shows only cheap, aggregate sync information.
+
 ## 2. Assets
 OAuth refresh/access tokens · local SQLite metadata (reveals contacts, habits, subjects) · audit logs · Google Cloud client credentials · the user's real mailbox · repository integrity.
 

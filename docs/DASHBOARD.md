@@ -60,7 +60,7 @@ Envelope: `{"section", "data", "basis", "explain": [CODES], "as_of", "index": {"
 |---|---|---|
 | `meta` | | app/API version, schema, languages, `read_only`, reveal flags (no account) |
 | `overview` | | messages, threads, unread, inbox, size, date range, user labels, classified share, attention counts, health |
-| `freshness` | | index state, last full scan, age, classification current/stale/unclassified, issues |
+| `freshness` | | index state, last full scan, age, classification current/stale/unclassified, issues, and (M7C, additive) a `sync` block: checkpoint present/missing, sync state, age, last completed sync, sync-health codes. Cheap local queries only; the deep checks are `mailbox maintenance` |
 | `volume` | | monthly points (gap-filled) with unread and `in_progress`, peak, undated count |
 | `categories` | `by=total|month` | type counts and shares, unclassified, multi-type count, optional monthly breakdown |
 | `senders` | `kind=domain|address`, `limit=1..100` | ranked senders: display (masked addresses), counts, unread, first/last seen, dominant type |
