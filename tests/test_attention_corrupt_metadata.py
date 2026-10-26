@@ -2,8 +2,7 @@
 
 SQLite is typeless, so a damaged index can hold values the scanner never writes. These tests pin the CURRENT safe behaviour only: no traceback, one fixed message, no
 stored value in any output, no partial result presented as complete (stdout stays empty), the index file untouched, no extra file and no network connection.
-Behaviour that is NOT safe yet (stored text echoed by an exception message or by the `types`/`rule` output fields) is reported in docs/ATTENTION-ACCEPTANCE.md and is
-deliberately not pinned here. Synthetic data only.
+The two cases that used to echo stored text (an exception message, the `types`/`rule` output fields) are covered by test_attention_output_privacy.py. Synthetic data only.
 """
 import contextlib
 import gc

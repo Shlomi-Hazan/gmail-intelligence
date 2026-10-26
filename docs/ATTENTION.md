@@ -60,6 +60,8 @@ Cursor: `a1.<YYYYMMDD>.<snapshot 64 hex>.<n>.<key 16 hex>`: the reference day, t
 JSON and text, both from the same function. Per item: rank, score, tier, evidence, flags, signals (code, points, basis OBSERVED or INFERRED), types, a masked sender (the domain is shown; `--reveal-senders` shows the address), received date, unread age in days, the number of messages in the thread, and `link: {"status": "UNAVAILABLE", "reason": "LINKS_NOT_IMPLEMENTED"}`. No message or thread id and no URL is printed. Request level: totals, warnings (empty index, partial index, scan older than 7 days, sync not healthy; they warn and never block), `as_of`, the ruleset hash, and `weights_status: PROVISIONAL`.
 
 ## 8. Fixed errors
+Only two kinds of text can reach the user from the command: the fixed texts of `AttentionError` and of the parameter validation (`ParameterError`, built from constants). Every other exception, including a `ValueError` raised while processing stored data, ends in the generic message. Classification-derived output is validated against the authoritative definitions: a type outside `classify.TYPES` or a rule id that is not `u` plus up to nine ASCII digits is shown as `UNRECOGNISED`, never as the stored text.
+
 `RESULT_INCOMPLETE`, `SNAPSHOT_CHANGED`, `CURSOR_INVALID`, `INDEX_CHANGED_DURING_READ`, plus the existing index errors; unexpected internal errors give the generic reporting message. Messages are fixed text; none contains an identifier or exception text.
 
 ## 9. Known limits

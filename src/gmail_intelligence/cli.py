@@ -1297,7 +1297,7 @@ def cmd_mailbox_attention(args):
             out = attention.as_json(res) if args.json else attention.render_text(res)  # built completely before anything is printed
         except attention.AttentionError as exc:
             return _fail(exc.message)
-        except ValueError as exc:
+        except attention.ParameterError as exc:  # fixed text only; every other ValueError is internal and falls through to the generic message
             return _fail(exc)
         print(out)
         return 0

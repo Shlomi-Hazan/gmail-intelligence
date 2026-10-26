@@ -54,6 +54,11 @@ class AttentionError(Exception):
         self.message = f"{code}: {ERRORS[code]}"
 
 
+class ParameterError(ValueError):
+    """A bad user-supplied parameter. Its text is fixed (built only from constants), so it is the ONLY ValueError the CLI may print;
+    any other ValueError comes from processing stored data and must never reach the user as text."""
+
+
 @dataclass(frozen=True)
 class Weights:
     """Ranking weights of EXPERIMENTAL algorithm version 1 (approved for v1 only; not validated on a real mailbox)."""
@@ -150,16 +155,16 @@ _SORT_KEYS = {"priority": _pkey,
 # ---------------------------------------------------------------------------------------------- parameters and cursor
 def _params(limit, sort, signals, min_tier, sender_limit, collapse, include_low_score, reveal_senders):
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LIMIT:
-        raise ValueError(f"--limit must be between 1 and {MAX_LIMIT}")
+        raise ParameterError(f"--limit must be between 1 and {MAX_LIMIT}")
     if sort not in SORTS:
-        raise ValueError("--sort must be one of: " + ", ".join(SORTS))
+        raise ParameterError("--sort must be one of: " + ", ".join(SORTS))
     sigs = tuple(sorted(set(signals or ())))
     if any(s not in SIGNALS for s in sigs):
-        raise ValueError("--signal must be one of: " + ", ".join(SIGNALS))
+        raise ParameterError("--signal must be one of: " + ", ".join(SIGNALS))
     if min_tier is not None and min_tier not in TIERS:
-        raise ValueError("--min-tier must be one of: " + ", ".join(TIERS))
+        raise ParameterError("--min-tier must be one of: " + ", ".join(TIERS))
     if isinstance(sender_limit, bool) or not isinstance(sender_limit, int) or not 0 <= sender_limit <= MAX_SENDER_LIMIT:
-        raise ValueError(f"--sender-limit must be between 0 and {MAX_SENDER_LIMIT}")
+        raise ParameterError(f"--sender-limit must be between 0 and {MAX_SENDER_LIMIT}")
     return {"limit": limit, "sort": sort, "signals": sigs, "min_tier": min_tier, "sender_limit": sender_limit,
             "collapse": bool(collapse), "include_low_score": bool(include_low_score), "reveal": bool(reveal_senders)}
 
@@ -325,7 +330,7 @@ def _run(index, account, p, ref_day, budget, hook, weights=DEFAULT_WEIGHTS):
 
 def compute(index, account, *, limit=DEFAULT_LIMIT, cursor=None, sort="priority", signals=(), min_tier=None, sender_limit=DEFAULT_SENDER_LIMIT, collapse=True,
             include_low_score=False, reveal_senders=False, now=None, budget=None, _after_batch=None, _weights=DEFAULT_WEIGHTS):
-    """One page of attention candidates. `index` must be a `ReadOnlyIndex`. Raises `AttentionError` (fixed codes) or `ValueError` (bad parameter)."""
+    """One page of attention candidates. `index` must be a `ReadOnlyIndex`. Raises `AttentionError` (fixed codes) or `ParameterError` (a ValueError with a fixed text; bad parameter)."""
     if not isinstance(index, idx.ReadOnlyIndex):
         raise TypeError("attention needs a ReadOnlyIndex")
     p = _params(limit, sort, signals, min_tier, sender_limit, collapse, include_low_score, reveal_senders)
@@ -396,7 +401,7 @@ def _item(rank, rec, count, reveal, ref_day, weights):
     if rec.star:
         signals.append({"code": "STARRED", "points": rec.star, "basis": "OBSERVED"})
     if rec.rule_pts:
-        signals.append({"code": "USER_RULE", "points": rec.rule_pts, "basis": "OBSERVED", "rule": rec.rule_id, "confidence": rec.rule_conf})
+        signals.append({"code": "USER_RULE", "points": rec.rule_pts, "basis": "OBSERVED", "rule": _safe_rule_id(rec.rule_id), "confidence": rec.rule_conf})
     if rec.imp:
         signals.append({"code": "GMAIL_IMPORTANT", "points": rec.imp, "basis": "INFERRED"})
     if rec.unread:
@@ -416,13 +421,26 @@ def _item(rank, rec, count, reveal, ref_day, weights):
     else:
         who = {"display": analytics.mask_address(sender), "masked": True, "domain": domain}
     return {"rank": rank, "score": rec.score, "tier": tier_of(rec.score, weights), "evidence": EVIDENCE[rec.ev], "flags": list(rec.flags),
-            "components": {"owner": rec.owner, "inferred": max(0, gmail - rec.pen), "penalty": rec.pen}, "signals": signals, "types": list(rec.types),
+            "components": {"owner": rec.owner, "inferred": max(0, gmail - rec.pen), "penalty": rec.pen}, "signals": signals, "types": _safe_types(rec.types),
             "sender": who, "date": None if day is None else day.isoformat(),
             "unread_days": max((ref_day - day).days, 0) if rec.unread and day is not None else None, "thread_messages": count,
             "link": {"status": "UNAVAILABLE", "reason": "LINKS_NOT_IMPLEMENTED"}}
 
 
 # ------------------------------------------------------------------------------------------------------------ output
+UNRECOGNISED = "UNRECOGNISED"
+_RULE_ID = re.compile(r"u[0-9]{1,9}")  # the contract of classifier.add_rule: "u" followed by a number (ASCII digits only)
+
+
+def _safe_types(values):
+    """Classification types shown to the user: only the authoritative taxonomy (classify.TYPES); anything else is a fixed code, never the stored text."""
+    return list(dict.fromkeys(v if isinstance(v, str) and v in classify.TYPES else UNRECOGNISED for v in values))
+
+
+def _safe_rule_id(value):
+    return value if isinstance(value, str) and _RULE_ID.fullmatch(value) is not None else UNRECOGNISED
+
+
 def as_json(result):
     return json.dumps(result, indent=2, sort_keys=True, ensure_ascii=True)
 
