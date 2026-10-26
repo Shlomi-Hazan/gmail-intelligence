@@ -576,7 +576,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(out, "[]")
 
     def test_the_source_contains_no_url_and_no_link_building(self):
-        source = open(S.SRC / "gmail_intelligence" / "attention.py", encoding="utf-8").read()
+        source = (S.SRC / "gmail_intelligence" / "attention.py").read_text(encoding="utf-8")
         for needle in ("http://", "https://", "mail.google", "/u/0", "href", "urlopen", "requests", "INSERT", "UPDATE ", "DELETE ", "CREATE "):
             self.assertNotIn(needle, source, needle)
 
