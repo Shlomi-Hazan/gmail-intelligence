@@ -6,11 +6,13 @@ Behaviour that is NOT safe yet (stored text echoed by an exception message or by
 deliberately not pinned here. Synthetic data only.
 """
 import contextlib
+import gc
 import io
 import json
 import os
 import socket
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -72,7 +74,10 @@ class Case(CliCase):
         """Run the CLI with the network forbidden; return (code, stdout, stderr, connection attempts)."""
         attempts = []
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(socket.socket, "connect", side_effect=lambda *a, **k: attempts.append(1)), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        gc.collect()  # connections leaked by OTHER tests must not print their ResourceWarning into the stderr captured below
+        with warnings.catch_warnings(), mock.patch.object(socket.socket, "connect", side_effect=lambda *a, **k: attempts.append(1)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            warnings.simplefilter("ignore", ResourceWarning)
             code = cli.main(["mailbox", "attention", "--account", ACCOUNT, *argv])
         return code, out.getvalue(), err.getvalue(), attempts
 
