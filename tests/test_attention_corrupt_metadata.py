@@ -19,6 +19,7 @@ import attention_support as S
 from attention_support import ACCOUNT, NOW, attention
 from gmail_intelligence import cli
 from test_attention_cli import CliCase
+from leak_support import isolate_known_leaks  # noqa: E402
 
 MARK = "stored-text-marker-9913"
 GENERIC = "error: " + cli._REPORT_UNEXPECTED + "\n"
@@ -144,6 +145,7 @@ class ToleratedTests(Case):
 
 
 class DamagedFileTests(Case):
+    @isolate_known_leaks
     def test_a_file_of_random_bytes_is_refused_with_the_known_message_and_left_alone(self):
         self.mb.conn.close()
         with open(self.mb.path, "wb") as fh:

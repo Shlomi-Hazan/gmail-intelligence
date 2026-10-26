@@ -17,6 +17,7 @@ from test_cleanup import NOW  # noqa: E402
 
 from gmail_intelligence import analytics as an, analytics_report, classifier, cleanup_audit, cleanup_candidates as cc, cleanup_plans as cp, index as idx  # noqa: E402
 from gmail_intelligence import label_plans as lp  # noqa: E402
+from leak_support import isolate_known_leaks  # noqa: E402
 
 PROMO = ("INBOX", "CATEGORY_PROMOTIONS")
 
@@ -317,6 +318,8 @@ class ReadOnlyTests(AnalyticsBase):
         with self.assertRaises(sqlite3.OperationalError):
             ro.conn.execute("CREATE TABLE t (a)")
         ro.close()
+
+    @isolate_known_leaks
 
     def test_missing_corrupt_and_future_files(self):
         with self.assertRaises(idx.IndexProblem):

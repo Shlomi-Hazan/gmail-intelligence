@@ -306,6 +306,7 @@ class PrivacyAndCliTests(ImpactBase):
         self.assertIn("index upgrade", err)
         self.assertEqual(before, file_digest(self.index.path))
         self.index = idx.Index(self.index.path, allow_upgrade=True)
+        self.addCleanup(self.index.close)  # the cleanup registered by the base class closes the OLD object
 
 
 class DeterminismTests(unittest.TestCase):

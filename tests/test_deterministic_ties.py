@@ -32,6 +32,8 @@ class Base(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         index = None
         for account in accounts:
+            if index is not None:
+                index.close()  # one connection per account; only the last one is kept open for the test
             index = ob.build_ties(Path(tmp.name) / "t.sqlite3", account)
         self.addCleanup(index.close)
         return index

@@ -27,6 +27,7 @@ from sync_support import ACCOUNT, HERE, SRC, SyncCase, config, fast_limiter, fil
 import m7_support
 from fake_history import FakeHistoryMailbox, standard_mailbox
 from gmail_intelligence import cleanup_plans as cp, cli, maintenance, sync
+from leak_support import isolate_known_leaks  # noqa: E402
 
 SEVERITIES = {"INFO": 3, "WARN": 2, "ERROR": 1, "CRITICAL": 0}
 LEAK = "S3cretPersonalValue99"
@@ -51,7 +52,10 @@ def tree_state(directory):
     for name in sorted(os.listdir(directory)):
         p = os.path.join(directory, name)
         st = os.lstat(p)
-        digest = hashlib.sha256(open(p, "rb").read()).hexdigest() if os.path.isfile(p) and not os.path.islink(p) else None
+        digest = None
+        if os.path.isfile(p) and not os.path.islink(p):
+            with open(p, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
         out.append((name, st.st_size, st.st_mtime_ns, st.st_mode, digest))
     return out
 
@@ -113,6 +117,7 @@ class HealthyTests(Case):
 
 
 class SqliteIntegrityTests(Case):
+    @isolate_known_leaks
     def test_missing_unreadable_and_garbage_files(self):
         self.index.close()
         os.remove(self.db)
@@ -138,7 +143,8 @@ class SqliteIntegrityTests(Case):
         c.commit()
         c.close()
         os.chmod(self.db, 0o600)
-        self.assertEqual(sqlite3.connect(self.db).execute("PRAGMA user_version").fetchone()[0], 0)
+        with contextlib.closing(sqlite3.connect(self.db)) as probe:
+            self.assertEqual(probe.execute("PRAGMA user_version").fetchone()[0], 0)
 
     def test_a_valid_sqlite_file_with_schema_version_zero_is_not_called_healthy(self):
         for with_tables in (True, False):
@@ -167,6 +173,8 @@ class SqliteIntegrityTests(Case):
             c.close()
         self.index = idx.Index.__new__(idx.Index)
         self.index.conn = sqlite3.connect(":memory:")
+
+    @isolate_known_leaks
 
     def test_integrity_and_schema_are_separate_conclusions_for_every_schema_state(self):
         expect = {7: ("OK", "SUPPORTED", "HEALTHY")}
@@ -208,6 +216,8 @@ class SqliteIntegrityTests(Case):
         data = json.loads(out.getvalue())
         self.assertEqual(data["properties"]["local_database"]["status"], "UNSUPPORTED_SCHEMA")
         self.assertEqual(before, tree_state(config.app_dir()))
+
+    @isolate_known_leaks
 
     def test_a_damaged_page_is_detected_by_the_deep_check_without_revealing_values(self):
         self.sql(("UPDATE messages SET sender=?", (f"{LEAK}@private.example.test",)))
@@ -386,7 +396,7 @@ class ScanAndSyncTests(Case):
     def test_no_baseline_scan(self):
         other = idx.Index(str(self.tmp / "empty.sqlite3"))
         other.close()
-        with sqlite3.connect(str(self.tmp / "empty.sqlite3")) as c:
+        with contextlib.closing(sqlite3.connect(str(self.tmp / "empty.sqlite3"))) as c, c:
             c.execute("INSERT INTO scans (account, mode, status, started_at) VALUES (?, 'limited', 'completed', '2026-10-20T10:00:00Z')", (ACCOUNT,))
         rep = maintenance.run(str(self.tmp / "empty.sqlite3"), ACCOUNT, now=self.clock.now)
         f = self.assertFinding(rep, "NO_BASELINE_SCAN", "WARN", "OBSERVED")
@@ -821,6 +831,8 @@ class CliTests(Case):
         for blob in (text, raw):
             self.assertNotIn(ACCOUNT, blob)
             self.assertNotIn(str(config.app_dir()), blob)
+
+    @isolate_known_leaks
 
     def test_it_runs_on_a_corrupt_or_old_or_missing_index_without_a_traceback(self):
         Path(config.index_path()).write_bytes(b"garbage" * 500)

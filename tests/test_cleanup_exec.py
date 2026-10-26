@@ -706,6 +706,8 @@ class RecoveryTests(ExecBase):
             self.fail("child never reached the transaction")
         os.kill(kid.pid, signal.SIGKILL)
         kid.wait()
+        kid.stdout.close()
+        kid.stderr.close()
         self.assertEqual(ce.item_counts(self.index, ACCT, ex["exec_id"]), {"PENDING": 2})  # the half-finished INTENT was rolled back
         self.assertEqual(self.index._q("PRAGMA integrity_check")[0][0], "ok")
         self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
