@@ -1,0 +1,29 @@
+# M8A-1: final synthetic acceptance findings (local review notes)
+
+> Scope: a narrow verification of PR #54 at `bfbcd09`, on synthetic fixtures only. It is not live Gmail acceptance and not a merge approval. Reproduction scripts were run from a scratch directory; the regression tests added by this review are in `tests/test_attention_corrupt_metadata.py` and pin only behaviour that is already SAFE.
+
+## 1. Corrupted stored metadata (SQLite is typeless)
+Method: a synthetic index of four starred, unread messages; one stored value is replaced by a type the scanner never writes; `mailbox attention` is run through the CLI with the network forbidden and the index compared byte for byte afterwards. Planted marker text is searched for in stdout, stderr and the exception text.
+
+| Stored value | Result through the CLI |
+|---|---|
+| `internal_ms` as text or blob; `sender` as blob; `thread_id` as blob; a user rule with a confidence other than LOW/MEDIUM/HIGH or a text priority | **Fail closed**: exit 1, stdout empty (no partial result), stderr exactly the generic message, no marker, no traceback, index and directory untouched, no network. Deterministic. Pinned by tests. |
+| `internal_ms` real, beyond any date, hugely negative or NULL; `sender` NULL, integer or without `@`; `thread_id` as integer; `unread` as text; a label id or name as blob; arbitrary scan status; NULL scan `finished_at`; non-timestamp text in `sync_state.advanced_at` or `sync_run.finished_at` | **Tolerated**: exit 0, a complete result, no marker. Unreadable dates are flagged `DATE_MISSING`. Pinned by tests. |
+| a file of random bytes | known "unreadable or corrupt" message, exit 1, file untouched (pinned). |
+| **non-timestamp text in `scans.finished_at`** | **NOT safe**: the CLI prints `error: time data '<stored text>' does not match format ...` and exits 1. Cause: `cmd_mailbox_attention` catches `ValueError` to report bad parameters, and the same handler also catches the `ValueError` raised by `analytics._parse` inside the freshness warnings, then prints its text. Finding F1a. |
+| **a stored rule `value` or rule `id` that is arbitrary text** | **NOT safe**: the text appears in the successful output (`types`, `signals[].rule`). Such rows cannot be created through `add_rule` (it validates), so this needs a corrupted or tampered index. Finding F1b. |
+
+## 2. Findings
+| ID | Finding | Reproducible | Severity | User-visible impact | Security / privacy impact | Blocks merge | Recommended follow-up |
+|---|---|---|---|---|---|---|---|
+| F1a | A stored value can be echoed through an exception message (`scans.finished_at`) | yes, deterministic | P2 (low likelihood: needs a corrupted index; one column) | an unreadable error text instead of the fixed message; the report fails | breaks the issue #51 criterion "error messages are fixed text (no identifiers, no exception text)"; echoes stored text | **yes**, unless the owner grants an explicit exception | catch only a dedicated parameter-error type in the CLI (not every `ValueError`), so internal errors reach the generic message; add the regression test (expected output: the generic message) |
+| F1b | Unvalidated stored text printed in successful output (`types`, `signals[].rule`) | yes, deterministic | P3 (needs a corrupted index) | odd labels in the list | breaks the criterion "marker strings planted in stored data never appear in any output" for these two fields | with F1a, as one small fix | allow-list as M7B did: types must be in `classify.TYPES`, rule ids must look like `u<digits>`, otherwise print `UNRECOGNISED`; add tests |
+| F1c | The library raises raw exceptions whose text can contain stored values (`KeyError`, `ValueError`) | yes | P3 (informational) | none through the CLI (generic message) | a future caller must not print them | no | the dashboard route (M8A-3) must map every unexpected error to its fixed message; add a test there |
+| F1d | `ReadOnlyIndex.__init__` (M6, not M8A-1) leaves its connection unclosed when the file is corrupt (a `ResourceWarning` at garbage collection) | yes | P3 hygiene, pre-existing | none | none | no | close the connection on that path in a separate change |
+| F2 | `totals.evaluated` and `totals.excluded` depend on the read path: candidate streams count only messages with STARRED, IMPORTANT or UNREAD, the full scan used when a user attention rule exists counts every message (5 vs 25 in the reproduction) | yes | P3 | the visible counters jump when such a rule is added | none | no | name them "examined" and document the path dependence, or count a path-independent quantity |
+| F3 | The snapshot includes the totals, so a change that cannot alter any visible item (an old read message gaining UNREAD, score 0) invalidates cursors | yes | P4, by design (the safe direction) | one explicit "start again" | none; never a partial result | no | none needed; documented |
+| F4 | A message with `internal_ms = 0` sorts after real dates under `--sort oldest` (it is treated like a missing date) | yes | P4 | the epoch date appears out of order in one sort | none | no | use `is None` instead of truthiness for the date sorts |
+| F5 | The oracle test shares `score_message` with the engine (it checks the pipeline, not the formula; the formula is pinned by hand-computed unit tests); one cosmetic leftover expression `r.thread if False else r.id` in `tests/test_attention_engine.py` | yes | P4 | none | none | no | optional cleanup |
+
+## 3. Conclusion
+No finding allows a write, a network call, a change to the index, a traceback or a partial result presented as complete. The two privacy findings (F1a, F1b) concern stored text appearing in an error message or output when the index itself is corrupted; they contradict two explicit acceptance criteria of #51 and have a small, local fix that this review did NOT apply (the engine is unchanged, as instructed).

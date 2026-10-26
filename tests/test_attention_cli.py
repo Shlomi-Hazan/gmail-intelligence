@@ -21,7 +21,7 @@ class CliCase(MailboxCase):
     def setUp(self):
         super().setUp()
         patcher = mock.patch.object(config, "index_path", return_value=Path(self.mb.path))
-        patcher.start()
+        self.index_path = patcher.start()
         self.addCleanup(patcher.stop)
         clock = mock.patch.object(attention, "datetime", wraps=datetime)
         fake = clock.start()
