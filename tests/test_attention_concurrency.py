@@ -126,6 +126,79 @@ class ConcurrentWriterTests(MailboxCase):
         self.assertEqual(errors, [])
 
 
+class FreshnessConsistencyTests(MailboxCase):
+    """The consistency check covers the list (items, totals, snapshot); the advisory freshness fields are read after it, on purpose (docs/ATTENTION.md section 5)."""
+
+    ALLOWED_AFTER_THE_CHECK = ("SELECT * FROM scans WHERE", "SELECT COUNT(*) n, COUNT(DISTINCT thread_id) t", "SELECT * FROM sync_state WHERE",
+                               "SELECT id, kind FROM sync_run WHERE", "SELECT 1 FROM scans WHERE", "SELECT finished_at FROM sync_run WHERE")
+
+    def setUp(self):
+        super().setUp()
+        for k in range(12):
+            self.mb.add(f"{k:08x}", labels=("INBOX", "STARRED"), age_days=k + 1)
+
+    def traced(self, on_first_freshness_statement=None):
+        ro = self.mb.readonly()
+        statements = []
+        state = {"checks": 0, "fired": False}
+
+        def trace(statement):
+            statements.append(statement)
+            if "data_version" in statement:
+                state["checks"] += 1
+            elif state["checks"] >= 2 and not state["fired"] and on_first_freshness_statement is not None:
+                state["fired"] = True
+                on_first_freshness_statement()
+
+        ro.conn.set_trace_callback(trace)
+        try:
+            res = attention.compute(ro, ACCOUNT, now=NOW, limit=100)
+        finally:
+            ro.close()
+        return res, statements
+
+    def test_nothing_that_builds_an_item_is_read_after_the_final_check(self):
+        res, statements = self.traced()
+        last = max(i for i, st in enumerate(statements) if "data_version" in st)
+        after = statements[last + 1:]
+        self.assertTrue(after)  # the advisory freshness reads do happen there
+        for st in after:
+            self.assertTrue(st.lstrip().startswith(self.ALLOWED_AFTER_THE_CHECK), st[:80])
+            self.assertNotIn("message_labels", st)
+            self.assertNotIn("class_rules", st)
+            self.assertNotIn("message_class", st)
+        self.assertEqual(len(res["items"]), 12)
+
+    def test_a_write_right_after_the_final_check_neither_blocks_nor_changes_the_list_but_may_change_the_warnings(self):
+        before = self.mb.compute(limit=100)
+        writer = sqlite3.connect(self.mb.path, timeout=0.5)
+        self.addCleanup(writer.close)
+        outcome = []
+
+        def write_after_the_check():
+            try:
+                writer.execute("INSERT OR IGNORE INTO message_labels VALUES (?,?,?)", (ACCOUNT, "00000001", "IMPORTANT"))
+                writer.execute("INSERT INTO scans (account, mode, status, started_at) VALUES (?, 'full', 'interrupted', '2026-10-21T11:55:00Z')", (ACCOUNT,))
+                writer.commit()
+                outcome.append("committed")
+            except sqlite3.OperationalError as exc:
+                outcome.append(str(exc))
+
+        res, _ = self.traced(write_after_the_check)
+        self.assertEqual(outcome, ["committed"])  # the report holds no lock between its statements
+        self.assertEqual(res["items"], before["items"])  # the list is the state that was checked ...
+        self.assertEqual(res["snapshot"], before["snapshot"])
+        self.assertIn("INDEX_PARTIAL", res["warnings"])  # ... while the advisory warnings already show the newer state
+        self.assertNotIn("INDEX_PARTIAL", before["warnings"])
+
+    def test_the_warnings_are_not_part_of_the_snapshot_or_the_cursor_validity(self):
+        first = self.mb.compute(limit=5)
+        self.mb.sql("INSERT INTO scans (account, mode, status, started_at) VALUES (?, 'full', 'interrupted', '2026-10-21T11:55:00Z')", ACCOUNT)
+        second = self.mb.compute(limit=5, cursor=first["next_cursor"])
+        self.assertIn("INDEX_PARTIAL", second["warnings"])
+        self.assertEqual(len(second["items"]), 5)
+
+
 class ReadOnlyConnectionTests(MailboxCase):
     def test_a_write_through_the_engine_connection_is_impossible(self):
         self.mb.add(labels=("INBOX", "STARRED"))

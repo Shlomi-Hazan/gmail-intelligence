@@ -1,11 +1,11 @@
 # M8A-1: attention engine and `mailbox attention` (metadata only, read-only)
 
-> **Status: implemented on a feature branch against synthetic data only, pending owner review (tracking issue #51, umbrella #23).** Real Gmail acceptance has NOT occurred. The ranking weights below are **PROVISIONAL** until the synthetic evaluation ([ATTENTION-EVALUATION.md](ATTENTION-EVALUATION.md)) is reviewed and approved by the owner. The retained-thread budget (proposed 250,000) is **not approved** until the measured peak RSS is reviewed. There are no Gmail links and no link flags in this milestone; the dashboard screen is a separate issue (#53).
+> **Status: implemented on a feature branch against synthetic data only, pending independent code review (tracking issue #51, umbrella #23).** The owner approved the ranking weights and thresholds below and a retained-thread budget of 250,000 **for experimental algorithm v1 only**: this is NOT validated real-world accuracy, the output keeps the label `PROVISIONAL` for the weights, and real Gmail acceptance has NOT occurred. Evidence and measurements: [ATTENTION-EVALUATION.md](ATTENTION-EVALUATION.md). There are no Gmail links and no link flags in this milestone, and no message identifiers are shown; the dashboard screen is a separate issue (#53).
 
 ## 1. What it is and is not
 A local, deterministic, explainable list of messages that **may** deserve attention, built only from metadata that the index already stores: the STARRED and IMPORTANT labels, the unread flag and received date, and the existing M3 classification (rules only). Findings are recommendations ("possibly needs attention"), never guaranteed detections; the absence of a finding proves nothing. It reads no subject, snippet, body or attachment, contacts no Gmail API, needs no OAuth or Keychain, writes nothing, and changes no schema (v7).
 
-## 2. Ranking (algorithm version 1, weights PROVISIONAL)
+## 2. Ranking (experimental algorithm version 1; weights approved for v1 only, not validated)
 Three separate axes. Only the first one orders the list.
 
 | Axis | Meaning | Values |
@@ -44,10 +44,12 @@ account -> candidate selection -> exclusions -> classification -> scoring -> fil
 * **Pagination.** Page size 25 (max 100).
 
 ## 4. Complete results or explicit failure
-Nothing is ever truncated or dropped because of its age or the size of the mailbox. Only messages that pass the threshold are kept, one record per thread. If the number of kept threads exceeds `RETAINED_THREAD_BUDGET`, the command fails with `RESULT_INCOMPLETE` and shows **no items**; no partial result is ever presented as complete. The failure depends only on the set of kept threads, not on row order. The budget in the code (250,000 retained threads, measured at about 0.72 KB of peak RSS per thread) is **proposed and not approved**; the owner decides after reviewing the measurements in [ATTENTION-EVALUATION.md](ATTENTION-EVALUATION.md).
+Nothing is ever truncated or dropped because of its age or the size of the mailbox. Only messages that pass the threshold are kept, one record per thread. If the number of kept threads exceeds `RETAINED_THREAD_BUDGET`, the command fails with `RESULT_INCOMPLETE` and shows **no items**; no partial result is ever presented as complete. The failure depends only on the set of kept threads, not on row order. The budget in the code is 250,000 retained threads, approved by the owner for **experimental v1**. Measured at exactly the budget on synthetic data (one machine): first page 3.3-5.5 s, absolute peak RSS 198-215 MB, incremental 179-195 MB; see [ATTENTION-EVALUATION.md](ATTENTION-EVALUATION.md) for the environment and limits. With `--no-collapse` the budget counts messages.
 
 ## 5. Consistent reads
 The index is opened with `ReadOnlyIndex`. `PRAGMA data_version` is read on the **same** connection before and after all batched reads; any change (another connection committed) discards the work and retries, at most twice, then fails with `INDEX_CHANGED_DURING_READ`. Every read is a short, fully fetched statement: a long read transaction would block the synchronisation writer ("database is locked"), so none is ever held. No temporary files are created (`temp_store=MEMORY`, index-ordered queries).
+
+**What the consistency check covers, and what it does not.** The check wraps everything that produces the list: the rules, the candidate streams, the classification, the scores, the totals and the snapshot. The items, the totals and the snapshot are therefore one consistent state, and page details are built from the in-memory records (no further database read). The `warnings`, `freshness.as_of` and `freshness.sync_state` fields are read AFTER the final check, in a few short statements on the same read-only connection, and may describe a state slightly newer than the items. They are advisory (they warn and never block), are not part of the snapshot, and are deliberately outside the check so that the report neither widens its read window nor holds a lock that would block the synchronisation writer. A write that lands between the final check and the return is not detectable by any design.
 
 ## 6. Snapshot and cursor
 `snapshot` is a SHA-256 over: the algorithm and taxonomy versions, the account, the ruleset hash, the reference day, the normalised parameters (sort, signals, threshold, collapse, sender limit, privacy mode), every visible field of **every** item of the full ordered list (including a one-way hash of the sender), and the totals. Page size, warnings and `as_of` are not part of it.
@@ -64,4 +66,6 @@ JSON and text, both from the same function. Per item: rank, score, tier, evidenc
 * The personal-versus-automated signal is weak without user rules: only the sender's local part, Gmail's tabs and the user's own rules are available. Gmail's IMPORTANT is an automatic guess. Starred mail may be old and forgotten; the unread flag is as old as the last synchronisation.
 * A message may have changed or disappeared since the last sync; the output states `as_of` and the sync state.
 * Without a message id or a link the item has to be found by date and sender domain; links are a separately gated, unverified feature (#52).
-* The retained-thread budget and the weights are provisional (see above).
+* The retained-thread budget (250,000) and the weights are approved for experimental v1 only; they are not validated on a real mailbox.
+* No message identifier is shown in v1 (a decision of the owner).
+* The sender group is the full normalized address as stored by the scanner (lowercase, trimmed). The engine applies no Unicode normalization, so visually identical addresses written in different Unicode forms, plus-addressing variants and addresses differing in a trailing space count as different senders.

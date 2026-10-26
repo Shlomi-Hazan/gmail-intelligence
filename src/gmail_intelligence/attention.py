@@ -7,7 +7,7 @@ Design: docs/ATTENTION.md. In short:
   * Results are complete or the call fails (`RESULT_INCOMPLETE`): nothing is truncated by age or size. Reads are short and fully fetched (a long read
     transaction would block the sync writer) and are validated with `PRAGMA data_version` on ONE connection; a change means a bounded retry, then an error.
   * Pagination is stateless: an opaque cursor carries a snapshot digest of the whole visible result; any change fails explicitly with no items.
-All weights are PROVISIONAL (docs/ATTENTION.md, docs/ATTENTION-EVALUATION.md).
+The weights are approved for EXPERIMENTAL v1 only and are not validated on a real mailbox, hence the output label PROVISIONAL (docs/ATTENTION.md, docs/ATTENTION-EVALUATION.md).
 """
 import hashlib
 import heapq
@@ -22,7 +22,7 @@ from gmail_intelligence import index as idx
 
 ALGORITHM_VERSION = 1
 WEIGHTS_STATUS = "PROVISIONAL"
-RETAINED_THREAD_BUDGET = 250_000  # PROPOSED, NOT APPROVED: measured ~0.72 KB peak RSS per retained thread (tests/attention_bench.py, docs/ATTENTION-EVALUATION.md); the owner decides
+RETAINED_THREAD_BUDGET = 250_000  # approved by the owner for EXPERIMENTAL v1 only (measured ~0.72 KB peak RSS per retained thread; docs/ATTENTION-EVALUATION.md); not validated on a real mailbox
 BATCH = 2000
 MAX_RETRIES = 2
 DEFAULT_LIMIT, MAX_LIMIT = 25, 100
@@ -56,7 +56,7 @@ class AttentionError(Exception):
 
 @dataclass(frozen=True)
 class Weights:
-    """PROVISIONAL ranking weights (algorithm version 1)."""
+    """Ranking weights of EXPERIMENTAL algorithm version 1 (approved for v1 only; not validated on a real mailbox)."""
     star: int = 50
     owner_cap: int = 70
     rule: tuple = (("LOW", 20), ("MEDIUM", 40), ("HIGH", 60))

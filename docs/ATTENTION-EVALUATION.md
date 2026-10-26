@@ -1,8 +1,10 @@
 # M8A-1: synthetic evaluation and measurements
 
-> **Status: evidence for the owner's review of issue #51; nothing here is approved.** The ranking weights stay **PROVISIONAL**. The retained-thread budget in the code (250,000) is **PROPOSED, NOT APPROVED**. All data are synthetic; no Gmail, OAuth, Keychain or personal index was involved. The numbers below say how the code behaves on invented data; they do **not** show that the ranking is useful for a real mailbox, and nothing here is live Gmail acceptance.
+> **Status: the owner approved, for EXPERIMENTAL algorithm v1 only, the ranking weights and thresholds and a retained-thread budget of 250,000. This is NOT validated real-world accuracy and NOT live Gmail acceptance.** The output keeps the label `PROVISIONAL` for the weights because they have not been validated on a real mailbox. All data below are synthetic; no Gmail, OAuth, Keychain or personal index was involved. The numbers say how the code behaves on invented data; they do not show that the ranking is useful for a real mailbox. Merge still needs an independent code review and CI results (the CI workflow is manual-only by policy).
 
-Environment of the measurements: macOS (arm64, 11 cores, 18 GB), Python 3.13.5, SQLite 3.45.3, rollback-journal mode (the index never uses WAL). Reproduce with `.venv/bin/python -I tests/attention_bench.py` and `.venv/bin/python -I tests/attention_eval.py`.
+Environment of every measurement: one Apple-silicon Mac (macOS, arm64, 11 cores, 18 GB RAM), Python 3.13.5, SQLite 3.45.3, rollback-journal mode (the index never uses WAL), the machine in normal use (no other load was controlled or measured). Reproduce with `.venv/bin/python -I tests/attention_bench.py` and `.venv/bin/python -I tests/attention_eval.py`.
+
+Limitations: one machine and one Python/SQLite build; synthetic distributions of labels, threads and senders (a real mailbox differs); three repetitions per configuration, so the ranges are indicative, not statistical; `ru_maxrss` is a process high-water mark (it includes about 19 MB of interpreter and imports, listed separately); wall times vary by several tenths of a second between runs; nothing was measured on a real mailbox or a loaded machine.
 
 ## A. Performance and peak RSS (complete computation)
 
@@ -21,12 +23,22 @@ Method (`tests/attention_bench.py`): the synthetic index is built first; each sc
 
 Reading: memory grows linearly with the number of RETAINED threads, about **0.72 KB per thread** at the peak (sorting and hashing included); the size of the mailbox matters only for time, because messages below the score threshold are never retained. Typical mailboxes retain a few percent. The failure case stops before sorting and hashing, so it peaks lower than a successful run of the same size.
 
-## B. Proposed retained-thread budget (for the owner's decision)
+## B. Retained-thread budget: 250,000 (approved for experimental v1)
 
-* **Proposed: 250,000 retained threads**, about 180 MB of peak RSS by interpolation between the 200,000 (147 MB) and 400,000 (286 MB) measurements, and about 4-5 s per page at the limit.
-* The previous placeholder (500,000) measured 356 MB and about 10 s per page; it is a defensible alternative on a machine with ample memory.
-* Over the budget the command fails with `RESULT_INCOMPLETE` and shows no items; the user narrows with `--signal` or `--min-tier`. Nothing is truncated.
-* Not measured: other machines, other Python or SQLite builds, a real mailbox's thread and sender distribution. The budget is a constant; the owner can change it.
+Measured at EXACTLY the budget, with the code's constant, on a synthetic index of 250,000 messages that are all retained (the worst case), three runs per configuration (`first page` is one complete computation; the second column is the next page through its cursor, which recomputes everything):
+
+| Configuration | Result | First page | Cursor page | Peak RSS, absolute | Peak RSS, incremental |
+|---|---|---|---|---|---|
+| 250,000 retained threads, sender limit off | complete | 4.3-4.6 s | 3.9-4.4 s | 198-207 MB | 179-188 MB |
+| 250,000 retained threads, default sender limit (3) | complete | 3.3-5.5 s | 3.2-4.0 s | 201-215 MB | 182-195 MB |
+| **Overall, exactly at the budget** | complete | **3.3-5.5 s** | 3.2-4.4 s | **198-215 MB** | **179-195 MB** |
+| 250,001 retained threads (one over the budget) | `RESULT_INCOMPLETE`, no items | 2.7-3.6 s to the failure | - | 152-161 MB | 132-142 MB |
+
+The earlier interpolation ("about 180 MB") was slightly low; the measured values above replace it. The increment is the high-water mark after minus before the computation; the absolute value adds about 19 MB of interpreter and imports.
+
+* **Decision (owner):** `RETAINED_THREAD_BUDGET = 250,000` for **experimental v1**. It was reached on synthetic data on one machine; it is not validated on a real mailbox. The constant can be changed later without a schema change.
+* Over the budget the command fails with `RESULT_INCOMPLETE` and shows no items; the user narrows with `--signal` or `--min-tier`. Nothing is truncated. With `--no-collapse` the budget counts messages instead of threads.
+* A 500,000 budget measured 356 MB incremental and about 10 s per page (section A); it is not used.
 
 ## C. Ranking evaluation
 
@@ -89,6 +101,7 @@ Worst case: tau 0.975, top-25 overlap 25/25, intent pairs kept 45/47.
 | 5,000 look-alikes from 5,000 senders, each Gmail-IMPORTANT + unread (score 35) among 25 starred | 100 | 25 | 5025 |
 
 ### C5. Findings the owner should weigh
+* The owner approved these weights and thresholds for **experimental algorithm v1** (the output still says `PROVISIONAL`: they are not validated on a real mailbox, and changing them later bumps `ALGORITHM_VERSION`).
 * The order is stable: no single +/-20% change of a weight moves the top 25 at all on the 600-message corpus (overlap 25/25) and the worst rank correlation is 0.975.
 * The only weight whose -20% change breaks intent pairs is the cap on inferred points (32 instead of 40): "important + unread from a personal sender" then no longer scores strictly above "important + unread from an unknown sender". Moving that cap is the most consequential single change.
 * A flood of look-alike mail can fill the LOW and MEDIUM part of the list but can never outrank a starred message, because the star adds owner points that no inferred signal or penalty can reduce. With the default sender limit (3) one sender cannot occupy more than three places. Many different forged senders each carrying Gmail's IMPORTANT guess can still fill everything below the starred messages: the sender limit is not a defence against that, and the evidence class (`GMAIL_HEURISTIC`) is what tells the reader how weak those items are.
