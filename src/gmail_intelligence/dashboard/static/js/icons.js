@@ -3,6 +3,7 @@ import { s } from "./util.js";
 
 const PATHS = {
   overview: ["M4 4h7v7H4z", "M13 4h7v4h-7z", "M13 11h7v9h-7z", "M4 14h7v6H4z"],
+  attention: ["M6 4v16", "M6 5h11l-2.5 3.5L17 12H6"],
   trends: ["M4 4v16h16", "M7 15l4-4 3 3 5-6"],
   senders: ["M12 11.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z", "M5 20c0-3.4 3-5.5 7-5.5s7 2.1 7 5.5"],
   cleanup: ["M4 7h16v3H4z", "M5.5 10v9h13v-9", "M10 14h4"],

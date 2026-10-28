@@ -24,6 +24,7 @@ hidden unless you start the server with `--reveal-senders` / `--reveal-names`. T
 | Senders | leading domains or masked addresses, and the domains behind subscription-like mail |
 | Cleanup | what the cleanup policy would **recommend** (nothing is applied) and the history recorded by the local M4 audit ledger, with the audit chain status |
 | Organization | the read-only M5 label analysis: hygiene findings, recommendation / rule / filter-suggestion counts, label plans by state |
+| Action Center | M8A-3: messages that **may** deserve attention, ranked by the M8A-1 engine ([ATTENTION.md](ATTENTION.md)): score and tier, the signals behind each item with their basis, evidence and uncertainty flags, filters (signal, minimum tier, sender limit, one item per thread, low scores), sort, cursor paging, freshness and unhealthy-sync warnings, and explicit states for a list that changed, was too large or whose index kept changing. Senders are masked by default; there are no Gmail links, no message identifiers and no action buttons |
 | Data | index completeness, last full scan and its age, classification freshness, limits of an offline snapshot, privacy facts |
 
 Every chart has a text equivalent (a keyboard-operable readout and a "View as table" alternative). Every panel loads on its own, so one failing request shows an error inside that panel only.
@@ -68,6 +69,7 @@ Envelope: `{"section", "data", "basis", "explain": [CODES], "as_of", "index": {"
 | `cleanup/summary` | | candidate outcomes, decisive reasons, policy, protection rules |
 | `cleanup/history` | `recent=1..100` | plans, approvals, executions with item outcomes, audit chain status and recent events |
 | `organization` | | label counts, hygiene / recommendation / rule / filter summaries, label plans by state |
+| `attention` | `limit=1..100`, `sort=priority|date|oldest`, `signal=all|starred|important|unread|rule`, `tier=any|low|medium|high`, `sender_limit=0..10`, `collapse=1|0`, `low=0|1`, `cursor` (opaque, strict grammar) | M8A-3, additive: the payload of `mailbox attention --json` for the same snapshot and parameters (not the envelope above). Closed failures with their own codes and no items: `409 SNAPSHOT_CHANGED`, `400 CURSOR_INVALID`, `422 RESULT_INCOMPLETE`, `503 INDEX_CHANGED_DURING_READ`; any other failure is the generic `500 INTERNAL` |
 
 Unknown or repeated parameters are rejected. Whether addresses or names are revealed is a server-start choice; a client cannot ask for more.
 

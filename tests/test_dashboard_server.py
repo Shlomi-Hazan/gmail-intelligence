@@ -276,6 +276,8 @@ class ApiContractTests(ServerBase):
             if route == "meta":
                 self.assertEqual((body["read_only"], body["schema"], body["languages"]), (True, 7, ["en", "he"]))
                 self.assertNotIn(ACCT, json.dumps(body))
+            elif route == "attention":  # M8A-3: the engine's own payload (identical to `mailbox attention --json`); its contract is tested in test_dashboard_attention.py
+                self.assertEqual(body["section"], "attention")
             else:
                 self.assertEqual(set(body), {"section", "data", "basis", "explain", "as_of", "index"}, route)
 

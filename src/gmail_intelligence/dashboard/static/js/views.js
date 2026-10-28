@@ -5,6 +5,7 @@ import { t, tn, code, int, pct, bytes, day, dateTime, month, monthLong } from ".
 import { panel, kpis, rank, notice, empty, how, freshnessNotice, ageText, skeleton, errorState, badge, confidenceBadge } from "./components.js";
 import { stackedBars, shareBar, legend, miniBars, tableAlt, swatch, TYPE_ORDER } from "./charts.js";
 import { icon } from "./icons.js";
+import { attentionScreen } from "./attention.js";
 
 const put = (el, ...children) => el.replaceChildren(...children.flat(Infinity).filter(Boolean));
 const view = (...children) => h("div", { class: "view" }, children);
@@ -224,7 +225,7 @@ export const cleanupScreen = () => whenData(cleanup, { gate: false });
 export const organizationScreen = () => whenData(organization, { gate: false });
 
 export const SCREENS = [
-  { id: "overview", icon: "overview", render: overview }, { id: "trends", icon: "trends", render: trends }, { id: "senders", icon: "senders", render: senders },
+  { id: "overview", icon: "overview", render: overview }, { id: "attention", icon: "attention", render: attentionScreen }, { id: "trends", icon: "trends", render: trends }, { id: "senders", icon: "senders", render: senders },
   { id: "cleanup", icon: "cleanup", render: cleanupScreen }, { id: "organization", icon: "organization", render: organizationScreen }, { id: "data", icon: "data", render: data },
 ];
 export { icon, swatch, TYPE_ORDER, month, monthLong, ApiError };
