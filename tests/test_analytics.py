@@ -318,6 +318,7 @@ class ReadOnlyTests(AnalyticsBase):
             ro.conn.execute("CREATE TABLE t (a)")
         ro.close()
 
+
     def test_missing_corrupt_and_future_files(self):
         with self.assertRaises(idx.IndexProblem):
             idx.ReadOnlyIndex(self.tmp / "nope.sqlite3")

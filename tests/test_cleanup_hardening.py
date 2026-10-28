@@ -556,6 +556,8 @@ class ProcessTests(PlanBase):
             self.fail("child never reached the transaction")
         os.kill(kid.pid, signal.SIGKILL)
         kid.wait()
+        kid.stdout.close()
+        kid.stderr.close()
         self.assertEqual(cp.get_plan(self.index, ACCT, p["plan_id"])["state"], "REVIEWED")
         self.assertEqual(self.count("cleanup_approval"), 0)
         self.assertNotIn("PLAN_APPROVED", self.events())

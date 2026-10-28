@@ -234,6 +234,7 @@ class ConcurrencyAndIsolationTests(ServerBase):
         self.assertTrue(statuses <= {200, 503}, statuses)  # a busy database yields a clean 503, never a crash or a partial answer
         self.assertEqual(self.api("overview")[2]["data"]["messages"], 28 + 20)
 
+
     def test_a_locked_database_gives_a_safe_503(self):
         other = sqlite3.connect(self.index.path, timeout=0)
         other.execute("BEGIN EXCLUSIVE")  # a writer holding the database exclusively (for example a scan committing)

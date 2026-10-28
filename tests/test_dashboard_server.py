@@ -280,7 +280,11 @@ class ApiContractTests(ServerBase):
                 self.assertEqual(set(body), {"section", "data", "basis", "explain", "as_of", "index"}, route)
 
     def test_responses_match_the_library(self):
-        lib = analytics.Analytics(idx.ReadOnlyIndex(self.index.path), ACCT, now=datetime.now(timezone.utc)).volume()
+        ro = idx.ReadOnlyIndex(self.index.path)
+        try:
+            lib = analytics.Analytics(ro, ACCT, now=datetime.now(timezone.utc)).volume()
+        finally:
+            ro.close()
         api = self.api("volume")[2]
         self.assertEqual(api["data"], lib["data"])
 
