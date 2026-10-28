@@ -136,8 +136,12 @@ class _Findings:
 def _connect(path, immutable=False):
     uri = Path(os.path.abspath(path)).as_uri() + "?mode=ro" + ("&immutable=1" if immutable else "")
     conn = sqlite3.connect(uri, uri=True, timeout=1.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only = ON")
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+    except BaseException:
+        conn.close()  # a file that cannot even be configured (damaged header) must not leave an open connection behind
+        raise
     return conn
 
 
@@ -175,14 +179,21 @@ def _file_checks(path, deep, f, out):
     if aux:
         f.add("INDEX_AUX_FILES_PRESENT", "WARN", "UNKNOWN", count=len(aux))
         return None
+    conn = None
     try:
         conn = _connect(path)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
     except sqlite3.Error:
+        if conn is not None:
+            conn.close()
         f.add("INDEX_UNREADABLE_OR_CORRUPT", "CRITICAL", "OBSERVED")
         out["local_database"].update(status="PROBLEMS_DETECTED", sqlite_integrity="FAILED")
         return None
+    except BaseException:
+        if conn is not None:
+            conn.close()
+        raise
     db = out["local_database"]
     db["schema_version"] = version if isinstance(version, int) else None
     problems = 0
@@ -204,6 +215,9 @@ def _file_checks(path, deep, f, out):
         db.update(status="PROBLEMS_DETECTED", sqlite_integrity="FAILED")
         conn.close()
         return None
+    except BaseException:
+        conn.close()
+        raise
     # two separate conclusions: is the FILE structurally sound, and is it a schema this tool understands
     db["sqlite_integrity"] = "FAILED" if problems else "OK"
     schema = "SUPPORTED" if version == CURRENT_SCHEMA else "UNRECOGNISED" if version == 0 else "OLDER" if isinstance(version, int) and version < CURRENT_SCHEMA else "NEWER"

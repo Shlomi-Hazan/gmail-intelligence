@@ -790,13 +790,20 @@ class ReadOnlyIndex(Index):
         if not os.path.isfile(self.path):
             raise IndexProblem("no local index yet; run `mailbox scan --limit 100` first")
         uri = Path(os.path.abspath(self.path)).as_uri() + "?mode=ro"
+        conn = None
         try:
-            self.conn = sqlite3.connect(uri, uri=True)
+            conn = self.conn = sqlite3.connect(uri, uri=True)
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA query_only = ON")
             version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         except sqlite3.DatabaseError:
+            if conn is not None:  # connect() itself can raise (no connection exists yet); otherwise an unsuccessful open never leaves one behind
+                conn.close()
             raise IndexProblem("the local index file is unreadable or corrupt; nothing was changed") from None
+        except BaseException:
+            if conn is not None:
+                conn.close()
+            raise
         self.migrated_from = self.backup_path = None
         self.lease = None
         if version != SCHEMA_VERSION:

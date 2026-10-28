@@ -21,7 +21,6 @@ from test_analytics import fixture_messages  # noqa: E402
 from test_dashboard_server import TOKEN, ServerBase, _loopback_only  # noqa: E402
 
 from gmail_intelligence import analytics, dashboard_server as ds, index as idx  # noqa: E402
-from leak_support import isolate_known_leaks  # noqa: E402
 
 
 def raw(server, data, read=65536):
@@ -235,7 +234,6 @@ class ConcurrencyAndIsolationTests(ServerBase):
         self.assertTrue(statuses <= {200, 503}, statuses)  # a busy database yields a clean 503, never a crash or a partial answer
         self.assertEqual(self.api("overview")[2]["data"]["messages"], 28 + 20)
 
-    @isolate_known_leaks
 
     def test_a_locked_database_gives_a_safe_503(self):
         other = sqlite3.connect(self.index.path, timeout=0)

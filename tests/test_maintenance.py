@@ -27,7 +27,6 @@ from sync_support import ACCOUNT, HERE, SRC, SyncCase, config, fast_limiter, fil
 import m7_support
 from fake_history import FakeHistoryMailbox, standard_mailbox
 from gmail_intelligence import cleanup_plans as cp, cli, maintenance, sync
-from leak_support import isolate_known_leaks  # noqa: E402
 
 SEVERITIES = {"INFO": 3, "WARN": 2, "ERROR": 1, "CRITICAL": 0}
 LEAK = "S3cretPersonalValue99"
@@ -117,7 +116,6 @@ class HealthyTests(Case):
 
 
 class SqliteIntegrityTests(Case):
-    @isolate_known_leaks
     def test_missing_unreadable_and_garbage_files(self):
         self.index.close()
         os.remove(self.db)
@@ -174,7 +172,6 @@ class SqliteIntegrityTests(Case):
         self.index = idx.Index.__new__(idx.Index)
         self.index.conn = sqlite3.connect(":memory:")
 
-    @isolate_known_leaks
 
     def test_integrity_and_schema_are_separate_conclusions_for_every_schema_state(self):
         expect = {7: ("OK", "SUPPORTED", "HEALTHY")}
@@ -217,7 +214,6 @@ class SqliteIntegrityTests(Case):
         self.assertEqual(data["properties"]["local_database"]["status"], "UNSUPPORTED_SCHEMA")
         self.assertEqual(before, tree_state(config.app_dir()))
 
-    @isolate_known_leaks
 
     def test_a_damaged_page_is_detected_by_the_deep_check_without_revealing_values(self):
         self.sql(("UPDATE messages SET sender=?", (f"{LEAK}@private.example.test",)))
@@ -832,7 +828,6 @@ class CliTests(Case):
             self.assertNotIn(ACCOUNT, blob)
             self.assertNotIn(str(config.app_dir()), blob)
 
-    @isolate_known_leaks
 
     def test_it_runs_on_a_corrupt_or_old_or_missing_index_without_a_traceback(self):
         Path(config.index_path()).write_bytes(b"garbage" * 500)
