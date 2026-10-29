@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -105,6 +106,35 @@ class ParityTests(AttentionBase):
         scan = self.index.recent_scans(ACCT, 1)[0]["id"]
         self.index.save_batch(ACCT, scan, [mail(9900, ["INBOX", "STARRED"], sender="late@new.example.test", days=1)])
         self.assertNotEqual(first["snapshot"], self.api("attention?limit=5")[2]["snapshot"])
+
+
+class CacheTests(AttentionBase):
+    def test_a_cached_response_cannot_hide_a_changed_snapshot_even_when_size_and_mtime_are_unchanged(self):
+        first = self.api("attention?limit=5&sender_limit=0")[2]
+        query = f"attention?limit=5&sender_limit=0&cursor={first['next_cursor']}"
+        self.assertEqual(self.api(query)[0], 200)  # the very request that a shared cache would now remember
+        path = self.index.path
+        stat, signature = os.stat(path), self.server.db_signature()
+        with sqlite3.connect(path) as conn:  # change what the list shows, then put the file's mtime back
+            conn.execute("DELETE FROM message_labels WHERE account=? AND message_id=(SELECT id FROM messages WHERE account=? ORDER BY id DESC LIMIT 1) AND label_id='STARRED'", (ACCT, ACCT))
+            deleted = conn.execute("SELECT changes()").fetchone()[0]
+        conn.close()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(deleted, 1)
+        self.assertEqual(self.server.db_signature(), signature)  # precondition: size and mtime cannot tell the shared cache that anything changed
+        status, _, body = self.api(query)
+        self.assertEqual(status, 409, "a cached 200 hid the change")  # the engine validated the CURRENT snapshot
+        self.assertEqual(body["error"]["code"], "SNAPSHOT_CHANGED")
+        self.assertNotIn("items", body)
+        self.assertNotEqual(self.api("attention?limit=5&sender_limit=0")[2]["snapshot"], first["snapshot"])
+
+    def test_attention_responses_are_never_stored_in_the_shared_cache(self):
+        for query in ("attention?limit=5", "attention?limit=5&sort=date", "attention?limit=3&signal=starred"):
+            self.assertEqual(self.api(query)[0], 200)
+            self.assertEqual(self.api(query)[0], 200)
+        self.assertEqual([k for k in self.server._cache if k[0] == "attention"], [])
+        self.assertEqual(self.api("overview")[0], 200)  # the other routes keep the cache
+        self.assertTrue([k for k in self.server._cache if k[0] == "overview"])
 
 
 class AccessTests(AttentionBase):

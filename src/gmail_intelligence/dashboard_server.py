@@ -133,16 +133,21 @@ class DashboardServer(http.server.ThreadingHTTPServer):
             return {"app": "gmail-intelligence", "api_version": 1, "read_only": True, "schema": idx.SCHEMA_VERSION, "languages": ["en", "he"],
                     "reveal": {"senders": self.reveal_senders, "names": self.reveal_names}, "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
         section, _ = ROUTES[route]
+        if route == "attention":
+            # Never cached: the shared cache is keyed on the file's mtime and size, which is weaker than the engine's snapshot validation (a change that keeps both would
+            # hide a changed list behind a stale 200). Every request, cursor requests included, runs attention.compute so the engine validates the CURRENT snapshot.
+            ro = idx.ReadOnlyIndex(self.db_path)
+            try:
+                return self._attention(ro, params, now)
+            finally:
+                ro.close()
         key = (section, tuple(sorted(params.items())), self.db_signature(), now.strftime("%Y-%m-%d"), self.reveal_senders, self.reveal_names)
         with self._lock:
             if key in self._cache:
                 return self._cache[key]
         ro = idx.ReadOnlyIndex(self.db_path)
         try:
-            if route == "attention":
-                result = self._attention(ro, params, now)
-            else:
-                result = analytics.Analytics(ro, self.account, now=now, reveal_senders=self.reveal_senders, reveal_names=self.reveal_names).section(section, **params)
+            result = analytics.Analytics(ro, self.account, now=now, reveal_senders=self.reveal_senders, reveal_names=self.reveal_names).section(section, **params)
         finally:
             ro.close()
         with self._lock:
@@ -150,7 +155,6 @@ class DashboardServer(http.server.ThreadingHTTPServer):
                 self._cache.clear()
             self._cache[key] = result
         return result
-
 
     def _attention(self, ro, params, now):
         """The attention list through the library function the CLI uses. Only its closed failures become API failures; anything else is an internal error."""
