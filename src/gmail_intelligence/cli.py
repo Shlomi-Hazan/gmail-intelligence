@@ -1304,6 +1304,21 @@ def cmd_mailbox_attention(args):
     return _with_readonly_index(args, go)
 
 
+def cmd_mailbox_subscriptions(args):
+    """M9A: possible low-value subscriptions from indexed metadata, for MANUAL review. Read-only; contacts nobody; fixed-text errors."""
+    from gmail_intelligence import subscriptions
+
+    def go(index, account):
+        try:
+            res = subscriptions.compute(index, account, by=args.by, limit=args.limit, min_messages=args.min_messages, show_all=args.all, reveal_senders=args.reveal_senders)
+            out = subscriptions.as_json(res) if args.json else subscriptions.render_text(res)  # built completely before anything is printed
+        except subscriptions.ParameterError as exc:  # fixed text only; every other exception is internal and ends in the generic message
+            return _fail(exc)
+        print(out)
+        return 0
+    return _with_readonly_index(args, go)
+
+
 def cmd_cleanup_plan_impact(args):
     import json
 
@@ -1408,7 +1423,7 @@ def build_parser():
         return q
 
     mb = sub.add_parser("mailbox", help="read-only mailbox index and reports (M2)")
-    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,changes,maintenance,attention,status,report,insights,top-senders,purge}")
+    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,changes,maintenance,attention,subscriptions,status,report,insights,top-senders,purge}")
     q = account_opt(msub.add_parser("insights", help="aggregate, explainable analytics of the local index (M6A; local only, human-readable or --json)"))
     q.add_argument("section", nargs="?", default="overview", choices=("all", "freshness", "overview", "volume", "categories", "senders", "subscriptions", "cleanup-summary", "cleanup-history", "organization"))
     q.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1448,6 +1463,14 @@ def build_parser():
     q.add_argument("--reveal-senders", action="store_true", help="show full sender addresses (masked by default)")
     q.add_argument("--json", action="store_true", help="machine-readable output")
     q.set_defaults(func=cmd_mailbox_attention)
+    q = account_opt(msub.add_parser("subscriptions", help="possible low-value subscriptions from indexed metadata, for manual review (M9A; read-only, contacts nobody, extends top-senders)"))
+    q.add_argument("--by", choices=("domain", "address"), default="domain", help="group senders by domain (default) or by address")
+    q.add_argument("--limit", type=int, default=20, metavar="N", help="groups to show (1-100, default 20)")
+    q.add_argument("--min-messages", type=int, default=5, metavar="N", help="a group needs at least N messages to be assessed (2-1000, default 5)")
+    q.add_argument("--all", action="store_true", help="also list weak, ruled-out and not-enough-evidence groups, with the reason")
+    q.add_argument("--reveal-senders", action="store_true", help="show full sender addresses with --by address (masked by default)")
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_mailbox_subscriptions)
     p = msub.add_parser("sync", help="apply recent Gmail changes to the local index from the saved history checkpoint (contacts Gmail, read-only)")
     p.add_argument("--status", action="store_true", help="show the local sync state and exit (no Gmail contact)")
     p.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the logged-in account)")
