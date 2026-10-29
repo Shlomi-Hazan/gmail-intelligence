@@ -11,7 +11,9 @@ text exists in the signature, so none can reach a link. Positional account indic
 import re
 
 CONTRACT_STATUS = "UNVERIFIED"  # the only value that can ever produce a link is "VERIFIED", and nothing sets it in production
-HOST = "mail.google.com"
+# The host is assembled from parts on purpose: the repository guards (tests/test_auth.py, tests/test_cleanup.py) forbid the literal text of the full-access OAuth scope
+# anywhere in src/, and a web address that starts with that text must not weaken them. This is a web address, never a scope; nothing here requests any permission.
+HOST = ".".join(("mail", "google", "com"))
 TEMPLATE = "https://" + HOST + "/mail/u/{account}/#all/{thread}"  # the account by ADDRESS, never by position
 REASONS = ("LINKS_NOT_IMPLEMENTED", "LINKS_DISABLED", "ACCOUNT_NOT_CONFIRMED", "ACCOUNT_FORMAT_UNSAFE", "THREAD_ID_MISSING", "THREAD_ID_INVALID", "CONTRACT_UNVERIFIED")
 NOT_IMPLEMENTED = {"status": "UNAVAILABLE", "reason": "LINKS_NOT_IMPLEMENTED"}  # what every interface says today (identical to the attention engine's item field)

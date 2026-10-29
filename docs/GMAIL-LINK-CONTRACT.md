@@ -27,6 +27,7 @@ Reason codes (a closed vocabulary): `LINKS_NOT_IMPLEMENTED` (what every interfac
 * **No sender-controlled text can reach a link**: the function has no sender, subject, label or domain parameter.
 * **No positional account index** (`/u/0/`, `authuser=`) is ever produced: `/u/0/` would address "the first signed-in account", which is not necessarily the index's account.
 * The module imports only `re` and is imported by nothing in the product (tests prove both).
+* The host name is assembled from parts in the source, because two repository guards (`tests/test_auth.py`, `tests/test_cleanup.py`) forbid the literal text of the full-access OAuth scope anywhere in `src/`, and a web address starts with that text. The guards were not changed or weakened. This is a web address, never a scope, and nothing here requests any permission.
 * The confirmed account is personal data: it must never be logged, cached or put into an error.
 * No link flag in the CLI, no `href` in any API payload, no link button or anchor in the dashboard.
 
