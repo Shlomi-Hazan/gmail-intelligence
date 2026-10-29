@@ -1319,6 +1319,21 @@ def cmd_mailbox_subscriptions(args):
     return _with_readonly_index(args, go)
 
 
+def cmd_mailbox_ask(args):
+    """M11A: deterministic, allow-listed metadata question answering. Read-only; the question is never echoed or executed; fixed-text errors."""
+    from gmail_intelligence import ask
+
+    def go(index, account):
+        try:
+            res = ask.answer(index, account, args.question, reveal_senders=args.reveal_senders)
+            out = ask.as_json(res) if args.json else ask.render_text(res)  # built completely before anything is printed
+        except ask.ParameterError as exc:
+            return _fail(exc)
+        print(out)
+        return 0
+    return _with_readonly_index(args, go)
+
+
 def cmd_cleanup_plan_impact(args):
     import json
 
@@ -1423,7 +1438,7 @@ def build_parser():
         return q
 
     mb = sub.add_parser("mailbox", help="read-only mailbox index and reports (M2)")
-    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,changes,maintenance,attention,subscriptions,status,report,insights,top-senders,purge}")
+    msub = mb.add_subparsers(dest="mailbox_command", required=True, metavar="{scan,sync,changes,maintenance,attention,subscriptions,ask,status,report,insights,top-senders,purge}")
     q = account_opt(msub.add_parser("insights", help="aggregate, explainable analytics of the local index (M6A; local only, human-readable or --json)"))
     q.add_argument("section", nargs="?", default="overview", choices=("all", "freshness", "overview", "volume", "categories", "senders", "subscriptions", "cleanup-summary", "cleanup-history", "organization"))
     q.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1471,6 +1486,11 @@ def build_parser():
     q.add_argument("--reveal-senders", action="store_true", help="show full sender addresses with --by address (masked by default)")
     q.add_argument("--json", action="store_true", help="machine-readable output")
     q.set_defaults(func=cmd_mailbox_subscriptions)
+    q = account_opt(msub.add_parser("ask", help="answer an allow-listed metadata question from the local index (M11A; deterministic, no model, read-only)"))
+    q.add_argument("question", help='an English question, e.g. "Which senders email me most?"')
+    q.add_argument("--reveal-senders", action="store_true", help="show full sender addresses (masked by default)")
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_mailbox_ask)
     p = msub.add_parser("sync", help="apply recent Gmail changes to the local index from the saved history checkpoint (contacts Gmail, read-only)")
     p.add_argument("--status", action="store_true", help="show the local sync state and exit (no Gmail contact)")
     p.add_argument("--account", metavar="EMAIL", help="account in the local index (default: the logged-in account)")
