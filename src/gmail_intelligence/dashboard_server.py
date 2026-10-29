@@ -17,6 +17,7 @@ import hmac
 import http.server
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -24,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from gmail_intelligence import analytics, config, index as idx
+from gmail_intelligence import analytics, attention, config, index as idx
 
 STATIC_DIR = Path(__file__).resolve().parent / "dashboard" / "static"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8",
@@ -38,10 +39,27 @@ API_PREFIX = "/api/v1/"
 # route -> (analytics section, allowed query parameters with their validators)
 ROUTES = {"meta": None, "overview": ("overview", {}), "freshness": ("freshness", {}), "volume": ("volume", {}), "categories": ("categories", {"by": ("total", "month")}),
           "senders": ("senders", {"kind": ("domain", "address"), "limit": (1, 100)}), "subscriptions": ("subscriptions", {"limit": (1, 25)}),
-          "cleanup/summary": ("cleanup-summary", {}), "cleanup/history": ("cleanup-history", {"recent": (1, 100)}), "organization": ("organization", {})}
+          "cleanup/summary": ("cleanup-summary", {}), "cleanup/history": ("cleanup-history", {"recent": (1, 100)}), "organization": ("organization", {}),
+          # M8A-3: the attention list; the SAME library function as `mailbox attention` (no second ranking engine). Every parameter is validated against a closed set.
+          "attention": ("attention", {"limit": (1, 100), "sort": attention.SORTS, "signal": ("all",) + attention.SIGNALS, "tier": ("any",) + attention.TIERS,
+                                      "sender_limit": (0, attention.MAX_SENDER_LIMIT), "collapse": ("1", "0"), "low": ("0", "1"),
+                                      "cursor": re.compile(r"a1\.\d{8}\.[0-9a-f]{64}\.\d{1,7}\.[0-9a-f]{16}")})}
 ERRORS = {400: ("BAD_REQUEST", "the request is not valid"), 401: ("UNAUTHORIZED", "a valid session token is required"), 403: ("FORBIDDEN", "this request is not allowed"),
           404: ("NOT_FOUND", "not found"), 405: ("METHOD_NOT_ALLOWED", "this dashboard is read-only; only GET and HEAD are supported"), 421: ("BAD_HOST", "unexpected host"),
           500: ("INTERNAL", "an internal error occurred"), 503: ("INDEX_UNAVAILABLE", "the local index is unavailable")}
+# M8A-3: the attention engine's closed failures, as (HTTP status, fixed message); the code is the engine's own code and no stored text can reach these.
+ATTENTION_FAILURES = {"SNAPSHOT_CHANGED": (409, "the list changed since this page was loaded; start again"),
+                      "CURSOR_INVALID": (400, "the page cursor is not valid; start again"),
+                      "RESULT_INCOMPLETE": (422, "the list is too large to be computed completely; narrow the filters"),
+                      "INDEX_CHANGED_DURING_READ": (503, "the local index kept changing while it was read; try again")}
+
+
+class ApiFailure(Exception):
+    """A closed, fixed-text API failure with its own code (never built from stored data)."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
 
 
 def load_static(root=STATIC_DIR):
@@ -115,6 +133,14 @@ class DashboardServer(http.server.ThreadingHTTPServer):
             return {"app": "gmail-intelligence", "api_version": 1, "read_only": True, "schema": idx.SCHEMA_VERSION, "languages": ["en", "he"],
                     "reveal": {"senders": self.reveal_senders, "names": self.reveal_names}, "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
         section, _ = ROUTES[route]
+        if route == "attention":
+            # Never cached: the shared cache is keyed on the file's mtime and size, which is weaker than the engine's snapshot validation (a change that keeps both would
+            # hide a changed list behind a stale 200). Every request, cursor requests included, runs attention.compute so the engine validates the CURRENT snapshot.
+            ro = idx.ReadOnlyIndex(self.db_path)
+            try:
+                return self._attention(ro, params, now)
+            finally:
+                ro.close()
         key = (section, tuple(sorted(params.items())), self.db_signature(), now.strftime("%Y-%m-%d"), self.reveal_senders, self.reveal_names)
         with self._lock:
             if key in self._cache:
@@ -129,6 +155,20 @@ class DashboardServer(http.server.ThreadingHTTPServer):
                 self._cache.clear()
             self._cache[key] = result
         return result
+
+    def _attention(self, ro, params, now):
+        """The attention list through the library function the CLI uses. Only its closed failures become API failures; anything else is an internal error."""
+        try:
+            return attention.compute(ro, self.account, limit=params.get("limit", attention.DEFAULT_LIMIT), cursor=params.get("cursor"), sort=params.get("sort", "priority"),
+                                     signals=() if params.get("signal", "all") == "all" else (params["signal"],), min_tier=None if params.get("tier", "any") == "any" else params["tier"],
+                                     sender_limit=params.get("sender_limit", attention.DEFAULT_SENDER_LIMIT), collapse=params.get("collapse", "1") == "1",
+                                     include_low_score=params.get("low", "0") == "1", reveal_senders=self.reveal_senders, now=now)
+        except attention.AttentionError as exc:
+            raise ApiFailure(exc.code) from None
+        except attention.ParameterError:
+            raise
+        except ValueError:  # a ValueError from processing stored data is NOT a bad request
+            raise RuntimeError("internal") from None
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -163,8 +203,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not head:
             self.wfile.write(body)
 
-    def _error(self, status, head=False):
-        code, message = ERRORS[status]
+    def _error(self, status, head=False, code=None, message=None):
+        if code is None:
+            code, message = ERRORS[status]
         self._send(status, json.dumps({"error": {"code": code, "message": message}}).encode(), "application/json; charset=utf-8", head=head, close=True)
 
     def _refuse_method(self):
@@ -213,7 +254,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if key not in spec or len(values) != 1:
                 raise ValueError("unknown or repeated parameter")
             rule, value = spec[key], values[0]
-            if isinstance(rule[0], int):
+            if isinstance(rule, re.Pattern):
+                if rule.fullmatch(value) is None:
+                    raise ValueError("unsupported value")
+                params[key] = value
+            elif isinstance(rule[0], int):
                 if not (value.isascii() and value.isdigit()) or not rule[0] <= int(value) <= rule[1]:
                     raise ValueError("number out of range")
                 params[key] = int(value)
@@ -240,6 +285,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 params = self._query({} if ROUTES[route] is None else ROUTES[route][1], query)
                 payload = self.server.compute(route, {k: v for k, v in params.items()})
+            except ApiFailure as exc:
+                status, message = ATTENTION_FAILURES[exc.code]
+                return self._error(status, head, exc.code, message)
             except ValueError:
                 return self._error(400, head)
             except (idx.IndexProblem, sqlite3.OperationalError):
