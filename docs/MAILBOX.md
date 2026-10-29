@@ -18,6 +18,7 @@ gmail-intelligence mailbox sync --status      # sync state, last runs (aggregate
 gmail-intelligence index upgrade              # M7A: explicitly upgrade an older local index to schema v7 (real terminal, type UPGRADE; a private backup is made first)
 gmail-intelligence mailbox changes [--runs N] [--json]   # M7B: what each sync/scan run changed (aggregates; partial runs labelled; local, read-only)
 gmail-intelligence mailbox maintenance [--account EMAIL] [--deep] [--json]   # M7C: local integrity + backup + audit + sync health report (read-only; advisory; Gmail is never contacted)
+gmail-intelligence mailbox subscriptions [--account EMAIL] [--by domain|address] [--limit N] [--min-messages N] [--all] [--reveal-senders] [--json]   # M9A: possible low-value subscriptions to review by hand (metadata only, read-only; see SUBSCRIPTIONS.md)
 gmail-intelligence mailbox attention [--account EMAIL] [--limit N] [--cursor C] [--sort priority|date|oldest] [--signal S] [--min-tier T] [--sender-limit N] [--no-collapse] [--include-low-score] [--reveal-senders] [--json]   # M8A-1: possibly-important messages (metadata only, read-only; see ATTENTION.md)
 gmail-intelligence cleanup plan impact [--json]          # M7B: how the current index affects stored plans (every reason listed; read-only, changes nothing)
 ```
