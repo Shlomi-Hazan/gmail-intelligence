@@ -36,6 +36,7 @@ without claiming protection against concurrent changes.
 
 ## Commands (local only; `--account` avoids the Keychain lookup)
 ```bash
+gmail-intelligence cleanup discover [--account EMAIL] [--limit N] [--min-group-size N] [--min-age-days N] [--json]   # M12A: grouped, explained view of the same candidates (read-only; see CLEANUP-DISCOVERY.md)
 gmail-intelligence cleanup candidates --account EMAIL [--limit N] [--review] [--min-age-days N] [--show-ids] [--show-senders] [--by-domain]
 gmail-intelligence cleanup protect list    --account EMAIL [--show-values]
 gmail-intelligence cleanup protect add     --account EMAIL [--sender ADDRESS] [--domain DOMAIN] [--label LABEL] [--note TEXT]

@@ -1,6 +1,6 @@
 # Product roadmap: M5-M11 (planning only)
 
-> **Status: direction approved by the owner. M5A-M5E (see [LABELS.md](LABELS.md)) and M6A-M6C (see [DASHBOARD.md](DASHBOARD.md)) are implemented as local, read-only features; M7A-M7C (see [SYNC.md](SYNC.md)) are implemented and merged against synthetic data only, and so are M8A-1 (the metadata attention engine, [ATTENTION.md](ATTENTION.md)) and M8A-3 (the dashboard Action Center); M8A-2 (an inert, unverified link contract, [GMAIL-LINK-CONTRACT.md](GMAIL-LINK-CONTRACT.md)) is merged and no Gmail link exists; M9A (metadata-only subscription review, [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)) is merged; M11A (deterministic metadata question answering, [ASK.md](ASK.md); no model) is in development; M5F, M8B-M8D, M9B, M10 and M11B are NOT implemented.** Independent synthetic acceptance found one small correction still required; real Gmail acceptance has NOT occurred, a personal-index upgrade and live scanning are NOT approved, and Gmail write execution remains disabled. It adds product direction to the planning documents. It does
+> **Status: direction approved by the owner. M5A-M5E (see [LABELS.md](LABELS.md)) and M6A-M6C (see [DASHBOARD.md](DASHBOARD.md)) are implemented as local, read-only features; M7A-M7C (see [SYNC.md](SYNC.md)) are implemented and merged against synthetic data only, and so are M8A-1 (the metadata attention engine, [ATTENTION.md](ATTENTION.md)) and M8A-3 (the dashboard Action Center); M8A-2 (an inert, unverified link contract, [GMAIL-LINK-CONTRACT.md](GMAIL-LINK-CONTRACT.md)) is merged and no Gmail link exists; M9A (metadata-only subscription review, [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)) is merged; M11A (deterministic metadata question answering, [ASK.md](ASK.md); no model) is implemented and merged; **M12 — Smart Bulk Cleanup is the immediate product priority** (M12A, read-only cleanup discovery, is in development: [CLEANUP-DISCOVERY.md](CLEANUP-DISCOVERY.md)). M5F, M8B-M8D, M9B, M10 and M11B (and the M11A dashboard integration) are deferred or separately gated and NOT implemented.** Independent synthetic acceptance found one small correction still required; real Gmail acceptance has NOT occurred, a personal-index upgrade and live scanning are NOT approved, and Gmail write execution remains disabled. It adds product direction to the planning documents. It does
 > not authorize implementing any feature, any live Gmail operation, any new OAuth scope, any new dependency or any change to an existing security
 > boundary. Every milestone below needs its own explicit owner approval to start, and every increment needs its own Draft PR and review.
 > **Authority:** this document grants no authority to start M5-M11 or to perform any live Gmail operation. **Current M4 status (M4 closeout, [M4-CLOSEOUT.md](M4-CLOSEOUT.md)):** one owner-approved real single-message archive canary succeeded; live execution is disabled again (`LIVE_EXECUTION_ENABLED = False`); the write grant was revoked; real Gmail undo is NOT implemented; general live batch execution is NOT enabled; any future live operation needs fresh owner approval. The stage names M4C-B2/B3, M4C-C, M4C-D and M4D below are HISTORICAL: they describe how M4 was staged, not what remains.
@@ -154,7 +154,7 @@ API or model, no paid dependency, free-tier terms of any external service checke
 
 ### M11 — Ask Your Inbox (new)
 - **Goal and value:** ask natural-language questions about the indexed mailbox and get source-linked, evidence-based answers.
-- **M11A status:** in development (Draft PR for issue #31): `mailbox ask`, see [ASK.md](ASK.md). Deterministic allow-listed intents only; no local or external model, no content.
+- **M11A status:** implemented and merged (issue #31 closed): `mailbox ask`, see [ASK.md](ASK.md). Deterministic allow-listed intents only; no local or external model, no content. Dashboard integration of M11A, and M11B, are deferred.
 - **MVP (M11A):** a deterministic question-to-query layer over the existing metadata index (counts, senders, dates, labels). An optional local model may
   only propose a *validated query plan*, never SQL or an action. Answers list their sources and the evidence used, and say plainly when the evidence is
   insufficient.
@@ -168,6 +168,12 @@ API or model, no paid dependency, free-tier terms of any external service checke
 - **Acceptance:** adversarial-email test suite, source-linked answers, calibrated "insufficient evidence" behavior, no network (tested), no paid model.
 - **Zero Additional Cost:** free local embeddings and inference only; no paid or external model or API.
 - **Owner approval gates:** start; the model; content retrieval; any follow-up feature that acts on an answer (not planned).
+
+### M12 — Smart Bulk Cleanup (new; immediate product priority)
+- **Goal and value:** explainable, owner-approved cleanup of large volumes of unnecessary Gmail messages: discover candidate groups, review exactly what would be affected, validate safety, and only later (after separate authorization) execute in a controlled way. **M12 expands M4 (Safe Cleanup) and does not replace it:** the M4 candidate engine, protection rules, immutable plans, typed confirmations, audit and write-policy boundary stay the single source of truth, and no second cleanup policy or execution engine is introduced.
+- **Tracking:** GitHub milestone "M12 — Smart Bulk Cleanup": M12A #59 (cleanup discovery, read-only), M12B #60 (review and approval, no live execution), M12C #61 (recovery and safety, coordinated with #41 rather than duplicating it), M12D #62 (controlled bulk execution, archive-only first, each phase separately approved), M12E #63 (cleanup experience in the existing dashboard, read-only, no execution button).
+- **Status:** M12A is in development (Draft PR): `cleanup discover`. M12B-M12E are tracking only. Real Gmail acceptance has NOT occurred; live execution remains disabled (`LIVE_EXECUTION_ENABLED = False`); no Trash, permanent deletion, live undo or batch execution exists.
+- **Boundaries:** metadata only; read-only until M12D; permanent deletion is never part of M12; Trash/untrash remain separately gated; every live phase needs a new explicit owner authorization after safety acceptance; Zero Additional Cost.
 
 ## 4. Cross-cutting gates
 
@@ -184,6 +190,7 @@ API or model, no paid dependency, free-tier terms of any external service checke
 
 Numbering is kept for continuity; it is not the recommended build order.
 
+0. **Immediate priority: M12 — Smart Bulk Cleanup**, starting with the read-only M12A discovery; M12B-M12E follow only with the owner's separate approvals. The items below keep their historical order.
 1. **M4 (the only mutation path) is complete in its owner-approved reduced scope** (see [M4-CLOSEOUT.md](M4-CLOSEOUT.md)): one real single-message archive canary succeeded under explicit
    approval; live execution is disabled again; the write grant was revoked; real Gmail undo is NOT implemented; general live batch execution is NOT enabled; any future live operation
    needs fresh owner approval. *Historical (kept for the record):* this item once read "complete M4 under its own approvals", when only M4A, M4B, M4C-A and M4C-B1 were merged and the

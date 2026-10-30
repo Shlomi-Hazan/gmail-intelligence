@@ -843,6 +843,21 @@ def cmd_cleanup_candidates(args):
     return _with_index(args, go)
 
 
+def cmd_cleanup_discover(args):
+    """M12A: grouped, explained view of the cleanup candidates the M4A engine already finds. Read-only; plans and changes nothing; fixed-text errors."""
+    from gmail_intelligence import cleanup_discovery
+
+    def go(index, account):
+        try:
+            res = cleanup_discovery.compute(index, account, limit=args.limit, min_group=args.min_group_size, min_age_days=args.min_age_days)
+            out = cleanup_discovery.as_json(res) if args.json else cleanup_discovery.render_text(res)  # built completely before anything is printed
+        except cleanup_discovery.ParameterError as exc:  # fixed text only; every other exception is internal and ends in the generic message
+            return _fail(exc)
+        print(out)
+        return 0
+    return _with_readonly_index(args, go)
+
+
 def _export_ids(args, res):
     """Write up to --limit ELIGIBLE message ids (oldest first) to a new private file, as an aid for choosing plan targets."""
     from gmail_intelligence import cleanup_candidates
@@ -1571,7 +1586,7 @@ def build_parser():
     aisub = ai_p.add_subparsers(dest="ai_command", required=True, metavar="{status}")
     aisub.add_parser("status", help="show local-AI configuration; contacts nothing").set_defaults(func=cmd_classify_ai_status)
     cu = sub.add_parser("cleanup", help="safe-cleanup candidate preview and protection rules (M4A; local, read-only)")
-    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,protect,plan,approve,approval,audit,execute,exec}")
+    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,discover,protect,plan,approve,approval,audit,execute,exec}")
     q = account_opt(cusub.add_parser("candidates", help="preview archive recommendations; changes NOTHING, contacts nothing"))
     q.add_argument("--review", action="store_true", help="show the informational REVIEW_REQUIRED view instead")
     q.add_argument("--limit", type=int, default=20, metavar="N", help="example rows to list (default 20; 0 = none)")
@@ -1581,6 +1596,12 @@ def build_parser():
     q.add_argument("--by-domain", action="store_true", help="also group by sender domain")
     q.add_argument("--export-ids", metavar="FILE", help="write up to --limit ELIGIBLE message ids to a NEW private file (never inside Git)")
     q.set_defaults(func=cmd_cleanup_candidates)
+    q = account_opt(cusub.add_parser("discover", help="group the cleanup candidates with counts, estimated volume and reasons (M12A; read-only, plans and changes nothing)"))
+    q.add_argument("--limit", type=int, default=20, metavar="N", help="groups to show (1-100, default 20)")
+    q.add_argument("--min-group-size", type=int, default=5, metavar="N", help="list only groups with at least N possible candidates (1-1000, default 5)")
+    q.add_argument("--min-age-days", type=int, default=90, metavar="N", help="minimum age in days (90 or more)")
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_cleanup_discover)
     pr = cusub.add_parser("protect", help="list, add, enable, disable or remove protection rules")
     prsub = pr.add_subparsers(dest="protect_command", required=True, metavar="{list,add,enable,disable,remove}")
     q = account_opt(prsub.add_parser("list", help="show protection rules (values masked by default)"))
