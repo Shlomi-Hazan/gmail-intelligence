@@ -1,11 +1,13 @@
-"""Archive-only Gmail write transport and the narrow adapter built on it (M4C-B1). NOT used by any production command yet.
+"""Archive (and, separately, archive-undo) Gmail write transport and the narrow adapter built on it (M4C-B1, M12C.3). NOT used by any production command yet.
 
 Design:
   * A thin stdlib HTTPS transport (http.client) - no discovery client, no batch support, no generic service object.
   * Every request is checked by gmail_write_policy BEFORE building and again immediately before dispatch.
   * No redirect is ever followed, no proxy is read from the environment, nothing is retried (a mutation is sent at most once per call),
     nothing is refreshed here. An expired token stops the call; refresh/revocation are separate OAuth operations (oauth_write).
-  * The adapter exposes verify_account / message_state / thread_state / observe / archive_message only - never the connection, token or credentials.
+  * The adapter exposes verify_account / message_state / thread_state / observe / archive_message / restore_inbox only - never the connection, token or credentials.
+  * Archive and undo are SEPARATE capabilities fixed when the transport is built: `archive_message` needs "ARCHIVE", `restore_inbox` needs "UNDO", and the transport itself refuses
+    (before any dispatch) the mutation kind its capabilities do not include. A transport holds EXACTLY ONE capability (never both): `open_archive_adapter` -> ARCHIVE, `open_undo_adapter` -> UNDO.
   * Failures map to fixed codes; messages never contain tokens, ids, URLs or account identifiers.
   * Once dispatch may have begun, EVERY unclear result of the single mutation request (timeout, interruption, redirect, oversized/malformed/
     unexpected answer, any unexpected exception) is reported as UncertainOutcome, which the executor must record as UNKNOWN and reconcile; it
@@ -158,12 +160,22 @@ def _check_framing(resp, data, status):
 
 class _Transport:
     """Private. Holds the credentials and the connection factory; the only place that can reach the network."""
-    __slots__ = ("_creds", "_factory", "_sent", "_allowed", "_bound")
+    __slots__ = ("_creds", "_factory", "_sent", "_allowed", "_bound", "_caps")
 
-    def __init__(self, creds, connection_factory=None):
+    def __init__(self, creds, connection_factory=None, capabilities=("ARCHIVE",)):
+        # Archive and undo are STRICTLY separate: a transport holds exactly ONE capability. Empty, unknown, repeated, string or combined sets are refused.
+        if type(capabilities) not in (tuple, list, frozenset) or len(capabilities) != 1 or next(iter(capabilities)) not in ("ARCHIVE", "UNDO"):
+            raise ValueError("a transport takes exactly one capability: ARCHIVE or UNDO")
+        self._caps = frozenset(capabilities)  # which mutation kind this transport may send; fixed at construction
         self._creds, self._factory, self._sent = creds, connection_factory or _default_connection, 0
         self._bound = False  # a transport (its credentials and its verified state) belongs to exactly one adapter
         self._allowed = False  # mutations stay locked until the adapter's verify_account() unlocks them
+
+    def _require_capability(self, kind):
+        """Archive and undo are separately authorized: a transport built for one can never send the other (checked before any dispatch, twice)."""
+        needed = {"MESSAGE_MODIFY": "ARCHIVE", "MESSAGE_MODIFY_UNDO": "UNDO"}.get(kind)
+        if needed is not None and needed not in self._caps:
+            raise _mark(Denied("DENIED_CAPABILITY"), False)
 
     def _authorization(self):
         token = getattr(self._creds, "token", None)
@@ -183,7 +195,8 @@ class _Transport:
             kind = policy.check_request(method, url, headers, body)  # before anything else; the credential header is never part of this check
         except Denied as exc:
             raise _mark(exc, False)
-        if kind == "MESSAGE_MODIFY" and not self._allowed:
+        self._require_capability(kind)
+        if kind in policy.MUTATIONS and not self._allowed:
             raise _mark(AccountNotVerified(), False)
         if self._sent >= policy.MAX_REQUESTS:
             raise _mark(Denied("DENIED_BUDGET"), False)
@@ -195,7 +208,8 @@ class _Transport:
             kind = policy.check_request(method, url, headers, body, allow_authorization=True)  # the check that guards the wire itself (still pre-dispatch)
         except Denied as exc:
             raise _mark(exc, False)
-        mutation = kind == "MESSAGE_MODIFY"
+        self._require_capability(kind)  # also guards a direct call of _dispatch
+        mutation = kind in policy.MUTATIONS
         if mutation and not self._allowed:
             raise _mark(AccountNotVerified(), False)  # also guards a direct call of _dispatch
         self._sent += 1
@@ -234,7 +248,7 @@ def _interpret(kind, status, data):
     Every error raised here follows a complete HTTP answer, so it is marked as possibly dispatched: for a POST, even a well-formed Gmail error
     document does not prove that the mutation had no effect.
     """
-    mutation = kind == "MESSAGE_MODIFY"
+    mutation = kind in policy.MUTATIONS
     unclear = _mark(UncertainOutcome("AMBIGUOUS_RESULT") if mutation else ReadFailure(), True)
     if type(status) is not int:
         raise unclear
@@ -282,6 +296,17 @@ class ArchiveResult:
         return "<ArchiveResult>"
 
 
+class RestoreResult:
+    """What Gmail's answer to the undo mutation said: the labels after the call. NOT proof that the message was restored or that this tool did it."""
+    __slots__ = ("label_ids",)
+
+    def __init__(self, label_ids):
+        self.label_ids = label_ids
+
+    def __repr__(self):
+        return "<RestoreResult>"
+
+
 def _labels(value):
     if value is None:
         return ()  # the API omits labelIds when a message has none; valid only because the answer is otherwise complete (checked by callers)
@@ -294,9 +319,10 @@ _PROFILE = policy.BASE + "/gmail/v1/users/me/profile?fields=emailAddress"
 
 
 class ArchiveAdapter:
-    """The only object a future executor receives. Public API: verify_account, message_state, thread_state, observe, archive_message.
+    """The only object a future executor receives. Public API: verify_account, message_state, thread_state, observe, archive_message, restore_inbox.
 
-    `archive_message` is refused until `verify_account()` succeeded; a later identity/authorization problem locks it again.
+    `archive_message` / `restore_inbox` are refused until `verify_account()` succeeded; a later identity/authorization problem locks them again. Which of the two mutations
+    exists at all is decided by the capabilities of the transport the adapter was built on (archive OR undo, never both).
     """
     __slots__ = ("_t", "_expected", "_issuer")
 
@@ -382,6 +408,8 @@ class ArchiveAdapter:
         """
         if not self._verified:
             raise _mark(AccountNotVerified(), False)
+        if "ARCHIVE" not in self._t._caps:
+            raise _mark(Denied("DENIED_CAPABILITY"), False)
         try:
             url = f"{policy.BASE}/gmail/v1/users/me/messages/{policy.valid_id(message_id)}/modify?fields=id,threadId,labelIds"
         except Denied as exc:
@@ -394,6 +422,30 @@ class ArchiveAdapter:
         except (Denied, AccountNotVerified, WriteAuthError, RequestRejected, MessageNotFound, RateLimited, UncertainOutcome):
             raise  # definite non-mutations (refused before dispatch, or a validated Gmail error document) and already-uncertain outcomes
         except Exception:  # noqa: BLE001 - any other failure (including an unusable answer) after dispatch may have begun is never a clean "not applied"
+            raise _mark(UncertainOutcome("AMBIGUOUS_RESULT"), True) from None
+
+    def restore_inbox(self, message_id):
+        """Add INBOX back to exactly one message that this tool archived (a single POST with the one fixed undo body, never retried). Returns RestoreResult or raises a typed error.
+
+        Same error contract as `archive_message`: definite non-mutations (refused before dispatch, a validated Gmail error document) are typed, everything unclear after dispatch
+        may have begun is UncertainOutcome. A successful answer is NOT proof of restoration: the caller must make its own independent, execution-bound observation.
+        """
+        if not self._verified:
+            raise _mark(AccountNotVerified(), False)
+        if "UNDO" not in self._t._caps:
+            raise _mark(Denied("DENIED_CAPABILITY"), False)
+        try:
+            url = f"{policy.BASE}/gmail/v1/users/me/messages/{policy.valid_id(message_id)}/modify?fields=id,threadId,labelIds"
+        except Denied as exc:
+            raise _mark(exc, False)
+        try:
+            obj = self._call("POST", url, policy.UNDO_BODY)
+            if obj.get("id") != message_id:
+                raise UncertainOutcome("AMBIGUOUS_RESULT")
+            return RestoreResult(_labels(obj.get("labelIds")))
+        except (Denied, AccountNotVerified, WriteAuthError, RequestRejected, MessageNotFound, RateLimited, UncertainOutcome):
+            raise
+        except Exception:  # noqa: BLE001 - any other failure after dispatch may have begun is never a clean "not applied"
             raise _mark(UncertainOutcome("AMBIGUOUS_RESULT"), True) from None
 
     def observe(self, message_id, *, context):
@@ -436,13 +488,7 @@ def fetch_profile_email(creds, connection_factory=None):
     return ArchiveAdapter(_Transport(creds, connection_factory), None)._profile_email()
 
 
-def open_archive_adapter(expected_account, store, client_path, now=None, connection_factory=None):
-    """Build the adapter from the stored write authorization. LOCAL checks only: no refresh, no network, no prompt.
-
-    Needs: a stored record, a matching client file, the exact scope, the same OAuth client, the expected account and at least ten minutes of
-    access-token life. The adapter is NOT verified: `verify_account()` (a live profile read, a separately approved step) must succeed
-    before `archive_message` is possible. The expected account is compared with the live profile AND was bound to the stored record.
-    """
+def _open_adapter(expected_account, store, client_path, now, connection_factory, capabilities):
     from gmail_intelligence import oauth_write
 
     blob = store.load()
@@ -453,4 +499,21 @@ def open_archive_adapter(expected_account, store, client_path, now=None, connect
     if (blob.get("account") or "").strip().lower() != (expected_account or "").strip().lower():
         raise AccountMismatch()
     oauth_write.require_validity(creds, now)
-    return ArchiveAdapter(_Transport(creds, connection_factory), expected_account)
+    return ArchiveAdapter(_Transport(creds, connection_factory, capabilities=capabilities), expected_account)
+
+
+def open_archive_adapter(expected_account, store, client_path, now=None, connection_factory=None):
+    """Build the ARCHIVE adapter from the stored write authorization. LOCAL checks only: no refresh, no network, no prompt.
+
+    Needs: a stored record, a matching client file, the exact scope, the same OAuth client, the expected account and at least ten minutes of
+    access-token life. The adapter is NOT verified: `verify_account()` (a live profile read, a separately approved step) must succeed
+    before `archive_message` is possible. The expected account is compared with the live profile AND was bound to the stored record.
+    The transport holds the ARCHIVE capability only: this adapter can never undo.
+    """
+    return _open_adapter(expected_account, store, client_path, now, connection_factory, ("ARCHIVE",))
+
+
+def open_undo_adapter(expected_account, store, client_path, now=None, connection_factory=None):
+    """Like `open_archive_adapter`, but the transport holds the UNDO capability ONLY (it can restore INBOX on one message and can never archive). Same local checks, same stored
+    write authorization, exact scope, client identity, account and at least ten minutes of access-token life; no refresh, no network, no prompt."""
+    return _open_adapter(expected_account, store, client_path, now, connection_factory, ("UNDO",))

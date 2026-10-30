@@ -13,6 +13,10 @@ What keeps it safe, in order of strength:
   * `LiveMailbox` is final and immutable, and its wiring is re-verified before every item and right before every POST.
 The fake-only APIs and the `FakeMailbox` restrictions are unchanged; a live mailbox is refused by them and a fake mailbox is refused by the live entry points.
 
+M12C.3 adds a SECOND, independent final type, `LiveUndoMailbox`, behind its own constant `LIVE_UNDO_ENABLED` (also False, also a source constant that nothing changes, also never
+read from the environment). It wraps an adapter whose transport holds the UNDO capability only and exposes `restore_inbox` (and the same reads) but NO `archive_message`; `LiveMailbox`
+wraps an ARCHIVE-only adapter and has no `restore_inbox`. Neither switch enables the other: archive execution never authorizes undo and undo never authorizes archive.
+
 Like every in-process guard this is a barrier against mistakes and ordinary callers, not against deliberate reflection by code running in the same process.
 """
 from datetime import datetime, timezone
@@ -20,6 +24,7 @@ from datetime import datetime, timezone
 from gmail_intelligence import exec_fake_mailbox as fm, gmail_write as gw
 
 LIVE_EXECUTION_ENABLED = False
+LIVE_UNDO_ENABLED = False  # M12C.3: the independent switch of the live archive-undo path; same rules as above (a source constant, False in this build, nothing flips it)
 _CANARY_PERMIT = object()  # module-private capability: only `cleanup_canary.run_canary` passes it to the live batch entry point (a static test enforces it)
 _MINT = object()  # module-private: only `_wrap` holds it, so an ordinary caller cannot construct a LiveMailbox directly (and so cannot choose its wiring)
 
@@ -32,6 +37,14 @@ class LiveExecutionDisabled(Exception):
         super().__init__("live Gmail execution is disabled in this build")
 
 
+class LiveUndoDisabled(Exception):
+    """Live archive undo is switched off in this build. Fixed message; never ids, accounts or tokens."""
+    code = "LIVE_UNDO_DISABLED"
+
+    def __init__(self):
+        super().__init__("live Gmail archive undo is disabled in this build")
+
+
 def _utcnow():
     return datetime.now(timezone.utc)
 
@@ -39,6 +52,11 @@ def _utcnow():
 def _require_enabled():
     if LIVE_EXECUTION_ENABLED is not True:
         raise LiveExecutionDisabled()
+
+
+def _require_undo_enabled():
+    if LIVE_UNDO_ENABLED is not True:
+        raise LiveUndoDisabled()
 
 
 class LiveMailbox:
@@ -104,7 +122,7 @@ def live_wiring_ok(mailbox):
         if mailbox._test_factory is not None and type(mailbox._test_factory) is not fm._Factory:
             return False
         return (type(mailbox) is LiveMailbox and type(adapter) is gw.ArchiveAdapter and type(transport) is gw._Transport and factory is expected_factory
-                and isinstance(mailbox._account, str) and adapter._expected == mailbox._account)
+                and transport._caps == frozenset({"ARCHIVE"}) and isinstance(mailbox._account, str) and adapter._expected == mailbox._account)
     except AttributeError:
         return False
 
@@ -126,3 +144,93 @@ def open_live_mailbox(expected_account, store, client_path):
     _require_enabled()
     adapter = gw.open_archive_adapter(expected_account, store, client_path)
     return _wrap(adapter, expected_account)
+
+
+class LiveUndoMailbox:
+    """Final, immutable port over a real adapter holding the UNDO capability only (M12C.3). Build it only with `open_live_undo_mailbox`. Every method re-reads LIVE_UNDO_ENABLED.
+
+    It exposes the reads the undo engine needs and `restore_inbox`; it has NO `archive_message`, and its transport refuses the archive request before any dispatch."""
+    __slots__ = ("_adapter", "_account", "_test_factory")
+
+    def __init_subclass__(cls, **kwargs):
+        raise TypeError("LiveUndoMailbox is final")
+
+    def __init__(self, *, _mint, _adapter, _account, _test_factory=None):
+        if _mint is not _MINT_UNDO:
+            raise TypeError("a LiveUndoMailbox can only be built by open_live_undo_mailbox")
+        for name, value in (("_adapter", _adapter), ("_account", _account), ("_test_factory", _test_factory)):
+            object.__setattr__(self, name, value)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("a LiveUndoMailbox is immutable")
+
+    def __delattr__(self, name):
+        raise AttributeError("a LiveUndoMailbox is immutable")
+
+    def __repr__(self):
+        return "<LiveUndoMailbox>"
+
+    def clock(self):
+        return _utcnow()
+
+    @property
+    def account(self):
+        return self._account
+
+    def verify_account(self):
+        _require_undo_enabled()
+        return self._adapter.verify_account()
+
+    def message_state(self, message_id):
+        _require_undo_enabled()
+        return self._adapter.message_state(message_id)
+
+    def thread_state(self, thread_id):
+        _require_undo_enabled()
+        return self._adapter.thread_state(thread_id)
+
+    def restore_inbox(self, message_id):
+        _require_undo_enabled()
+        return self._adapter.restore_inbox(message_id).label_ids
+
+    def observe(self, message_id, *, context):
+        _require_undo_enabled()
+        return self._adapter.observe(message_id, context=context)
+
+
+_MINT_UNDO = object()  # module-private: only `_wrap_undo` holds it
+
+
+def live_undo_wiring_ok(mailbox):
+    """True only if the undo mailbox still wraps the adapter it was built with: exact adapter and transport types, the adapter's own default HTTPS connection (or, for offline tests
+    only, the in-memory fake wire it was built with), the UNDO capability and nothing else, and the expected account. Does not check the enabled switch."""
+    try:
+        adapter = mailbox._adapter
+        transport = adapter._t
+        factory = transport._factory
+        expected_factory = mailbox._test_factory if mailbox._test_factory is not None else gw._default_connection
+        if mailbox._test_factory is not None and type(mailbox._test_factory) is not fm._Factory:
+            return False
+        return (type(mailbox) is LiveUndoMailbox and type(adapter) is gw.ArchiveAdapter and type(transport) is gw._Transport and factory is expected_factory
+                and transport._caps == frozenset({"UNDO"}) and isinstance(mailbox._account, str) and adapter._expected == mailbox._account)
+    except AttributeError:
+        return False
+
+
+def _wrap_undo(adapter, expected_account, test_factory=None):
+    """Wrap a genuine UNDO-capable adapter. `test_factory` exists only so offline tests can put a recording fake wire under the real adapter code; no production caller passes it."""
+    _require_undo_enabled()
+    if type(adapter) is not gw.ArchiveAdapter or not isinstance(expected_account, str) or not expected_account.strip() or adapter._expected != expected_account:
+        raise ValueError("a live undo mailbox needs a genuine adapter for the expected account")
+    box = LiveUndoMailbox(_mint=_MINT_UNDO, _adapter=adapter, _account=expected_account, _test_factory=test_factory)
+    if not live_undo_wiring_ok(box):
+        raise ValueError("the adapter is not an undo-only adapter wired to the default transport (or, in offline tests, the in-memory fake wire)")
+    return box
+
+
+def open_live_undo_mailbox(expected_account, store, client_path):
+    """Build the live undo mailbox from the stored WRITE authorization (local checks only: no refresh, no network, no prompt). Raises LiveUndoDisabled first, before the store is
+    touched. There is no clock, connection-factory or transport parameter. Nothing in this build calls it successfully: the switch is False."""
+    _require_undo_enabled()
+    adapter = gw.open_undo_adapter(expected_account, store, client_path)
+    return _wrap_undo(adapter, expected_account)

@@ -86,7 +86,8 @@ class RefusalTests(Base):
 
     def test_the_question_is_never_echoed_or_executed(self):
         q = f"which senders email me most {MARK} <script>alert(1)</script> {{{{7*7}}}} __import__('os')"
-        text = ask.as_json(self.ask(q))
+        res = self.ask(q)
+        text = ask.as_json({k: v for k, v in res.items() if k not in ("freshness", "reference_time")})  # the timestamps are real clock values and may contain "49" by chance
         for bad in (MARK, "<script>", "49", "__import__"):
             self.assertNotIn(bad, text)
         for bad in ("", "  ", "x" * 301, None, 5):

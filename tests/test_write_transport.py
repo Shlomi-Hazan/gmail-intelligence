@@ -103,7 +103,8 @@ class PolicyAllowlistTests(unittest.TestCase):
         self.assertEqual(pol.check_request("GET", f"{B}/threads/{TID}{THR_MIN}"), "THREAD_GET")
         self.assertEqual(pol.check_request("POST", MODIFY, {"content-type": "application/json"}, pol.MODIFY_BODY), "MESSAGE_MODIFY")
         self.assertEqual(pol.check_request("POST", MODIFY, {"Content-Type": "application/json", "Accept": "application/json"}, pol.MODIFY_BODY), "MESSAGE_MODIFY")
-        self.assertEqual(sorted(k for k, _, _ in pol._ROUTES), sorted(pol.KINDS))
+        self.assertEqual(sorted([k for k, _, _ in pol._ROUTES] + ["MESSAGE_MODIFY_UNDO"]), sorted(pol.KINDS))  # M12C.3: the undo shares the modify route and is told apart by its exact body
+        self.assertEqual(pol.check_request("POST", MODIFY, {"content-type": "application/json"}, pol.UNDO_BODY), "MESSAGE_MODIFY_UNDO")
         self.assertEqual(len(pol._ROUTES), 4)
 
     def test_every_other_endpoint_is_denied(self):
@@ -214,8 +215,9 @@ class PolicyAllowlistTests(unittest.TestCase):
 
     def test_the_only_mutation_is_removing_inbox_from_one_message(self):
         h = {"content-type": "application/json"}
+        # (M12C.3: the exact undo body b'{"addLabelIds":["INBOX"]}' is the one other accepted body; see test_undo_infrastructure)
         bad_bodies = (b"", None, b"{}", b'{"removeLabelIds": ["INBOX"]}', b'{"removeLabelIds":["INBOX"] }', b'{"removeLabelIds":["INBOX","UNREAD"]}', b'{"removeLabelIds":["UNREAD"]}',
-                      b'{"removeLabelIds":["inbox"]}', b'{"removeLabelIds":[]}', b'{"removeLabelIds":"INBOX"}', b'{"addLabelIds":["INBOX"]}', b'{"addLabelIds":["TRASH"],"removeLabelIds":["INBOX"]}',
+                      b'{"removeLabelIds":["inbox"]}', b'{"removeLabelIds":[]}', b'{"removeLabelIds":"INBOX"}', b'{"addLabelIds":["TRASH"],"removeLabelIds":["INBOX"]}',
                       b'{"removeLabelIds":["INBOX"],"addLabelIds":["Label_1"]}', b'{"removeLabelIds":["INBOX"],"addLabelIds":[]}', b'{"removeLabelIds":["INBOX"],"x":1}',
                       b'{"removeLabelIds":["\\u0049NBOX"]}', b'{"removeLabelIds":["INBOX"],"removeLabelIds":["INBOX"]}', b'[{"removeLabelIds":["INBOX"]}]', b'{"removeLabelIds":["SPAM"]}',
                       b'{"addLabelIds":["CATEGORY_PROMOTIONS"]}', b'{"removeLabelIds":["INBOX"]}\n', b' {"removeLabelIds":["INBOX"]}', b'{"removeLabelIds":["INBOX"]}' * 2, 5, "{", ["x"],
@@ -245,7 +247,7 @@ class PolicyAllowlistTests(unittest.TestCase):
             with self.assertRaises(pol.Denied) as ctx:
                 call()
             self.assertNotIn(marker, str(ctx.exception) + repr(ctx.exception) + ctx.exception.code)
-        self.assertEqual(set(pol._MESSAGES), {"DENIED_HOST", "DENIED_PATH", "DENIED_METHOD", "DENIED_QUERY", "DENIED_BODY", "DENIED_HEADER", "DENIED_REDIRECT", "DENIED_SIZE", "DENIED_BUDGET"})
+        self.assertEqual(set(pol._MESSAGES), {"DENIED_HOST", "DENIED_PATH", "DENIED_METHOD", "DENIED_QUERY", "DENIED_BODY", "DENIED_HEADER", "DENIED_REDIRECT", "DENIED_SIZE", "DENIED_BUDGET", "DENIED_CAPABILITY"})
 
     def test_strict_response_json(self):
         self.assertEqual(pol.parse_json(b'{"a":1}'), {"a": 1})
@@ -421,7 +423,7 @@ class TransportTests(Base):
 
     def test_the_adapter_exposes_no_http_client_token_credentials_or_generic_service(self):
         public = {n for n in dir(gw.ArchiveAdapter) if not n.startswith("_")}
-        self.assertEqual(public, {"verify_account", "message_state", "thread_state", "observe", "archive_message"})
+        self.assertEqual(public, {"verify_account", "message_state", "thread_state", "observe", "archive_message", "restore_inbox"})
         a = adapter(Net())
         self.assertFalse(hasattr(a, "__dict__"))
         self.assertEqual(gw.ArchiveAdapter.__slots__, ("_t", "_expected", "_issuer"))

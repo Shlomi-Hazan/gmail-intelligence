@@ -111,7 +111,8 @@ class DisabledByDefaultTests(LiveBase):
 
     def test_there_is_no_production_entry_point(self):
         cli = (SRC / "cli.py").read_text()
-        for name in ("exec_live_mailbox", "cleanup_live", "LiveMailbox", "LIVE_EXECUTION_ENABLED", "execute_live_batch", "recover_live", "open_live_mailbox"):
+        for name in ("exec_live_mailbox", "cleanup_live", "LiveMailbox", "LIVE_EXECUTION_ENABLED", "execute_live_batch", "recover_live", "open_live_mailbox",
+                     "LiveUndoMailbox", "LIVE_UNDO_ENABLED", "open_live_undo_mailbox", "undo_live", "reconcile_undo_live"):  # M12C.3: the ordinary CLI reaches the live undo path only through undo_cli
             self.assertNotIn(name, cli)
         self.assertIn("execution is not available in this version", cli)
         importers = {}
@@ -121,13 +122,16 @@ class DisabledByDefaultTests(LiveBase):
                 for target in ("exec_live_mailbox", "cleanup_live"):
                     if any(m.split(".")[-1] == target for m in mods):
                         importers.setdefault(target, set()).add(path.name)
-        self.assertEqual(importers, {"exec_live_mailbox": {"cleanup_executor.py", "cleanup_canary.py", "cleanup_live.py", "cleanup_canary_cli.py"}, "cleanup_live": {"cleanup_canary.py"}})  # the live modules are imported only by the disabled canary code
+        self.assertEqual(importers, {"exec_live_mailbox": {"cleanup_executor.py", "cleanup_canary.py", "cleanup_live.py", "cleanup_canary_cli.py", "cleanup_undo.py", "undo_cli.py"},
+                                     "cleanup_live": {"cleanup_canary.py", "undo_cli.py"}})  # the live modules are imported only by the disabled canary code and (M12C.3) the undo engine and the disabled undo entry point
         callers = set()
         for path in SRC.glob("*.py"):
             for node in ast.walk(ast.parse(path.read_text())):
-                if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) in ("_wrap", "open_live_mailbox", "execute_live_batch", "recover_live"):
+                if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) in ("_wrap", "_wrap_undo", "open_live_mailbox", "open_live_undo_mailbox", "execute_live_batch", "recover_live", "undo_live", "reconcile_undo_live"):
                     callers.add((path.name, getattr(node.func, "id", getattr(node.func, "attr", None)), len(node.args) + len(node.keywords)))
-        self.assertEqual(callers, {("exec_live_mailbox.py", "_wrap", 2), ("cleanup_canary.py", "open_live_mailbox", 3), ("cleanup_canary.py", "execute_live_batch", 6)})  # without a test factory; canary only
+        self.assertEqual(callers, {("exec_live_mailbox.py", "_wrap", 2), ("cleanup_canary.py", "open_live_mailbox", 3), ("cleanup_canary.py", "execute_live_batch", 6),
+                                   ("exec_live_mailbox.py", "_wrap_undo", 2), ("undo_cli.py", "open_live_undo_mailbox", 3), ("undo_cli.py", "undo_live", 5),
+                                   ("undo_cli.py", "reconcile_undo_live", 5)})  # without a test factory; canary and the disabled undo entry point only
 
     def test_the_public_constructor_has_no_clock_factory_or_transport_parameter(self):
         self.assertEqual(list(inspect.signature(live.open_live_mailbox).parameters), ["expected_account", "store", "client_path"])
@@ -271,7 +275,7 @@ class LiveBatchTests(LiveBase):
             self.assertNotIn("addLabelIds", (SRC / name).read_text())
             called = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                       and isinstance(n.func.value, ast.Attribute) and n.func.value.attr == "_adapter"}
-            self.assertLessEqual(called, {"verify_account", "message_state", "thread_state", "archive_message", "observe"}, name)
+            self.assertLessEqual(called, {"verify_account", "message_state", "thread_state", "archive_message", "restore_inbox", "observe"}, name)  # restore_inbox: only LiveUndoMailbox (M12C.3)
 
     def test_intent_is_durable_before_the_post_and_an_unknown_post_stops_without_retry(self):
         self.enable()
@@ -417,16 +421,19 @@ class RestrictionTests(LiveBase):
         self.assertEqual({k for k, _ in svc2.log} - {"PROFILE", "GET_MESSAGE"}, set())  # only the profile read and observations
 
 
-class UndoDeferredTests(LiveBase):
-    def test_live_undo_is_deferred_and_documented(self):
+class UndoSeparationTests(LiveBase):
+    def test_the_archive_live_mailbox_has_no_undo_and_is_refused_by_every_undo_entry_point(self):
         self.enable()
         lm, svc = self.live_mailbox()
         self.assertFalse(hasattr(lm, "restore_inbox"))
-        self.assertFalse(hasattr(gw.ArchiveAdapter, "restore_inbox"))
-        with self.assertRaises(ce.ExecError) as ctx:
-            cu.undo_item(self.index, ACCT, "exec-00000000", 1, lm)
-        self.assertEqual(ctx.exception.code, "MAILBOX_NOT_ALLOWED")
-        self.assertIn("Live undo is deferred", (ROOT / "docs" / "CLEANUP.md").read_text())
+        self.assertTrue(hasattr(gw.ArchiveAdapter, "restore_inbox"))  # the adapter class has it; an ARCHIVE-capability transport cannot send it (see test_undo_infrastructure)
+        for call in (lambda: cu.undo_item(self.index, ACCT, "exec-00000000", 1, lm), lambda: cu._undo_item(self.index, ACCT, "exec-00000000", 1, lm, "LIVE"),
+                     lambda: cl.undo_live(self.index, ACCT, "exec-00000000", 1, lm), lambda: cl.reconcile_undo_live(self.index, ACCT, "exec-00000000", 1, lm)):
+            with self.assertRaises(ce.ExecError) as ctx:
+                call()
+            self.assertEqual(ctx.exception.code, "MAILBOX_NOT_ALLOWED")
+        self.assertEqual(svc.log, [])
+        self.assertIn("Archive undo (M12C.3)", (ROOT / "docs" / "CLEANUP.md").read_text())
 
 
 if __name__ == "__main__":

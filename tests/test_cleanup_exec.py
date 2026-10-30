@@ -1758,7 +1758,7 @@ class SourceGuards(unittest.TestCase):
     MODULES = ("cleanup_exec.py", "cleanup_exec_report.py")
 
     def test_m4c_a_modules_have_no_gmail_oauth_network_or_keychain_code(self):
-        allowed_local = {"cleanup_audit", "cleanup_plans", "cleanup_exec", "cleanup_protect", "index", "exec_evidence"}
+        allowed_local = {"cleanup_audit", "cleanup_plans", "cleanup_exec", "cleanup_protect", "index", "exec_evidence", "cleanup_undo_ledger"}  # the ledger module is read-only (json only), M12C.3
         for name in self.MODULES:
             text = (SRC / "gmail_intelligence" / name).read_text()
             for node in ast.walk(ast.parse(text)):
@@ -1796,7 +1796,7 @@ class SourceGuards(unittest.TestCase):
                     names = [node.module or ""] + [f"{node.module}.{a.name}" for a in node.names]
                 if any(n.split(".")[-1] in ("cleanup_exec", "cleanup_exec_report") for n in names):
                     importers.append(path.name)
-        self.assertEqual(sorted(set(importers)), ["cleanup_canary.py", "cleanup_canary_cli.py", "cleanup_executor.py", "cleanup_recovery.py", "cleanup_undo.py", "cli.py", "sync_lease.py"])  # besides the CLI: the executor, undo, recovery and the disabled canary; M7A sync_lease imports it ONLY to verify the D145 guard handshake (constant + source of the sync-health refusal), never to call it
+        self.assertEqual(sorted(set(importers)), ["cleanup_canary.py", "cleanup_canary_cli.py", "cleanup_executor.py", "cleanup_recovery.py", "cleanup_undo.py", "cli.py", "sync_lease.py", "undo_cli.py"])  # besides the CLI: the executor, undo, recovery and the disabled canary; M7A sync_lease imports it ONLY to verify the D145 guard handshake (constant + source of the sync-health refusal), never to call it
 
 
 if __name__ == "__main__":

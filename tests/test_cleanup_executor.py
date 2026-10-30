@@ -653,7 +653,7 @@ class ClockTests(ExecutorBase):
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.Call) and any(k.arg == "_clock" for k in node.keywords):
                     passers.append(path.name)
-        self.assertEqual(sorted(passers), ["exec_fake_mailbox.py"])
+        self.assertEqual(sorted(passers), ["exec_fake_mailbox.py", "exec_fake_mailbox.py"])  # only the fake mailbox, once per capability-separated adapter (archive and undo; M12C.3)
         self.assertEqual([n for n in inspect.signature(fm.FakeMailbox.__init__).parameters], ["self", "account", "messages", "clock", "script"])
 
 

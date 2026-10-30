@@ -326,7 +326,7 @@ class UndoRefusalTests(UndoBase):
         with self.assertRaises(ce.ExecError):
             self.undo(ex, rewired, 1)
         self.assertEqual((net.opened, net.log), (0, []))
-        self.assertFalse(hasattr(gw.ArchiveAdapter, "restore_inbox"))  # the real adapter has no undo at all
+        self.assertTrue(hasattr(gw.ArchiveAdapter, "restore_inbox"))  # M12C.3: the real adapter has the undo operation, but this public fake-only entry point never accepts it (above)
 
 
 class UndoUncertaintyTests(UndoBase):
@@ -574,15 +574,22 @@ class UndoSameThreadTests(UndoBase):
 
 
 class UndoBoundaryTests(UndoBase):
-    def test_the_real_write_boundary_stays_archive_only(self):
+    def test_the_real_write_boundary_allows_exactly_two_fixed_mutations(self):
+        """M12C.3 deliberately widened the boundary by ONE fixed request body (archive-undo). Everything else stays closed."""
         self.assertEqual(pol.MODIFY_BODY, b'{"removeLabelIds":["INBOX"]}')
-        self.assertEqual(len(pol._ROUTES), 4)
-        for name in ("gmail_write.py", "gmail_write_policy.py", "oauth_write.py"):
-            text = (ROOT / "src" / "gmail_intelligence" / name).read_text()
-            self.assertNotIn("addLabelIds", text, name)
-            self.assertNotIn("restore_inbox", text, name)
-        policy_text = (ROOT / "src" / "gmail_intelligence" / "gmail_write_policy.py").read_text()
+        self.assertEqual(pol.UNDO_BODY, b'{"addLabelIds":["INBOX"]}')
+        self.assertEqual(len(pol._ROUTES), 4)  # no new route: the undo uses the same modify path, told apart by its exact body
+        self.assertEqual(pol.MUTATIONS, ("MESSAGE_MODIFY", "MESSAGE_MODIFY_UNDO"))
+        names = ("gmail_write.py", "gmail_write_policy.py", "oauth_write.py")
+        texts = {n: (ROOT / "src" / "gmail_intelligence" / n).read_text() for n in names}
+        self.assertEqual({n: t.count("addLabelIds") for n, t in texts.items()}, {"gmail_write.py": 0, "gmail_write_policy.py": 1, "oauth_write.py": 0})  # only the UNDO_BODY definition
+        self.assertEqual({n: t.count("restore_inbox") for n, t in texts.items() if "restore_inbox" in t}.keys(), {"gmail_write.py"})  # the adapter operation only
+        for n in ("gmail_write.py", "gmail_write_policy.py"):  # no other mutation class is expressible: no batch, trash, send, draft or delete endpoint
+            for forbidden in ("batchModify", "batchDelete", "/trash", "/untrash", "messages/send", "/drafts", "/delete"):
+                self.assertNotIn(forbidden, texts[n], (n, forbidden))
+        policy_text = texts["gmail_write_policy.py"]
         self.assertNotIn("unarchive", policy_text.lower())
+        self.assertNotIn("removeLabelIds", policy_text.split("UNDO_BODY =", 1)[1].split("\n", 1)[0])  # the undo body never removes anything
 
     def test_no_production_path_reaches_recovery_or_undo(self):
         cli = (ROOT / "src" / "gmail_intelligence" / "cli.py").read_text()
@@ -596,7 +603,7 @@ class UndoBoundaryTests(UndoBase):
                 mods = [a.name for a in node.names] if isinstance(node, ast.Import) else ([node.module or ""] + [a.name for a in node.names] if isinstance(node, ast.ImportFrom) else [])
                 if any(m.split(".")[-1] in ("cleanup_undo", "cleanup_recovery") for m in mods):
                     importers.add((path.name))
-        self.assertEqual(importers, {"cleanup_recovery.py", "cleanup_live.py"})  # undo only by recovery; recovery only by the disabled live entry points; never the CLI
+        self.assertEqual(importers, {"cleanup_recovery.py", "cleanup_live.py", "undo_cli.py"})  # undo only by recovery; recovery only by the disabled live entry points; never the CLI
 
     def test_the_fake_undo_is_only_in_memory(self):
         mb = self.mailbox()

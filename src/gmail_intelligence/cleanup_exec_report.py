@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, cleanup_protect
+from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, cleanup_protect, cleanup_undo_ledger as undo_ledger
 
 NOTE = ("This version has NO Gmail execution: nothing here can archive, trash or change a message. Dry runs and listings write "
         "nothing and never consume an approval.")
@@ -195,15 +195,32 @@ def view(er):
             "items_needing_owner": list(er.unresolved), "notes": list(er.notes)}
 
 
-RECOVERY_NOTE = ("Local, read-only: this reads the local execution journal only. Gmail was not contacted and nothing was retried, resumed, archived, restored or changed. "
+RECOVERY_NOTE = ("Local, read-only: this reads the local execution journal and undo ledgers only. Gmail was not contacted and nothing was retried, resumed, archived, restored or changed. "
                  "An UNKNOWN outcome stays UNKNOWN until a fresh, execution-bound observation of the real mailbox is compared with the record; that live step is not available "
                  "in this version and needs a separate owner authorization.")
+
+
+UNDO_CATEGORY = {"RESTORED": "restored", "NOT_RESTORED": "not_restored", "UNKNOWN": "unresolved", "OPEN": "unresolved", "CONFLICT": "conflict",
+                 "INCONSISTENT": "inconsistent", "AUTHORIZED": "pending"}
+UNDO_MEANING = {"restored": "restored (confirmed by a fresh observation)", "not_restored": "not restored (observed unmodified; nothing changed; a new owner authorization is possible)",
+                "unresolved": "UNRESOLVED (an attempt may or may not have changed the mailbox; only a fresh observation can settle it; never repeated automatically)",
+                "conflict": "CONFLICT (the mailbox shows something unexpected; manual owner review; final, not a restoration)",
+                "inconsistent": "INCONSISTENT ledger (never acted on; manual owner review)", "pending": "authorized but not run (the authorization expires; nothing happened)"}
+UNDO_NEEDS_OWNER = ("unresolved", "conflict", "inconsistent", "pending")
+
+
+def undo_data(index, account):
+    """Read-only view of every undo ledger (M12C.3): execution id, item sequence number, status and a category; no message ids, labels or accounts. Needs no mailbox and no Gmail."""
+    rows = [{"exec_id": e, "item": i, "status": st, "category": UNDO_CATEGORY.get(st, "inconsistent")} for e, i, st in undo_ledger.all_undos(index, account)]
+    return rows
 
 
 def recovery_data(index, account, now=None):
     """The M12C.1 status as plain data (counts, states and item sequence numbers; no message ids, account address, labels, senders or credentials; local execution ids may appear)."""
     reports, needs = status(index, account, now)
-    return {"executions": [view(r) for r in reports], "needs_owner": needs, "read_only": True, "gmail_contacted": False, "retried_or_changed": 0}
+    undos = undo_data(index, account)
+    needs = needs or any(u["category"] in UNDO_NEEDS_OWNER for u in undos)
+    return {"executions": [view(r) for r in reports], "undos": undos, "needs_owner": needs, "read_only": True, "gmail_contacted": False, "retried_or_changed": 0}
 
 
 def recovery_text(data):
@@ -217,5 +234,8 @@ def recovery_text(data):
         out += [f"    note: {n}" for n in e["notes"]]
     if not data["executions"]:
         out.append("  no open or uncertain executions")
-    out.append("  OWNER ACTION REQUIRED" if data["needs_owner"] else "  no owner decision needed right now; open executions remain (see above)" if data["executions"] else "  nothing needs the owner")
+    if data.get("undos"):
+        out.append("  archive undos (per item, by sequence number):")
+        out += [f"    execution {u['exec_id']} item {u['item']}: {UNDO_MEANING[u['category']]}" for u in data["undos"]]
+    out.append("  OWNER ACTION REQUIRED" if data["needs_owner"] else "  no owner decision needed right now; open executions or finished undos remain (see above)" if data["executions"] or data.get("undos") else "  nothing needs the owner")
     return "\n".join(out + ["", RECOVERY_NOTE])

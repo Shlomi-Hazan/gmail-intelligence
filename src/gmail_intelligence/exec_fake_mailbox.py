@@ -77,7 +77,8 @@ class _Service:
         return sum(1 for kind, _ in self.log if kind == "UNDO")
 
     def undo(self, key):
-        """FAKE-ONLY inverse of the archive: put INBOX back on one message. There is no HTTP route for it and no real Gmail policy entry: it exists only in memory."""
+        """The in-memory service's answer to the undo request (POST .../modify with the fixed undo body): put INBOX back on one message. It is reached through the real adapter and
+        the real request policy; only the Gmail side is simulated."""
         self.counts["UNDO"] = n = self.counts.get("UNDO", 0) + 1
         self.log.append(("UNDO", key))
         step = next((s for s in self.script if s.request == "UNDO" and s.nth == n), None)
@@ -131,10 +132,12 @@ class _Service:
         else:
             raise AssertionError("the fake mailbox does not serve this request")
         key = m.group(1) if m.groups() else None
+        if kind == "POST" and method == "POST" and body == pol.UNDO_BODY:
+            return self.undo(key)  # the one undo mutation: its own counter, log entry and fault-script kind ("UNDO")
         self.counts[kind] = n = self.counts.get(kind, 0) + 1
         self.log.append((kind, key))
         if kind == "POST" and (method != "POST" or body != pol.MODIFY_BODY):
-            raise AssertionError("unexpected mutation request")
+            raise AssertionError("unexpected mutation request")  # (an undo request is dispatched before this point)
         step = next((s for s in self.script if s.request == kind and s.nth == n), None)
         if step is None:
             return self._normal(kind, key)
@@ -198,15 +201,19 @@ def wiring_is_fake(mailbox):
         adapter = mailbox._adapter
         transport = adapter._t
         factory = transport._factory
+        undo, ut = mailbox._undo_adapter, mailbox._undo_adapter._t
         return (type(mailbox) is FakeMailbox and type(adapter) is gw.ArchiveAdapter and type(transport) is gw._Transport and type(factory) is _Factory
-                and type(transport._creds) is _FakeCreds and factory._service is mailbox._service and transport._creds is mailbox._service.creds)
+                and type(transport._creds) is _FakeCreds and factory._service is mailbox._service and transport._creds is mailbox._service.creds
+                and transport._caps == frozenset({"ARCHIVE"})
+                and type(undo) is gw.ArchiveAdapter and type(ut) is gw._Transport and type(ut._factory) is _Factory and ut._factory._service is mailbox._service
+                and ut._creds is mailbox._service.creds and ut._caps == frozenset({"UNDO"}))
     except AttributeError:
         return False
 
 
 class FakeMailbox:
     """The one mailbox type the C2 executor accepts. Final and immutable; no credential, factory or transport can be supplied or replaced by assignment."""
-    __slots__ = ("_service", "_adapter", "_clock")
+    __slots__ = ("_service", "_adapter", "_undo_adapter", "_clock")
     FAKE_ONLY = True
 
     def __init_subclass__(cls, **kwargs):
@@ -220,7 +227,8 @@ class FakeMailbox:
             raise ValueError("messages must map hex message ids to (hex thread id, labels)")
         service = _Service(account.strip(), messages, tuple(script))
         for name, value in (("_service", service), ("_clock", clock),
-                            ("_adapter", gw.ArchiveAdapter(gw._Transport(service.creds, _Factory(service)), account.strip(), _clock=clock))):
+                            ("_adapter", gw.ArchiveAdapter(gw._Transport(service.creds, _Factory(service), capabilities=("ARCHIVE",)), account.strip(), _clock=clock)),
+                            ("_undo_adapter", gw.ArchiveAdapter(gw._Transport(service.creds, _Factory(service), capabilities=("UNDO",)), account.strip(), _clock=clock))):
             object.__setattr__(self, name, value)
 
     def __setattr__(self, name, value):
@@ -244,7 +252,13 @@ class FakeMailbox:
         return self._service.account
 
     def verify_account(self):
-        return self._adapter.verify_account()
+        """One live-shaped profile read through the archive adapter. The in-memory undo adapter shares that verified account (test infrastructure: it avoids a second profile read)."""
+        try:
+            self._adapter.verify_account()
+        except BaseException:
+            self._undo_adapter._verified = False
+            raise
+        self._undo_adapter._verified = True
 
     def message_state(self, message_id):
         return self._adapter.message_state(message_id)
@@ -259,26 +273,11 @@ class FakeMailbox:
         return self._adapter.observe(message_id, context=context)
 
     def restore_inbox(self, message_id):
-        """FAKE-ONLY undo of an archive (adds INBOX back to one message of the in-memory service). It never goes through the real adapter's request policy, which
-        stays archive-only, and it reports failures with the same dispatch markers: `dispatched=False` only for refusals proven to be before any transmission."""
-        adapter = self._adapter
-        if not adapter._verified:
+        """Undo of an archive through the REAL adapter code and request policy (the fixed undo body), answered by the in-memory service. Returns the labels Gmail's answer reported.
+        Failures carry the adapter's dispatch markers: `dispatched=False` only for refusals proven to be before any transmission."""
+        if not self._adapter._verified:  # losing the verified account locks the undo too
             raise gw._mark(gw.AccountNotVerified(), False)
-        try:
-            gw.policy.valid_id(message_id)
-        except gw.Denied as exc:
-            raise gw._mark(exc, False)
-        adapter._t._authorization()  # WriteAuthError (dispatched=False) when the credentials are not usable
-        try:
-            status, data = self._service.undo(message_id)
-        except (TimeoutError, OSError) as exc:
-            raise gw._mark(gw.UncertainOutcome("TIMEOUT" if isinstance(exc, TimeoutError) else "NETWORK_ERROR"), True) from None
-        except Exception:  # noqa: BLE001 - anything unexpected after the request began is unclear by definition
-            raise gw._mark(gw.UncertainOutcome("AMBIGUOUS_RESULT"), True) from None
-        obj = gw._interpret("MESSAGE_MODIFY", status, data)  # typed errors, all marked as possibly dispatched
-        if obj.get("id") != message_id:
-            raise gw._mark(gw.UncertainOutcome("AMBIGUOUS_RESULT"), True)
-        return gw._labels(obj.get("labelIds"))
+        return self._undo_adapter.restore_inbox(message_id).label_ids
 
     # ---- inspection and "someone else" controls for tests
     @property

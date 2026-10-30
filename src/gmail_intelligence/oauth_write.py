@@ -34,6 +34,7 @@ REVOKE_URI = "https://oauth2.googleapis.com/revoke"
 MIN_REMAINING = timedelta(minutes=10)  # an execution may only start with at least this much access-token life left
 LOGIN_PHRASE = "AUTHORIZE GMAIL MODIFY"
 REVOKE_PHRASE = "REVOKE GMAIL MODIFY"
+REFRESH_PHRASE = "REFRESH GMAIL MODIFY"
 BLOB_KIND, BLOB_SCHEMA = "write-authorization", 1
 
 LOGIN_WARNING = (
@@ -277,7 +278,7 @@ def remaining_validity(expiry, now=None):
 def require_validity(creds, now=None):
     """Refuse (no refresh, no network) unless the access token has at least MIN_REMAINING left."""
     if not getattr(creds, "token", None) or remaining_validity(getattr(creds, "expiry", None), now) < MIN_REMAINING:
-        raise AuthError("the write access token has less than 10 minutes of validity left; refresh it explicitly or run `auth login-write`")
+        raise AuthError("the write access token has less than 10 minutes of validity left; renew it explicitly with `auth refresh-write` (or run `auth login-write`)")
 
 
 class PinnedOAuthRequest:
