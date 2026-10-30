@@ -1,4 +1,8 @@
-"""Owner-approved undo of an archived item (M4D): library only, FAKE MAILBOX ONLY. Not reachable from the CLI; nothing here can touch a real mailbox.
+"""Owner-approved undo of an archived item (M4D; live path added in M12C.3 behind its own DISABLED switch). Not reachable from the ordinary CLI.
+
+Two entry modes share ONE state machine and ONE implementation: the public `undo_item` / `reconcile_undo` accept the FAKE test mailbox only; the private `_undo_item` /
+`_reconcile_undo` accept exactly one more type, `exec_live_mailbox.LiveUndoMailbox` (undo-only transport), and only through `cleanup_live`, which requires
+`exec_live_mailbox.LIVE_UNDO_ENABLED` (False in this build). Archive execution can never authorize or run an undo, and an undo mailbox has no archive operation.
 
 An undo puts INBOX back on ONE message that an execution archived and recorded as APPLIED with a trusted observation. It is NOT an archive and is never recorded as one: the
 original item row, its APPLIED history and its evidence are never touched (items of a finished execution are frozen anyway). The undo has its own ledger, and the ledger is the
@@ -10,20 +14,18 @@ hash-chained audit log (append-only; no schema change): UNDO_AUTHORIZED -> UNDO_
   -> UNDO_RESULT: RESTORED only for exactly the originally recorded labels; anything unclear is UNKNOWN and is only ever resolved by a fresh observation
      (`reconcile_undo`), never by repeating the mutation.
 
-The real Gmail write boundary stays archive-only: the fake mailbox implements the inverse in memory, with no HTTP route and no policy entry.
+The real Gmail write policy has exactly one undo request (add INBOX to one message); both mailbox types send it through the same adapter and policy code.
 """
 import json
 from dataclasses import dataclass
 from datetime import timedelta, timezone
 
-from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, cleanup_executor as cx, cleanup_plans as cp
+from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, cleanup_executor as cx, cleanup_plans as cp, exec_live_mailbox as live
 from gmail_intelligence.cleanup_audit import sha256
+from gmail_intelligence.cleanup_undo_ledger import RESULTS, STATUSES, UNDO_EVENTS, _ledger, _state, open_undos, undo_status  # noqa: F401 - the read-only ledger lives in its own module
 from gmail_intelligence.exec_fake_mailbox import FakeMailbox, wiring_is_fake
 
 UNDO_AUTH_TTL = timedelta(minutes=15)
-UNDO_EVENTS = ("UNDO_AUTHORIZED", "UNDO_INTENT", "UNDO_RESULT")
-RESULTS = ("RESTORED", "NOT_RESTORED", "CONFLICT", "UNKNOWN")
-STATUSES = ("NONE", "AUTHORIZED", "OPEN", "INCONSISTENT") + RESULTS
 
 
 @dataclass(frozen=True)
@@ -38,9 +40,23 @@ def undo_phrase(plan, exec_id, seq):
     return f"UNDO {seq} {exec_id} {cp.short(plan['plan_hash'])}"
 
 
-def _gate(mailbox):
-    if type(mailbox) is not FakeMailbox or not wiring_is_fake(mailbox):
-        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "only the fake test mailbox is accepted in this version; nothing was read or changed")
+def _wired(mailbox, allow):
+    """True if the mailbox is exactly the type this mode accepts, with intact wiring."""
+    if allow == "FAKE":
+        return type(mailbox) is FakeMailbox and wiring_is_fake(mailbox)
+    if allow == "LIVE":
+        return type(mailbox) is live.LiveUndoMailbox and live.live_undo_wiring_ok(mailbox)
+    return False
+
+
+def _gate(mailbox, allow="FAKE"):
+    """The one mailbox check, at the start and again right before the mutation. "FAKE" (the public entry points) accepts only the fake test mailbox; "LIVE" (only `cleanup_live`)
+    accepts only a `LiveUndoMailbox` and additionally needs the build's undo switch. Each mode refuses the other's type. A live ARCHIVE mailbox is never accepted."""
+    if allow == "LIVE" and type(mailbox) is live.LiveUndoMailbox and live.LIVE_UNDO_ENABLED is not True:
+        raise ce.ExecError("LIVE_UNDO_DISABLED", "live archive undo is disabled in this build; nothing was read or changed")
+    if not _wired(mailbox, allow):
+        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "only the fake test mailbox is accepted in this version; nothing was read or changed" if allow == "FAKE"
+                           else "this mailbox is not accepted by the live undo entry point; nothing was read or changed")
 
 
 def _now(mailbox):
@@ -52,49 +68,6 @@ def _item_by_seq(index, account, exec_id, seq):
     if not rows:
         raise ce.ExecError("NO_SUCH_ITEM", "no such item in this execution")
     return dict(rows[0])
-
-
-def _ledger(index, account, exec_id, seq):
-    out = []
-    marks = ",".join("?" * len(UNDO_EVENTS))
-    for r in index._q(f"SELECT seq, event_type, at, meta, hash FROM cleanup_audit WHERE account=? AND event_type IN ({marks}) ORDER BY seq", account, *UNDO_EVENTS):
-        meta = json.loads(r["meta"])
-        if meta.get("exec") == exec_id and meta.get("item") == seq:
-            out.append({"type": r["event_type"], "at": r["at"], "meta": meta, "hash": r["hash"]})
-    return out
-
-
-def _state(ledger):
-    """(status, last authorization event, last intent event, last result event) derived from the ledger by a STRICT state machine.
-
-    NONE -> AUTHORIZED -> OPEN (intent, referencing that authorization) -> a result that references that intent: RESTORED | NOT_RESTORED | CONFLICT | UNKNOWN. UNKNOWN is
-    resolved only by a RECONCILE result. A new authorization is possible only from NONE or NOT_RESTORED. ANY other sequence (a second intent, an authorization while an
-    attempt is open, a result for another intent, events after RESTORED or CONFLICT, missing or unknown fields) yields INCONSISTENT, which authorizes nothing."""
-    bad = ("INCONSISTENT", None, None, None)
-    status, auth, intent, result = "NONE", None, None, None
-    for ev in ledger:
-        kind, meta = ev["type"], ev["meta"]
-        if kind == "UNDO_AUTHORIZED":
-            if status not in ("NONE", "NOT_RESTORED"):
-                return bad
-            status, auth, intent, result = "AUTHORIZED", ev, None, None
-        elif kind == "UNDO_INTENT":
-            if status != "AUTHORIZED" or meta.get("auth") != auth["hash"]:
-                return bad
-            status, intent, result = "OPEN", ev, None
-        elif kind == "UNDO_RESULT":
-            res, via = meta.get("result"), meta.get("via")
-            resolves = status == "OPEN" and via in ("DIRECT", "RECONCILE") or status == "UNKNOWN" and via == "RECONCILE"
-            if res not in RESULTS or not resolves or meta.get("intent") != intent["hash"] or (via == "RECONCILE" and res == "UNKNOWN"):
-                return bad
-            status, result = res, ev
-        else:
-            return bad
-    return status, auth, intent, result
-
-
-def undo_status(index, account, exec_id, seq):
-    return _state(_ledger(index, account, exec_id, seq))[0]
 
 
 def _original(index, account, exec_id, seq):
@@ -170,9 +143,14 @@ def _validated(obs, item, intent_t, context, account, mailbox):
 
 
 def undo_item(index, account, exec_id, seq, mailbox):
-    """Run ONE authorized undo against the fake mailbox. Refusals before the intent raise ExecError and change nothing (the authorization stays until it expires);
-    after the intent there is exactly one fake mutation attempt, and anything unclear is UNKNOWN."""
-    _gate(mailbox)
+    """Run ONE authorized undo against the FAKE mailbox (the only type this public function accepts). See `_undo_item`."""
+    return _undo_item(index, account, exec_id, seq, mailbox, "FAKE")
+
+
+def _undo_item(index, account, exec_id, seq, mailbox, allow):
+    """Run ONE authorized undo. Refusals before the intent raise ExecError and change nothing (the authorization stays until it expires);
+    after the intent there is exactly one mutation attempt, and anything unclear is UNKNOWN."""
+    _gate(mailbox, allow)
     if mailbox.account.strip().lower() != account.strip().lower():
         raise ce.ExecError("ACCOUNT_MISMATCH", "the mailbox belongs to another account; nothing was changed")
     ex, item, plan = _original(index, account, exec_id, seq)
@@ -209,8 +187,9 @@ def undo_item(index, account, exec_id, seq, mailbox):
                                    {"exec": exec_id, "item": seq, "auth": auth["hash"], "t": ce._us(now)})
     intent_t = ce._us(now)
 
-    if not wiring_is_fake(mailbox):
-        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "the mailbox is no longer wired to the fake service; no request was made")
+    _gate(mailbox, allow)  # the wiring and (live) the switch are re-checked immediately before the one mutation
+    if not _wired(mailbox, allow):
+        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "the mailbox is no longer wired as accepted; no request was made")
     try:
         mailbox.restore_inbox(mid)  # the one and only mutation of this authorization; never retried
     except Exception as exc:  # noqa: BLE001
@@ -240,11 +219,16 @@ def _unknown(index, account, ex, seq, intent_hash, mailbox, exc):
 
 # ---------------------------------------------------------------- resolving an uncertain undo from a fresh observation (never from a mutation)
 def reconcile_undo(index, account, exec_id, seq, mailbox):
+    """Reconcile an undo against the FAKE mailbox (the only type this public function accepts). See `_reconcile_undo`."""
+    return _reconcile_undo(index, account, exec_id, seq, mailbox, "FAKE")
+
+
+def _reconcile_undo(index, account, exec_id, seq, mailbox, allow):
     """Resolve an undo whose intent has no result (interrupted) or whose result is UNKNOWN, from a fresh execution-bound trusted observation. Makes NO mutation.
 
     Exactly the originally recorded labels -> RESTORED; exactly the archived labels -> NOT_RESTORED (observed unmodified; this does not prove that no write occurred);
     anything else, including an absent message -> CONFLICT."""
-    _gate(mailbox)
+    _gate(mailbox, allow)
     if mailbox.account.strip().lower() != account.strip().lower():
         raise ce.ExecError("ACCOUNT_MISMATCH", "the mailbox belongs to another account; nothing was changed")
     ex, item, plan = _original(index, account, exec_id, seq)
@@ -266,21 +250,3 @@ def reconcile_undo(index, account, exec_id, seq, mailbox):
     outcome = "RESTORED" if labels == prev else "NOT_RESTORED" if labels == archived else "CONFLICT"
     _record(index, account, ex, seq, intent["hash"], outcome, "", "RECONCILE", mailbox, obs, seen)
     return UndoResult(outcome, "", 0)
-
-
-def open_undos(index, account):
-    """[(exec_id, item seq, status)] for undos that need attention: an intent without a result, an UNKNOWN result or an inconsistent ledger."""
-    seen, out = set(), []
-    marks = ",".join("?" * len(UNDO_EVENTS))
-    for r in index._q(f"SELECT meta FROM cleanup_audit WHERE account=? AND event_type IN ({marks}) ORDER BY seq", account, *UNDO_EVENTS):
-        meta = json.loads(r["meta"])
-        if "exec" not in meta or "item" not in meta:
-            continue
-        key = (meta["exec"], meta["item"])
-        if key in seen:
-            continue
-        seen.add(key)
-        status = undo_status(index, account, *key)
-        if status in ("OPEN", "UNKNOWN", "INCONSISTENT"):  # an inconsistent ledger is never acted on, only reported
-            out.append((key[0], key[1], status))
-    return out

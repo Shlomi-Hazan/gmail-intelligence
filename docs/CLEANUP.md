@@ -39,6 +39,8 @@ without claiming protection against concurrent changes.
 gmail-intelligence cleanup discover [--account EMAIL] [--limit N] [--min-group-size N] [--min-age-days N] [--json]   # M12A: grouped, explained view of the same candidates (read-only; see CLEANUP-DISCOVERY.md)
 gmail-intelligence cleanup preview --group DOMAIN [--exclude-id ID] [--show-ids] [--page N] [--json] [--account EMAIL]   # M12B: exact messages of the selected groups (read-only; see CLEANUP-REVIEW.md)
 gmail-intelligence cleanup plan create --group DOMAIN [--exclude-id ID] --selection-digest DIGEST [--account EMAIL]      # M12B: freeze that exact selection as a DRAFT plan
+gmail-intelligence cleanup undo status|preview EXEC_ID SEQ|authorize|run|reconcile [--account EMAIL]   # M12C.3: archive undo of ONE message at a time; status/preview local, the rest DISABLED (see M12C-UNDO-DESIGN.md)
+gmail-intelligence auth refresh-write   # M12C.3: explicit, typed renewal of the write access token (Google's OAuth endpoint only)
 gmail-intelligence cleanup exec recovery [--account EMAIL] [--json]   # M12C.1: local read-only status of open or uncertain executions (see CLEANUP-RECOVERY.md)
 gmail-intelligence cleanup candidates --account EMAIL [--limit N] [--review] [--min-age-days N] [--show-ids] [--show-senders] [--by-domain]
 gmail-intelligence cleanup protect list    --account EMAIL [--show-values]
@@ -290,14 +292,14 @@ item, independent execution-bound trusted post-read, UNKNOWN and stop on any amb
 mailbox type: the fake-only APIs refuse a live mailbox and the live APIs refuse a fake mailbox, a raw adapter or any look-alike. **Disabled by default:** `LIVE_EXECUTION_ENABLED` is a
 `False` constant in `exec_live_mailbox.py` that nothing in the program changes; construction and every step (including right before each POST) re-read it, so every live function raises
 `LIVE_DISABLED` before reading or writing anything. There is no CLI path, no clock, connection-factory or transport parameter on the public constructor, and time is the process's UTC
-clock. Tests flip the switch only with a patch and put the real adapter code over the in-memory fake wire. **Live undo is deferred:** `cleanup_undo` accepts only the fake mailbox and
-`LiveMailbox` has no undo operation; a real undo needs its own write-policy change and approval.
+clock. Tests flip the switch only with a patch and put the real adapter code over the in-memory fake wire. **Archive undo (M12C.3) is implemented but DISABLED:** it has its own mailbox type
+(`LiveUndoMailbox`), its own switch (`LIVE_UNDO_ENABLED`, False) and its own adapter capability; see [M12C-UNDO-DESIGN.md](M12C-UNDO-DESIGN.md). `LiveMailbox` has no undo operation.
 
 **Single-message canary entry point (disabled).** `cleanup_canary.run_canary` is the one explicitly gated way to archive ONE approved message through the live boundary: it refuses as its
 very first statement while `LIVE_EXECUTION_ENABLED` is `False` (before the index, the credential store, the client file or the network are touched), then requires an `EXECUTING`
 single-target single-slice `ARCHIVE` execution under the caller's lease and the owner's separate typed canary confirmation (`canary_phrase`, recorded once per execution as
 `CANARY_CONFIRMED`; wrong phrases are `CANARY_REJECTED` and locked out), opens the write credentials locally, and hands the rest to `execute_live_batch` (no second archive path).
-No CLI, environment-variable or configuration path exists. Details, the authorization readiness and the owner approvals still needed: [CANARY.md](CANARY.md). Live undo is deferred.
+No CLI, environment-variable or configuration path exists. Details, the authorization readiness and the owner approvals still needed: [CANARY.md](CANARY.md). Archive undo (M12C.3) is implemented but disabled (see above).
 
 **Canary exception and live restriction (disabled).** A one-message plan can carry a narrow, hashed `canary_exception` (waiving only the age and classification-type rules for that message; `SENT`,
 protections, unread, important, user labels, mixed threads, missing classification and every executor check still apply); the ordinary policy and commands are unchanged. Live execution is
@@ -324,7 +326,7 @@ minutes). `undo_item` then verifies the account, the original APPLIED evidence, 
 thread (same rules as the executor, protected labels included), commits the intent BEFORE any mutation (once per authorization, serialised by the write transaction), makes at most ONE fake
 mutation, and reads back with an independent execution-bound trusted observation: `RESTORED` only for exactly the originally recorded labels (INBOX back, everything else preserved),
 anything unclear `UNKNOWN`. An interrupted or unknown undo is resolved only by `reconcile_undo` from a fresh observation (never by repeating the mutation); a proven non-mutation
-(`NOT_RESTORED`) allows a new authorization. The real Gmail write boundary stays archive-only: the fake mailbox implements the inverse in memory, with no HTTP route and no policy entry.
+(`NOT_RESTORED`) allows a new authorization. Since M12C.3 the real adapter and write policy also contain the one fixed undo request (`POST .../modify` with body exactly `{"addLabelIds":["INBOX"]}`), sent by the same engine through `cleanup_live.undo_live` over an undo-only `LiveUndoMailbox`, DISABLED by `LIVE_UNDO_ENABLED = False`; the fake mailbox now exercises the real adapter and policy code for it. See [M12C-UNDO-DESIGN.md](M12C-UNDO-DESIGN.md).
 **What this does not establish:** the guard is an in-process capability boundary against accidents and ordinary callers, not a cryptographic guarantee against code in the same
 process, and an observed desired state never proves that this tool made the change.
 

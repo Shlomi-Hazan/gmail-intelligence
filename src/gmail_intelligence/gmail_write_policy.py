@@ -4,7 +4,11 @@ An ALLOWLIST of exactly four request families (for one account, `users/me`):
   GET  /gmail/v1/users/me/profile?fields=emailAddress
   GET  /gmail/v1/users/me/messages/{id}            (one of two fixed projections: labels only, or labels plus the From header)
   GET  /gmail/v1/users/me/threads/{id}             (labels of the messages only; read-only sibling inspection)
-  POST /gmail/v1/users/me/messages/{id}/modify     (body exactly: remove the INBOX label; fixed response projection)
+  POST /gmail/v1/users/me/messages/{id}/modify     (body exactly ONE of two fixed byte strings; fixed response projection):
+        MODIFY_BODY  remove the INBOX label  (archive)           -> kind MESSAGE_MODIFY
+        UNDO_BODY    add the INBOX label back (undo of archive)  -> kind MESSAGE_MODIFY_UNDO
+The two mutations are separate capabilities (see gmail_write._Transport): a transport granted one cannot send the other. No other body, label, removal in the undo, Trash, delete,
+batch, send, forward, reply or draft request exists.
 Every GET and the POST MUST carry one of the allowlisted `fields` projections, so a direct call cannot return snippets, subject lines,
 bodies or other content. Argument types are exact (`str`, `bytes`, `dict`): subclasses and mutable buffers are refused.
 Everything else is denied BEFORE any network dispatch: other endpoints, hosts, ports, methods, encodings, query parameters, headers,
@@ -19,7 +23,9 @@ MAX_URL = 400
 MAX_RESPONSE = 1_000_000
 MAX_REQUESTS = 500
 MODIFY_BODY = b'{"removeLabelIds":["INBOX"]}'  # the only mutation: archive = remove INBOX from one message
-KINDS = ("PROFILE", "MESSAGE_GET", "THREAD_GET", "MESSAGE_MODIFY")
+UNDO_BODY = b'{"addLabelIds":["INBOX"]}'  # the only other mutation: put INBOX back on one message that this tool archived (M12C.3); exact bytes, nothing else is ever added
+KINDS = ("PROFILE", "MESSAGE_GET", "THREAD_GET", "MESSAGE_MODIFY", "MESSAGE_MODIFY_UNDO")
+MUTATIONS = ("MESSAGE_MODIFY", "MESSAGE_MODIFY_UNDO")
 
 _ID = r"[0-9a-f]{1,32}"
 _ROUTES = (("PROFILE", "GET", r"/gmail/v1/users/me/profile"),
@@ -43,6 +49,7 @@ _MESSAGES = {
     "DENIED_REDIRECT": "request denied: redirects are never followed",
     "DENIED_SIZE": "request denied: size limit exceeded",
     "DENIED_BUDGET": "request denied: request budget exhausted",
+    "DENIED_CAPABILITY": "request denied: this adapter is not authorized for this kind of mutation",
 }
 
 
@@ -146,7 +153,9 @@ def check_request(method, url, headers=None, body=None, *, allow_authorization=F
     _check_query(kind, _parse_query(query))
     _check_headers(headers, kind, allow_authorization)
     if kind == "MESSAGE_MODIFY":
-        if type(body) is not bytes or body != MODIFY_BODY:  # exact immutable bytes: no bytearray/subclass/str, no extra fields, labels or escapes
+        if type(body) is bytes and body == UNDO_BODY:  # exact immutable bytes: the one undo mutation is told apart from the archive by its body alone
+            kind = "MESSAGE_MODIFY_UNDO"
+        elif type(body) is not bytes or body != MODIFY_BODY:  # no bytearray/subclass/str, no extra fields, labels or escapes
             raise Denied("DENIED_BODY")
     elif body is not None and not (type(body) is bytes and body == b""):
         raise Denied("DENIED_BODY")

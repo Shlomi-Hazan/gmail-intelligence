@@ -382,6 +382,36 @@ def cmd_auth_status_write(_args):
     return 0 if ready else 1
 
 
+def cmd_auth_refresh_write(args):
+    """EXPLICIT, owner-typed renewal of the write access token (M12C.3, issue #41). The only caller of `refresh_and_store`. It contacts Google's OAuth token endpoint only (never the
+    Gmail API), keeps the exact write scope, replaces the stored record only after the refreshed result passed every check, and never runs in the background or from any other command."""
+    from gmail_intelligence import oauth, oauth_write
+    from gmail_intelligence.keystore import KeystoreError
+
+    path = config.write_client_secret_path()
+    try:
+        client = oauth_write.load_write_client_config(path)
+        oauth_write.verify_isolation(path, config.client_secret_path(), config.write_setup_path())  # fail closed before any credential is touched
+        store = _write_store()
+        blob = store.load()
+        if blob is None:
+            return _fail("no write authorization is stored; run `auth login-write`")
+        oauth_write.check_blob(blob, client)
+    except (KeystoreError, oauth.AuthError) as exc:
+        return _fail(exc)
+    print("This renews the short-lived write ACCESS token from the stored refresh token. It contacts Google's OAuth token endpoint only (not the Gmail API); the permission "
+          "stays exactly the same; nothing is archived, restored or changed; it does not enable any live capability by itself.")
+    if input(f"To continue type exactly: {oauth_write.REFRESH_PHRASE}\n> ").strip() != oauth_write.REFRESH_PHRASE:
+        return _fail("declined; the stored write authorization was not changed")
+    try:
+        creds, _new = oauth_write.refresh_and_store(store, blob, client)
+    except (KeystoreError, oauth.AuthError) as exc:
+        return _fail(f"{exc}; the stored write authorization was not changed")
+    minutes = int(oauth_write.remaining_validity(creds.expiry).total_seconds() // 60)
+    print(f"Write access token renewed (about {minutes} minute(s) of validity). Nothing was archived or changed.")
+    return 0
+
+
 def cmd_auth_logout_write(args):
     from gmail_intelligence.keystore import KeystoreError
 
@@ -1449,6 +1479,12 @@ def cmd_cleanup_exec_recovery(args):
     return _with_readonly_index(args, go)
 
 
+def cmd_undo(args):
+    """M12C.3: owner-operated archive undo. status / preview are local and read-only; authorize / run / reconcile refuse while live undo is disabled (this build)."""
+    from gmail_intelligence import undo_cli
+    return undo_cli.dispatch(args, with_index=_with_index, with_readonly=_with_readonly_index, tty_input=_tty_input, fail=_fail)
+
+
 def cmd_cleanup_exec_show(args):
     from gmail_intelligence import cleanup_exec, cleanup_exec_report
     from gmail_intelligence import cleanup_plans as cp
@@ -1473,7 +1509,7 @@ def build_parser():
     sub.add_parser("doctor", help="check local development prerequisites (offline)").set_defaults(func=cmd_doctor)
 
     auth = sub.add_parser("auth", help="manage the read-only Gmail connection (and the separate, explicit write authorization)")
-    asub = auth.add_subparsers(dest="auth_command", required=True, metavar="{setup,login,status,logout,setup-write,login-write,status-write,logout-write,revoke-write}")
+    asub = auth.add_subparsers(dest="auth_command", required=True, metavar="{setup,login,status,logout,setup-write,login-write,status-write,refresh-write,logout-write,revoke-write}")
     p = asub.add_parser("setup", help="show Google Cloud setup steps, or import the OAuth client file")
     p.add_argument("--import", dest="import_file", metavar="FILE", help="validate and store the downloaded client JSON")
     p.set_defaults(func=cmd_auth_setup)
@@ -1494,6 +1530,8 @@ def build_parser():
     p.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
     p.set_defaults(func=cmd_auth_login_write)
     asub.add_parser("status-write", help="show the local write-authorization state (no network, no refresh)").set_defaults(func=cmd_auth_status_write)
+    p = asub.add_parser("refresh-write", help="renew the write access token explicitly (contacts Google's OAuth endpoint only; typed confirmation; same permission)")
+    p.set_defaults(func=cmd_auth_refresh_write)
     p = asub.add_parser("logout-write", help="remove the local write token only (does not revoke it at Google)")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     p.set_defaults(func=cmd_auth_logout_write)
@@ -1643,7 +1681,7 @@ def build_parser():
     aisub = ai_p.add_subparsers(dest="ai_command", required=True, metavar="{status}")
     aisub.add_parser("status", help="show local-AI configuration; contacts nothing").set_defaults(func=cmd_classify_ai_status)
     cu = sub.add_parser("cleanup", help="safe-cleanup candidate preview and protection rules (M4A; local, read-only)")
-    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,discover,preview,protect,plan,approve,approval,audit,execute,exec}")
+    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,discover,preview,protect,plan,approve,approval,audit,execute,exec,undo}")
     q = account_opt(cusub.add_parser("candidates", help="preview archive recommendations; changes NOTHING, contacts nothing"))
     q.add_argument("--review", action="store_true", help="show the informational REVIEW_REQUIRED view instead")
     q.add_argument("--limit", type=int, default=20, metavar="N", help="example rows to list (default 20; 0 = none)")
@@ -1743,6 +1781,20 @@ def build_parser():
     ex = cusub.add_parser("exec", help="inspect local execution records (read-only)")
     exsub = ex.add_subparsers(dest="exec_command", required=True, metavar="{list,recovery,show}")
     account_opt(exsub.add_parser("list", help="list execution records")).set_defaults(func=cmd_cleanup_exec_list)
+    un = cusub.add_parser("undo", help="archive undo for ONE archived message at a time (M12C.3): status/preview are local; authorize/run/reconcile are DISABLED in this build")
+    unsub = un.add_subparsers(dest="undo_command", required=True, metavar="{status,preview,authorize,run,reconcile}")
+    q = account_opt(unsub.add_parser("status", help="local read-only: archived items that could be undone, and every undo ledger"))
+    q.add_argument("--exec-id", metavar="EXEC_ID", help="show the items of one execution")
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_undo)
+    for name, text in (("preview", "local read-only: eligibility of one item and the typed phrase an authorization needs"),
+                       ("authorize", "record the owner's separate typed authorization to undo ONE item (disabled in this build)"),
+                       ("run", "undo ONE authorized item, once (disabled in this build)"),
+                       ("reconcile", "settle an open or UNKNOWN undo from a fresh observation; read-only (disabled in this build)")):
+        q = account_opt(unsub.add_parser(name, help=text))
+        q.add_argument("exec_id", metavar="EXEC_ID")
+        q.add_argument("item", type=int, metavar="SEQ", help="the item's sequence number in the execution")
+        q.set_defaults(func=cmd_undo)
     q = account_opt(exsub.add_parser("recovery", help="local read-only status of open or uncertain executions: known, UNKNOWN, manual review (M12C.1; no Gmail, no retry)"))
     q.add_argument("--json", action="store_true", help="machine-readable output")
     q.set_defaults(func=cmd_cleanup_exec_recovery)

@@ -20,7 +20,7 @@ OWNER ACTION REQUIRED
 (synthetic fixture output)
 
 ## What it can and cannot determine
-It reports what the local journal recorded. It **cannot** resolve an UNKNOWN outcome: that needs a fresh, execution-bound read of the real mailbox compared with the record, and no such live observation exists in this version. Ambiguity therefore stays UNKNOWN, and the report says so. It does not know about changes made by other clients. Undo records (which exist only for the in-memory fake mailbox) are not part of this view.
+It reports what the local journal recorded. It **cannot** resolve an UNKNOWN outcome: that needs a fresh, execution-bound read of the real mailbox compared with the record, and no such live observation exists in this version. Ambiguity therefore stays UNKNOWN, and the report says so. It does not know about changes made by other clients. Since M12C.3 the view also lists every archive-undo ledger (restored, not restored, unresolved, conflict, inconsistent, authorized-but-not-run) from the read-only ledger module, by execution id and item sequence number only; it still contacts no one and changes nothing.
 
 ## Read-only guarantees
 Opened through the read-only index handle (a hidden write would fail); no mailbox object is accepted; no Gmail, OAuth or Keychain; no write, retry, resume or continuation; no audit or journal row is added or changed. `LIVE_EXECUTION_ENABLED` stays False and the M4 write-policy boundary is untouched.

@@ -264,7 +264,7 @@ class ObserveTests(AuthBase):
         obs = ad.observe(HEX[0], context=CTX)
         self.assertIsNotNone(obs.observed_at.tzinfo)
         self.assertLess(abs(datetime.now(timezone.utc) - obs.observed_at), timedelta(seconds=30))
-        self.assertEqual({n for n in dir(gw.ArchiveAdapter) if not n.startswith("_")}, {"verify_account", "message_state", "thread_state", "observe", "archive_message"})
+        self.assertEqual({n for n in dir(gw.ArchiveAdapter) if not n.startswith("_")}, {"verify_account", "message_state", "thread_state", "observe", "archive_message", "restore_inbox"})
 
     def test_no_new_endpoint_scope_or_network(self):
         self.assertEqual([(k, m) for k, m, _ in pol._ROUTES], [("PROFILE", "GET"), ("MESSAGE_GET", "GET"), ("THREAD_GET", "GET"), ("MESSAGE_MODIFY", "POST")])

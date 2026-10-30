@@ -45,7 +45,7 @@ class ImportBoundaryTests(unittest.TestCase):
             hits = {n.split(".")[-1] for n, _ in imported_names(tree) if n.split(".")[-1] in WRITE_MODULES}
             if path.name in WRITE_FILES:
                 continue
-            if path.name == "cleanup_canary_cli.py":  # the DISABLED owner entry point reaches the Keychain store class only, lazily, after its first-statement gate
+            if path.name in ("cleanup_canary_cli.py", "undo_cli.py"):  # (undo_cli: M12C.3, same lazy pattern) the DISABLED owner entry point reaches the Keychain store class only, lazily, after its first-statement gate
                 self.assertEqual(hits, {"keystore_write"})
                 top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
                 self.assertFalse({n.split(".")[-1] for t in top for n, _ in imported_names(ast.Module(body=[t], type_ignores=[])) if n.split(".")[-1] in WRITE_MODULES})
@@ -82,13 +82,16 @@ class ImportBoundaryTests(unittest.TestCase):
     def test_the_authorization_flow_is_started_only_by_login_write(self):
         self.assertEqual({c for c in self.callers("run_login_write") if c[1] != "run_login_write"}, {("cli.py", "cmd_auth_login_write")})
 
-    def test_refresh_is_never_started_by_a_command_and_no_production_code_builds_the_adapter_yet(self):
+    def test_refresh_is_started_only_by_the_explicit_refresh_command_and_no_production_code_builds_the_adapter_yet(self):
         fake_only = {"archive_message": {("cleanup_executor.py", "_process_item"), ("exec_fake_mailbox.py", "archive_message")},
-                     "verify_account": {("cleanup_executor.py", "_process_item"), ("exec_fake_mailbox.py", "verify_account"), ("cleanup_undo.py", "undo_item"),
-                                        ("cleanup_undo.py", "reconcile_undo"), ("cleanup_recovery.py", "_recover"), ("exec_live_mailbox.py", "verify_account")}}
+                     "verify_account": {("cleanup_executor.py", "_process_item"), ("exec_fake_mailbox.py", "verify_account"), ("cleanup_undo.py", "_undo_item"),
+                                        ("cleanup_undo.py", "_reconcile_undo"), ("cleanup_recovery.py", "_recover"), ("exec_live_mailbox.py", "verify_account")}}
         fake_only["archive_message"] |= {("exec_live_mailbox.py", "archive_message")}
         fake_only["open_archive_adapter"] = {("exec_live_mailbox.py", "open_live_mailbox")}  # reachable only through the disabled switch; nothing calls it
-        for attr in ("refresh_write_credentials", "refresh_and_store", "open_archive_adapter", "archive_message", "verify_account"):
+        fake_only["open_undo_adapter"] = {("exec_live_mailbox.py", "open_live_undo_mailbox")}  # M12C.3: reachable only through the separate disabled undo switch
+        fake_only["restore_inbox"] = {("cleanup_undo.py", "_undo_item"), ("exec_fake_mailbox.py", "restore_inbox"), ("exec_live_mailbox.py", "restore_inbox")}
+        fake_only["refresh_and_store"] = {("cli.py", "cmd_auth_refresh_write")}  # M12C.3: the one explicit, owner-typed renewal command
+        for attr in ("refresh_write_credentials", "refresh_and_store", "open_archive_adapter", "open_undo_adapter", "archive_message", "restore_inbox", "verify_account"):
             outside = {c for c in self.callers(attr) if c[0] not in WRITE_FILES}
             # the only consumers are the executor's single per-item flow (shared by execute_one and execute_batch) and the fake-only mailbox it accepts (M4C-C2); no production code builds a real adapter
             self.assertEqual(outside, fake_only.get(attr, set()), attr)
@@ -99,11 +102,11 @@ class ImportBoundaryTests(unittest.TestCase):
         self.assertEqual({c for c in self.callers("_discard_new_grant")}, {("cli.py", "cmd_auth_login_write")})  # only a rejected login may discard a fresh grant
         self.assertEqual({c for c in self.callers("WriteTokenStore") if c[0] == "cli.py"}, {("cli.py", "_write_store")})
         self.assertEqual({c for c in self.callers("_write_store")}, {("cli.py", n) for n in (
-            "cmd_auth_login_write", "cmd_auth_status_write", "cmd_auth_logout_write", "cmd_auth_revoke_write")})
+            "cmd_auth_login_write", "cmd_auth_status_write", "cmd_auth_logout_write", "cmd_auth_revoke_write", "cmd_auth_refresh_write")})
 
     def test_project_isolation_is_checked_before_every_operation_that_can_create_or_revoke_a_grant(self):
         self.assertEqual({c for c in self.callers("verify_isolation") if c[0] == "cli.py"},
-                         {("cli.py", n) for n in ("cmd_auth_login_write", "cmd_auth_revoke_write", "cmd_auth_status_write", "_discard_new_grant")})
+                         {("cli.py", n) for n in ("cmd_auth_login_write", "cmd_auth_revoke_write", "cmd_auth_status_write", "cmd_auth_refresh_write", "_discard_new_grant")})  # refresh: M12C.3
         self.assertEqual({c for c in self.callers("check_project_separation") if c[0] == "cli.py"}, {("cli.py", "cmd_auth_setup_write")})
         self.assertEqual({c for c in self.callers("write_isolation_record") if c[0] == "cli.py"}, {("cli.py", "cmd_auth_setup_write")})
         # every network-capable revocation call sits in a function that verified isolation first

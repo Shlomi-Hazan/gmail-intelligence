@@ -150,7 +150,7 @@ class OpenWithoutUnknownTests(Base):
         text = rep.recovery_text(d)
         self.assertFalse(d["needs_owner"])
         self.assertNotIn("nothing needs the owner", text)
-        self.assertIn("open executions remain", text)
+        self.assertIn("remain (see above)", text)
 
 
 class CommandTests(Base):

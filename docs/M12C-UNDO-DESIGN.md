@@ -1,6 +1,32 @@
-# M12C.2 — Real archive undo: design and fake-mailbox validation
+# M12C — Archive undo: design and implementation status
 
-Status: **design only** (issues #61 and #41). It authorizes no code for a real Gmail undo, no change to the live write policy and no Gmail access. `LIVE_EXECUTION_ENABLED` stays `False`. Everything below describes what exists today (all against the in-memory fake mailbox), what is missing, and the decisions the owner must take before any real undo can be built.
+Issues #61 and #41. **Status (M12C.3): the complete undo infrastructure is IMPLEMENTED and DISABLED.** It was verified only against synthetic data, a fake Gmail wire and mocked credentials. No real Gmail access, OAuth login/refresh, Keychain access or mailbox write ever happened; `LIVE_EXECUTION_ENABLED = False` and `LIVE_UNDO_ENABLED = False`. Real Gmail behavior of the undo request is **unverified**. Live use needs a separate written owner authorization after security acceptance. Bulk undo orchestration is **not implemented** (M12D).
+
+## 0. Implementation status of the decisions (M12C.3)
+| Decision | Status | Where |
+|---|---|---|
+| D1 strict write policy | implemented | `gmail_write_policy.UNDO_BODY`, kind `MESSAGE_MODIFY_UNDO`; same route as archive, told apart by the exact body bytes; no new route, label, removal, Trash, delete, batch, send or draft request |
+| D2 independent gate and capability | implemented, off | `exec_live_mailbox.LIVE_UNDO_ENABLED = False` (source constant, no environment/option); `LiveUndoMailbox` (no `archive_message`); transport capabilities `ARCHIVE` / `UNDO` fixed at construction, enforced twice before dispatch |
+| D3 reuse the M4D engine | implemented | `cleanup_undo` unchanged logic; `_undo_item` / `_reconcile_undo` take `allow="FAKE"` or `"LIVE"`; `cleanup_live.undo_live` / `reconcile_undo_live` |
+| D4 context-bound observations | implemented | the real adapter's `observe` with `UNDO_POSTREAD` / `UNDO_RECONCILE` contexts (same validation as archive evidence) |
+| D5 eligibility and drift | unchanged, reused | `_original` + live preflight (exact archived state, thread, protected siblings) before the durable intent |
+| D6 outcome semantics | unchanged | `RESTORED` / `NOT_RESTORED` / `UNKNOWN` / `CONFLICT`; reconciliation never mutates |
+| D7 bulk undo | **contract only** (section 7) | orchestration deferred to M12D |
+| D8 write-token lifecycle | implemented | `auth refresh-write`: explicit, typed, Google OAuth endpoint only, same scope; expired tokens fail closed |
+| D9 read-only undo visibility | implemented | `cleanup exec recovery` now lists undo ledgers (`cleanup_undo_ledger`, read-only) |
+
+### The exact change to the live write-policy boundary
+Before: four request families; the only mutation body `{"removeLabelIds":["INBOX"]}`. After: the same four routes and the same archive body, plus ONE additional accepted body on the modify route, `{"addLabelIds":["INBOX"]}`, which is classified as the separate mutation kind `MESSAGE_MODIFY_UNDO`. Everything else is denied exactly as before. A transport/adapter built for archive cannot send it and vice versa (`DENIED_CAPABILITY`, `dispatched=False`). No OAuth scope changed (`gmail.modify` is still the one write scope).
+
+### Owner CLI (`cleanup undo`)
+`status` and `preview` are local and read-only. `authorize`, `run` and `reconcile` refuse with a fixed message (exit 2) right after argument parsing, before the index, the credential store or the network is touched, while `LIVE_UNDO_ENABLED` is False. The ordinary CLI reaches the live path only through `undo_cli`. `auth refresh-write` renews the write access token on explicit owner request (typed phrase `REFRESH GMAIL MODIFY`); nothing refreshes in the background.
+
+### Limits (not established)
+Gmail's real response to the undo request, quota/permission behavior and eventual consistency are unverified; an HTTP 200 is never treated as proof (the independent post-read decides). In-process guards are barriers against mistakes and ordinary callers, not against deliberate reflection. Undo is per item: no bulk reversal exists yet.
+
+---
+
+*The sections below are the design analysis that preceded the implementation (still accurate for the unchanged parts); where they say "gap", section 0 records what M12C.3 closed.*
 
 ## 1. What exists (M4D, fake mailbox only, unchanged)
 `cleanup_undo.py` implements the whole undo flow against `FakeMailbox`; it is unreachable from the CLI and `type(mailbox) is FakeMailbox` is enforced.
@@ -40,7 +66,7 @@ Status: **design only** (issues #61 and #41). It authorizes no code for a real G
 7. **Live reconciliation is read-only but unbuilt** (M12C.1 only reports the local journal).
 8. **Consolidated security review** of the finished M4 plus the undo addition has not been done (#41).
 
-## 3. Design decisions (proposed; each needs owner approval before code)
+## 3. Design decisions (D1-D6, D8, D9 approved and implemented in M12C.3; D7 contract below)
 - **D1. One additive mutation class, nothing else.** A second fixed request in the allowlist: `POST …/messages/{id}/modify` with body exactly `{"addLabelIds":["INBOX"]}` and the same fixed response projection. No other label may be added, no removal, no Trash/untrash, no delete, no batch endpoints. The existing archive body stays unchanged; both bodies are compared byte-for-byte.
 - **D2. Separate type and gate.** A distinct undo capability on the adapter (`restore_inbox`) reachable only from the undo flow, a distinct permit like the canary's, and its **own** disabled constant (e.g. `LIVE_UNDO_ENABLED = False`) that does not piggyback on the archive switch. Flipping it needs a separate written owner authorization.
 - **D3. Reuse the M4D engine unchanged.** The real undo calls the same `authorize_undo` / `undo_item` / `reconcile_undo` logic with a mailbox that satisfies the same interface; the fake-only `_gate` becomes an explicit `FAKE`/`LIVE` allow, mirroring `cleanup_recovery._recover`. No second engine.
@@ -60,3 +86,18 @@ The M4D suite already covers: success restoring INBOX only, unrelated labels and
 
 ## 6. Recommended next step
 **M12C.3 — owner decision, then a policy-only increment.** First the owner decides D1/D2/D9 (the new mutation class, the separate undo switch, the guard adjustment). Only after that: (a) a policy-and-transport change adding the single `addLabelIds:["INBOX"]` request, tested against the fake HTTP layer with the new guard tests, disabled by default; (b) read-only undo visibility in the recovery status; (c) a reviewed owner CLI behind the disabled switch. Live use of any of it needs a separate written authorization after the consolidated security review.
+
+## 7. D7 — bulk undo: integration contract for M12D (not implemented)
+The per-item primitive (authorize -> preflight -> durable intent -> one mutation -> independent bound post-read -> `RESTORED`/`UNKNOWN`/`CONFLICT`, reconcile without mutation) is the ONLY undo operation. M12D must reuse it, not add a second path:
+1. **A reviewed, immutable reversal plan.** Derived only from `APPLIED` items with trusted evidence of ONE finished execution; frozen with a hash like an M4B plan (item list, source execution, protection and policy digests); any change is a new plan and a new approval. Nothing is selected by default and the selection can never grow.
+2. **Per-message revalidation.** Every item is re-checked by the same preflight immediately before its own intent (exact archived state, thread, protected siblings, drift). A failing item is skipped and reported; it never blocks or widens the rest.
+3. **Owner approval.** A typed approval of the reversal plan (new phrase, never the archive phrase) plus the existing per-item authorization semantics adapted so one plan approval yields one authorization per item inside bounded slices; M12D decides the exact ledger form without weakening the strict per-item state machine.
+4. **Bounded slices and durable progress.** Small slices (like the archive executor), each needing its own fresh confirmation; progress is the per-item ledger itself (append-only audit), so a restart resumes nothing automatically.
+5. **Interruption.** An item with an intent and no result is `OPEN`; the slice stops; recovery status shows it; only `reconcile` (fresh observation) can settle it. No automatic retry, resume or continuation.
+6. **UNKNOWN and CONFLICT** stop the slice and require the owner; neither is ever rewritten as success.
+7. **No hidden selection expansion** and no thread-level or label-wide operation: message-level only.
+8. **Audit integrity.** Every step appends to the hash-chained audit log; the original archive history is never modified; the reversal plan's own events are separate.
+9. Live use of any of it needs the live-undo gate (`LIVE_UNDO_ENABLED`) and a new written owner authorization.
+
+## 8. Separate authorization still required for live use
+Enabling `LIVE_UNDO_ENABLED` (a source change), granting or renewing real OAuth credentials, any real Gmail read or write, a real-mailbox canary of the undo, and bulk undo. None is part of M12C.3.
