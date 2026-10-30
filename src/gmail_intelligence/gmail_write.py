@@ -7,7 +7,7 @@ Design:
     nothing is refreshed here. An expired token stops the call; refresh/revocation are separate OAuth operations (oauth_write).
   * The adapter exposes verify_account / message_state / thread_state / observe / archive_message / restore_inbox only - never the connection, token or credentials.
   * Archive and undo are SEPARATE capabilities fixed when the transport is built: `archive_message` needs "ARCHIVE", `restore_inbox` needs "UNDO", and the transport itself refuses
-    (before any dispatch) the mutation kind its capabilities do not include. Production factories grant exactly one: `open_archive_adapter` -> ARCHIVE, `open_undo_adapter` -> UNDO.
+    (before any dispatch) the mutation kind its capabilities do not include. A transport holds EXACTLY ONE capability (never both): `open_archive_adapter` -> ARCHIVE, `open_undo_adapter` -> UNDO.
   * Failures map to fixed codes; messages never contain tokens, ids, URLs or account identifiers.
   * Once dispatch may have begun, EVERY unclear result of the single mutation request (timeout, interruption, redirect, oversized/malformed/
     unexpected answer, any unexpected exception) is reported as UncertainOutcome, which the executor must record as UNKNOWN and reconcile; it
@@ -163,10 +163,10 @@ class _Transport:
     __slots__ = ("_creds", "_factory", "_sent", "_allowed", "_bound", "_caps")
 
     def __init__(self, creds, connection_factory=None, capabilities=("ARCHIVE",)):
-        caps = frozenset(capabilities)
-        if not caps or not caps <= {"ARCHIVE", "UNDO"}:
-            raise ValueError("unknown transport capability")
-        self._caps = caps  # which mutation kinds this transport may send; fixed at construction
+        # Archive and undo are STRICTLY separate: a transport holds exactly ONE capability. Empty, unknown, repeated, string or combined sets are refused.
+        if type(capabilities) not in (tuple, list, frozenset) or len(capabilities) != 1 or next(iter(capabilities)) not in ("ARCHIVE", "UNDO"):
+            raise ValueError("a transport takes exactly one capability: ARCHIVE or UNDO")
+        self._caps = frozenset(capabilities)  # which mutation kind this transport may send; fixed at construction
         self._creds, self._factory, self._sent = creds, connection_factory or _default_connection, 0
         self._bound = False  # a transport (its credentials and its verified state) belongs to exactly one adapter
         self._allowed = False  # mutations stay locked until the adapter's verify_account() unlocks them
@@ -322,7 +322,7 @@ class ArchiveAdapter:
     """The only object a future executor receives. Public API: verify_account, message_state, thread_state, observe, archive_message, restore_inbox.
 
     `archive_message` / `restore_inbox` are refused until `verify_account()` succeeded; a later identity/authorization problem locks them again. Which of the two mutations
-    exists at all is decided by the capabilities of the transport the adapter was built on (archive OR undo, never both in production).
+    exists at all is decided by the capabilities of the transport the adapter was built on (archive OR undo, never both).
     """
     __slots__ = ("_t", "_expected", "_issuer")
 

@@ -67,11 +67,34 @@ class CapabilityTests(unittest.TestCase):
         a._verified = True
         return a
 
-    def test_a_transport_holds_exactly_the_capabilities_it_was_built_with(self):
-        for bad in ((), ("DELETE",), ("ARCHIVE", "TRASH"), ("",)):
-            with self.assertRaises(ValueError):
+    def test_a_transport_holds_exactly_ONE_capability_never_both(self):
+        for bad in ((), [], frozenset(), ("DELETE",), ("ARCHIVE", "TRASH"), ("",), ("ARCHIVE", "UNDO"), ("UNDO", "ARCHIVE"), ["ARCHIVE", "UNDO"], frozenset({"ARCHIVE", "UNDO"}),
+                    ("ARCHIVE", "ARCHIVE"), ("UNDO", "UNDO"), "ARCHIVE", "UNDO", "ARCHIVEUNDO", None, 5, {"ARCHIVE"}, (b"ARCHIVE",), ("archive",), (None,)):
+            with self.assertRaises(ValueError, msg=bad):
                 gw._Transport(TWT.WCreds(), None, capabilities=bad)
         self.assertEqual(gw._Transport(TWT.WCreds(), None)._caps, frozenset({"ARCHIVE"}))   # the default stays archive-only
+        self.assertEqual(gw._Transport(TWT.WCreds(), None, capabilities=("UNDO",))._caps, frozenset({"UNDO"}))
+        self.assertEqual(gw._Transport(TWT.WCreds(), None, capabilities=["ARCHIVE"])._caps, frozenset({"ARCHIVE"}))
+        # nothing in the production sources ever asks for both
+        for path in SRC.glob("*.py"):
+            self.assertNotRegex(path.read_text(), r"capabilities=\(\"(ARCHIVE\", \"UNDO|UNDO\", \"ARCHIVE)\"")
+
+    def test_the_fake_mailbox_keeps_the_two_capabilities_on_two_separate_adapters(self):
+        mb = fm.FakeMailbox(ACCT, {"a1": ("b1", ["INBOX"])}, clock=lambda: __import__("datetime").datetime(2027, 1, 1, tzinfo=__import__("datetime").timezone.utc))
+        self.assertEqual((mb._adapter._t._caps, mb._undo_adapter._t._caps), (frozenset({"ARCHIVE"}), frozenset({"UNDO"})))
+        self.assertIsNot(mb._adapter._t, mb._undo_adapter._t)
+        self.assertTrue(fm.wiring_is_fake(mb))
+        mb._undo_adapter._t._caps = frozenset({"ARCHIVE"})        # a re-wired undo adapter is no longer an accepted fake
+        self.assertFalse(fm.wiring_is_fake(mb))
+
+    def test_a_denied_capability_dispatches_nothing_at_any_layer(self):
+        net = TWT.Net()
+        for caps, call in ((("ARCHIVE",), lambda a: a.restore_inbox(TWT.MID)), (("UNDO",), lambda a: a.archive_message(TWT.MID))):
+            a = self.adapter(net, caps)
+            with self.assertRaises(pol.Denied) as ctx:
+                call(a)
+            self.assertEqual((ctx.exception.code, gw.definitely_not_dispatched(ctx.exception), a._t._sent), ("DENIED_CAPABILITY", True, 0))
+        self.assertEqual((net.opened, net.log), (0, []))
 
     def test_an_archive_adapter_cannot_undo_and_an_undo_adapter_cannot_archive_before_any_dispatch(self):
         net = TWT.Net()

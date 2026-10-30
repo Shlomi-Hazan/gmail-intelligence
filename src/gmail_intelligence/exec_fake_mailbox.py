@@ -201,15 +201,19 @@ def wiring_is_fake(mailbox):
         adapter = mailbox._adapter
         transport = adapter._t
         factory = transport._factory
+        undo, ut = mailbox._undo_adapter, mailbox._undo_adapter._t
         return (type(mailbox) is FakeMailbox and type(adapter) is gw.ArchiveAdapter and type(transport) is gw._Transport and type(factory) is _Factory
-                and type(transport._creds) is _FakeCreds and factory._service is mailbox._service and transport._creds is mailbox._service.creds)
+                and type(transport._creds) is _FakeCreds and factory._service is mailbox._service and transport._creds is mailbox._service.creds
+                and transport._caps == frozenset({"ARCHIVE"})
+                and type(undo) is gw.ArchiveAdapter and type(ut) is gw._Transport and type(ut._factory) is _Factory and ut._factory._service is mailbox._service
+                and ut._creds is mailbox._service.creds and ut._caps == frozenset({"UNDO"}))
     except AttributeError:
         return False
 
 
 class FakeMailbox:
     """The one mailbox type the C2 executor accepts. Final and immutable; no credential, factory or transport can be supplied or replaced by assignment."""
-    __slots__ = ("_service", "_adapter", "_clock")
+    __slots__ = ("_service", "_adapter", "_undo_adapter", "_clock")
     FAKE_ONLY = True
 
     def __init_subclass__(cls, **kwargs):
@@ -223,7 +227,8 @@ class FakeMailbox:
             raise ValueError("messages must map hex message ids to (hex thread id, labels)")
         service = _Service(account.strip(), messages, tuple(script))
         for name, value in (("_service", service), ("_clock", clock),
-                            ("_adapter", gw.ArchiveAdapter(gw._Transport(service.creds, _Factory(service), capabilities=("ARCHIVE", "UNDO")), account.strip(), _clock=clock))):  # test infrastructure: both
+                            ("_adapter", gw.ArchiveAdapter(gw._Transport(service.creds, _Factory(service), capabilities=("ARCHIVE",)), account.strip(), _clock=clock)),
+                            ("_undo_adapter", gw.ArchiveAdapter(gw._Transport(service.creds, _Factory(service), capabilities=("UNDO",)), account.strip(), _clock=clock))):
             object.__setattr__(self, name, value)
 
     def __setattr__(self, name, value):
@@ -247,7 +252,13 @@ class FakeMailbox:
         return self._service.account
 
     def verify_account(self):
-        return self._adapter.verify_account()
+        """One live-shaped profile read through the archive adapter. The in-memory undo adapter shares that verified account (test infrastructure: it avoids a second profile read)."""
+        try:
+            self._adapter.verify_account()
+        except BaseException:
+            self._undo_adapter._verified = False
+            raise
+        self._undo_adapter._verified = True
 
     def message_state(self, message_id):
         return self._adapter.message_state(message_id)
@@ -264,7 +275,9 @@ class FakeMailbox:
     def restore_inbox(self, message_id):
         """Undo of an archive through the REAL adapter code and request policy (the fixed undo body), answered by the in-memory service. Returns the labels Gmail's answer reported.
         Failures carry the adapter's dispatch markers: `dispatched=False` only for refusals proven to be before any transmission."""
-        return self._adapter.restore_inbox(message_id).label_ids
+        if not self._adapter._verified:  # losing the verified account locks the undo too
+            raise gw._mark(gw.AccountNotVerified(), False)
+        return self._undo_adapter.restore_inbox(message_id).label_ids
 
     # ---- inspection and "someone else" controls for tests
     @property
