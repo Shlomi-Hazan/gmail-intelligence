@@ -1436,6 +1436,19 @@ def cmd_labels_report(args):
     return _with_index(args, lambda i, a: print(label_report.hygiene_text(i, a, label_hygiene.analyze(i, a), args.show_names)) or 0)
 
 
+def cmd_cleanup_exec_recovery(args):
+    """M12C.1: LOCAL read-only status of open or uncertain executions (known / UNKNOWN / manual review). Reads the journal only; contacts no one, retries and resumes nothing."""
+    import json
+
+    from gmail_intelligence import cleanup_exec_report
+
+    def go(index, account):
+        data = cleanup_exec_report.recovery_data(index, account)
+        print(json.dumps(data, indent=2, sort_keys=True) if args.json else cleanup_exec_report.recovery_text(data))
+        return 0
+    return _with_readonly_index(args, go)
+
+
 def cmd_cleanup_exec_show(args):
     from gmail_intelligence import cleanup_exec, cleanup_exec_report
     from gmail_intelligence import cleanup_plans as cp
@@ -1728,8 +1741,11 @@ def build_parser():
     q.add_argument("--dry-run", action="store_true", help="required: execution itself does not exist in this version")
     q.set_defaults(func=cmd_cleanup_execute)
     ex = cusub.add_parser("exec", help="inspect local execution records (read-only)")
-    exsub = ex.add_subparsers(dest="exec_command", required=True, metavar="{list,show}")
+    exsub = ex.add_subparsers(dest="exec_command", required=True, metavar="{list,recovery,show}")
     account_opt(exsub.add_parser("list", help="list execution records")).set_defaults(func=cmd_cleanup_exec_list)
+    q = account_opt(exsub.add_parser("recovery", help="local read-only status of open or uncertain executions: known, UNKNOWN, manual review (M12C.1; no Gmail, no retry)"))
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_cleanup_exec_recovery)
     q = account_opt(exsub.add_parser("show", help="state, slices and item counts of one execution"))
     q.add_argument("exec_id")
     q.add_argument("--show-ids", action="store_true", help="also list message ids and item states")
