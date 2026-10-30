@@ -6,8 +6,9 @@
 The M4D recovery engine (`cleanup_recovery`) composes the execution journal's own functions: interrupted executions become UNKNOWN work, and each UNKNOWN item is reconciled only from a **fresh observation bound to that item's episode**, otherwise it stays UNKNOWN. That engine needs a mailbox object to observe, works only with the in-memory fake mailbox, and is deliberately unreachable from the CLI (a guard test asserts it). It is unchanged.
 M12C.1 reuses its report helpers (`ExecutionReport`, outcome counts, which executions are relevant). They were **moved unchanged** into `cleanup_exec_report.py` (the engine imports them from there) so the CLI can show them without importing the recovery or undo engine. There is one implementation, not two.
 
-## What the command shows (counts only; no ids, labels, senders, plan ids or account)
-Per open or uncertain execution: its state; **known** outcomes (recorded as applied; known not applied: not applied, never attempted, skipped); **UNKNOWN** outcomes (an attempt may or may not have changed the mailbox); **manual review** (a conflicting observation); pending items; the sequence numbers of items that need you; notes. An `EXECUTING` execution whose lease has expired is reported as interrupted (it is not recovered here).
+## What the command shows
+Counts, states and item sequence numbers. It hides message ids, the account address, labels, senders and other sensitive metadata; it **may include local execution ids** (the `exec-...` identifiers you also see in `cleanup exec list`), which are not message data.
+Per open or uncertain execution: its state; **known** outcomes (recorded as applied; known not applied: not applied, never attempted, skipped); **UNKNOWN** outcomes (an attempt may or may not have changed the mailbox); **manual review** (a conflicting observation); pending items; the sequence numbers of items that need you; notes. An `EXECUTING` execution whose lease has expired is reported as interrupted (it is not recovered here). A `PREPARED` execution (not started) or one `AWAITING_CONTINUATION` (later slices need their own confirmation, or an abort) is listed as **open and not settled** and counts as needing an owner decision even when nothing is UNKNOWN.
 
 ```
 execution exec-e31b39b2: RECONCILIATION_REQUIRED

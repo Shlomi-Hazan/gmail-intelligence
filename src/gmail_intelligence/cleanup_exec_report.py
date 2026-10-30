@@ -163,6 +163,11 @@ def _iso(dt):
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+OPEN_DECISION = {
+    "PREPARED": "prepared and not started: nothing has been attempted or recorded yet, so it is not settled; it stays open and needs an owner decision",
+    "AWAITING_CONTINUATION": "waiting: the remaining slice(s) each need their own fresh typed confirmation, or the owner must abort; nothing continues automatically, so it is not settled"}
+
+
 def status(index, account, now=None):
     """[ExecutionReport] for every open or uncertain execution, oldest first, and whether anything needs the owner. Read-only; works on a read-only index handle."""
     now = (now or datetime.now(timezone.utc))
@@ -174,8 +179,10 @@ def status(index, account, now=None):
             notes = tuple(n for n in er.notes if not n.startswith("in progress")) + (
                 "the lease has expired: the process appears to have been interrupted; it is NOT recovered here (recovery needs a fresh observation of the real mailbox and a separate authorization)",)
             er = ExecutionReport(er.exec_id, er.state, er.counts, er.resolved_now, er.unresolved, notes)
+        if er.state in OPEN_DECISION:  # open, though nothing is UNKNOWN: it is NOT settled and still waits for an owner decision
+            er = ExecutionReport(er.exec_id, er.state, er.counts, er.resolved_now, er.unresolved, er.notes + (OPEN_DECISION[er.state],))
         out.append(er)
-    needs = any(e.unresolved or any(n.startswith("the lease has expired") for n in e.notes) or e.state == "RECONCILIATION_REQUIRED" for e in out)
+    needs = any(e.unresolved or e.state in OPEN_DECISION or any(n.startswith("the lease has expired") for n in e.notes) or e.state == "RECONCILIATION_REQUIRED" for e in out)
     return out, needs
 
 
@@ -194,7 +201,7 @@ RECOVERY_NOTE = ("Local, read-only: this reads the local execution journal only.
 
 
 def recovery_data(index, account, now=None):
-    """The M12C.1 status as plain data (counts, states and item sequence numbers only; no ids, labels, senders or credentials)."""
+    """The M12C.1 status as plain data (counts, states and item sequence numbers; no message ids, account address, labels, senders or credentials; local execution ids may appear)."""
     reports, needs = status(index, account, now)
     return {"executions": [view(r) for r in reports], "needs_owner": needs, "read_only": True, "gmail_contacted": False, "retried_or_changed": 0}
 
@@ -210,5 +217,5 @@ def recovery_text(data):
         out += [f"    note: {n}" for n in e["notes"]]
     if not data["executions"]:
         out.append("  no open or uncertain executions")
-    out.append("  OWNER ACTION REQUIRED" if data["needs_owner"] else "  nothing needs the owner")
+    out.append("  OWNER ACTION REQUIRED" if data["needs_owner"] else "  no owner decision needed right now; open executions remain (see above)" if data["executions"] else "  nothing needs the owner")
     return "\n".join(out + ["", RECOVERY_NOTE])
