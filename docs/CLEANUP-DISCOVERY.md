@@ -26,4 +26,4 @@ Totals in exactly one bucket each: possible candidates, needs review (uncertain)
 Read-only index handle; no Gmail, OAuth, Keychain or network; no plan, approval or execution is created; no new schema, scope or dependency; the M4 write-policy boundary is untouched; `LIVE_EXECUTION_ENABLED` stays False. Zero Additional Cost: standard library only.
 
 ## What comes next (not in this change)
-M12B review and approval (message-level exclusions, exact preview, immutable plans), M12C recovery and safety (with #41), M12D controlled execution and M12E dashboard screens each need their own approval.
+M12B review and approval is now available ([CLEANUP-REVIEW.md](CLEANUP-REVIEW.md)); M12C recovery and safety (with #41), M12D controlled execution and M12E dashboard screens each need their own approval.

@@ -962,8 +962,52 @@ def _read_ids_file(path):
     return [ln.strip() for ln in p.read_text().splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
 
 
+def cmd_cleanup_preview(args):
+    """M12B: the exact messages a selection of discovery groups (minus exclusions) would put in a plan. Read-only; creates nothing; fixed-text errors."""
+    import json
+
+    from gmail_intelligence import cleanup_review
+
+    def go(index, account):
+        try:
+            cleanup_review.check_action(args.action)
+            sel = cleanup_review.resolve(index, account, args.group, args.exclude_id, min_age_days=args.min_age_days)
+            p = cleanup_review.preview(sel, page=args.page, page_size=args.page_size, show_ids=args.show_ids)
+            out = json.dumps(p, indent=2, sort_keys=True) if args.json else cleanup_review.render_text(p)  # built completely before anything is printed
+        except cleanup_review.ReviewError as exc:
+            return _fail(exc)
+        print(out)
+        return 0
+    return _with_readonly_index(args, go)
+
+
+def _cleanup_plan_from_groups(args, index, account, cp):
+    from gmail_intelligence import cleanup_review
+
+    if args.message_id or args.ids_file:
+        return _fail("use either --group (reviewed groups) or --message-id/--ids-file (explicit ids), not both")
+    try:
+        cleanup_review.check_action(args.action)
+        if not args.selection_digest:
+            return _fail("--selection-digest is required with --group: run `cleanup preview` first and repeat its digest")
+        plan = cleanup_review.create_plan_from_selection(index, account, args.group, args.exclude_id, args.selection_digest, min_age_days=args.min_age_days)
+    except cleanup_review.ReviewError as exc:
+        return _fail(exc)
+    print(f"Plan {plan['plan_id']} created as DRAFT from the reviewed selection: {plan['item_count']} target(s), action {plan['action']}, hash {cp.short(plan['plan_hash'])}.")
+    print("Next: cleanup plan show / review it, then cleanup approve. Approval records a typed confirmation only; nothing was approved or executed; Gmail was not contacted.")
+    return 0
+
+
 def cmd_cleanup_plan_create(args):
     def go(index, account, cp):
+        if args.group or args.exclude_id or args.selection_digest:
+            return _cleanup_plan_from_groups(args, index, account, cp)
+        if args.action:
+            from gmail_intelligence import cleanup_review
+            try:
+                cleanup_review.check_action(args.action)
+            except cleanup_review.ReviewError as exc:
+                return _fail(exc)
         try:
             ids = list(args.message_id or []) + (_read_ids_file(args.ids_file) if args.ids_file else [])
         except (OSError, ValueError) as exc:
@@ -1586,7 +1630,7 @@ def build_parser():
     aisub = ai_p.add_subparsers(dest="ai_command", required=True, metavar="{status}")
     aisub.add_parser("status", help="show local-AI configuration; contacts nothing").set_defaults(func=cmd_classify_ai_status)
     cu = sub.add_parser("cleanup", help="safe-cleanup candidate preview and protection rules (M4A; local, read-only)")
-    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,discover,protect,plan,approve,approval,audit,execute,exec}")
+    cusub = cu.add_subparsers(dest="cleanup_command", required=True, metavar="{candidates,discover,preview,protect,plan,approve,approval,audit,execute,exec}")
     q = account_opt(cusub.add_parser("candidates", help="preview archive recommendations; changes NOTHING, contacts nothing"))
     q.add_argument("--review", action="store_true", help="show the informational REVIEW_REQUIRED view instead")
     q.add_argument("--limit", type=int, default=20, metavar="N", help="example rows to list (default 20; 0 = none)")
@@ -1602,6 +1646,16 @@ def build_parser():
     q.add_argument("--min-age-days", type=int, default=90, metavar="N", help="minimum age in days (90 or more)")
     q.add_argument("--json", action="store_true", help="machine-readable output")
     q.set_defaults(func=cmd_cleanup_discover)
+    q = account_opt(cusub.add_parser("preview", help="preview the exact messages of selected discovery groups, minus your exclusions (M12B; read-only, creates no plan)"))
+    q.add_argument("--group", action="append", metavar="DOMAIN", help="a sender domain listed by `cleanup discover` (repeatable; nothing is selected by default)")
+    q.add_argument("--exclude-id", action="append", metavar="ID", help="exclude one message from the selection (repeatable)")
+    q.add_argument("--action", default="archive", metavar="ACTION", help="archive (the only supported action; trash is unavailable, permanent deletion is never offered)")
+    q.add_argument("--min-age-days", type=int, default=90, metavar="N", help="minimum age in days (90 or more)")
+    q.add_argument("--page", type=int, default=1, metavar="N")
+    q.add_argument("--page-size", type=int, default=25, metavar="N", help="messages per page (1-200, default 25)")
+    q.add_argument("--show-ids", action="store_true", help="print message ids (private; hidden by default)")
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_cleanup_preview)
     pr = cusub.add_parser("protect", help="list, add, enable, disable or remove protection rules")
     prsub = pr.add_subparsers(dest="protect_command", required=True, metavar="{list,add,enable,disable,remove}")
     q = account_opt(prsub.add_parser("list", help="show protection rules (values masked by default)"))
@@ -1627,6 +1681,10 @@ def build_parser():
     q.add_argument("--message-id", action="append", metavar="ID", help="a target message id (repeatable)")
     q.add_argument("--ids-file", metavar="FILE", help="file with one message id per line (see cleanup candidates --export-ids)")
     q.add_argument("--min-age-days", type=int, default=90, metavar="N", help="minimum age in days (90 or more)")
+    q.add_argument("--group", action="append", metavar="DOMAIN", help="M12B: plan the reviewed selection of this discovery group (repeatable; needs --selection-digest)")
+    q.add_argument("--exclude-id", action="append", metavar="ID", help="M12B: exclude one message from the --group selection (repeatable)")
+    q.add_argument("--selection-digest", metavar="DIGEST", help="M12B: the digest printed by `cleanup preview` for exactly this selection")
+    q.add_argument("--action", metavar="ACTION", help="M12B: archive only (trash is unavailable, permanent deletion is never offered)")
     q.set_defaults(func=cmd_cleanup_plan_create)
     account_opt(plsub.add_parser("list", help="list plans")).set_defaults(func=cmd_cleanup_plan_list)
     q = account_opt(plsub.add_parser("impact", help="how the current index state affects stored plans (M7B; local, read-only, changes nothing)"))
