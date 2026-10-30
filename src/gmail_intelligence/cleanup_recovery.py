@@ -12,18 +12,9 @@ from dataclasses import dataclass
 from datetime import timezone
 
 from gmail_intelligence import cleanup_exec as ce, cleanup_executor as cx, cleanup_plans as cp, cleanup_undo as cu
+from gmail_intelligence.cleanup_exec_report import ExecutionReport, _counts, _execution_report, _relevant  # noqa: F401 - moved to the read-only report module the CLI already uses (M12C.1); names kept here
 
 _STOP_CODES = ("AUTH_PROBLEM", "ACCOUNT_MISMATCH", "ACCOUNT_NOT_VERIFIED")
-
-
-@dataclass(frozen=True)
-class ExecutionReport:
-    exec_id: str
-    state: str
-    counts: tuple  # ((name, n), ...): APPLIED, NOT_APPLIED, NEVER_ATTEMPTED, SKIPPED, CONFLICT, UNKNOWN, PENDING, INTENT (zero counts omitted)
-    resolved_now: int  # UNKNOWN items resolved by this call
-    unresolved: tuple  # sequence numbers of items that still need the owner (UNKNOWN or CONFLICT)
-    notes: tuple
 
 
 @dataclass(frozen=True)
@@ -34,39 +25,6 @@ class RecoveryReport:
     undos_resolved: int
     stopped: str  # '' or the closed reason the call stopped early
     needs_owner: bool
-
-
-def _counts(index, account, exec_id):
-    names = {"APPLIED": "APPLIED", "CONFLICT": "CONFLICT", "UNKNOWN": "UNKNOWN", "PENDING": "PENDING", "INTENT": "INTENT"}
-    out = {}
-    for r in index._q("SELECT state, error_code, COUNT(*) n FROM cleanup_exec_item WHERE account=? AND exec_id=? GROUP BY state, error_code", account, exec_id):
-        if r["state"] in names:
-            key = names[r["state"]]
-        elif r["state"] in ("SKIPPED_DRIFT", "SKIPPED_GONE"):
-            key = "SKIPPED"
-        else:
-            key = "NEVER_ATTEMPTED" if r["error_code"] == "NEVER_ATTEMPTED" else "NOT_APPLIED"
-        out[key] = out.get(key, 0) + r["n"]
-    return tuple(sorted(out.items()))
-
-
-def _execution_report(index, account, exec_id, resolved, notes):
-    ex = ce.get_execution(index, account, exec_id)
-    unresolved = tuple(r["seq"] for r in index._q("SELECT seq FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state IN ('UNKNOWN','CONFLICT','INTENT') ORDER BY seq",
-                                                  account, exec_id))
-    notes = list(notes)
-    if ex["state"] == "EXECUTING":
-        notes.append("in progress: a live lease holds this execution; it was not touched")
-    if any(r["state"] == "CONFLICT" for r in index._q("SELECT state FROM cleanup_exec_item WHERE account=? AND exec_id=?", account, exec_id)):
-        notes.append("a conflicting observation needs the owner; nothing is retried")
-    return ExecutionReport(exec_id, ex["state"], _counts(index, account, exec_id), resolved, unresolved, tuple(notes))
-
-
-def _relevant(index, account):
-    """Executions that are not finished, plus finished ones that still hold an UNKNOWN or CONFLICT item."""
-    return [r["exec_id"] for r in index._q(
-        "SELECT e.exec_id FROM cleanup_execution e WHERE e.account=? AND (e.state IN ('PREPARED','EXECUTING','AWAITING_CONTINUATION','RECONCILIATION_REQUIRED') "
-        "OR EXISTS (SELECT 1 FROM cleanup_exec_item i WHERE i.account=e.account AND i.exec_id=e.exec_id AND i.state IN ('UNKNOWN','CONFLICT'))) ORDER BY e.created_at, e.exec_id", account)]
 
 
 def status_report(index, account):
