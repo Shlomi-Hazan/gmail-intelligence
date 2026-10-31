@@ -22,7 +22,8 @@ from datetime import timedelta, timezone
 
 from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, cleanup_executor as cx, cleanup_plans as cp, exec_live_mailbox as live
 from gmail_intelligence.cleanup_audit import sha256
-from gmail_intelligence.cleanup_undo_ledger import RESULTS, STATUSES, UNDO_EVENTS, _ledger, _state, open_undos, undo_status  # noqa: F401 - the read-only ledger lives in its own module
+from gmail_intelligence.cleanup_undo_ledger import RESULTS, STATUSES, UNDO_EVENTS, _ledger, _state, all_undos, open_undos, undo_status  # noqa: F401 - the read-only ledger lives in its own module
+from gmail_intelligence.cleanup_undo_ledger import reversal_approved as ledger_reversal_approved
 from gmail_intelligence.exec_fake_mailbox import FakeMailbox, wiring_is_fake
 
 UNDO_AUTH_TTL = timedelta(minutes=15)
@@ -123,6 +124,43 @@ def authorize_undo(index, account, exec_id, seq, phrase, now=None):
     return "AUTHORIZED"
 
 
+def authorize_in_reversal(index, account, exec_id, seq, rev, slice_no, slice_phrase_sha256, now=None):
+    """The per-item authorization INSIDE an approved reversal plan (M12D): the owner's typed slice confirmation (verified by `cleanup_reversal` before this is called) authorizes
+    the item exactly as `authorize_undo` would, and the entry is tied to the reversal plan and slice. Same eligibility, same state machine (only from NONE / NOT_RESTORED), same
+    15-minute single-attempt authorization; it is written lazily, item by item, right before the item is undone."""
+    now = cp._utc(now)
+    at = cp._iso(now)
+    with cp._txn(index):
+        cp._check_clock(index, account, now)
+        ex, item, plan = _original(index, account, exec_id, seq)
+        status = undo_status(index, account, exec_id, seq)
+        if status not in ("NONE", "NOT_RESTORED"):
+            raise ce.ExecError("UNDO_NOT_ALLOWED", f"this item's undo state is {status}; a new authorization is not possible")
+        audit.append(index, account, ex["plan_id"], "UNDO_AUTHORIZED", at, {"exec": exec_id, "item": seq, "phrase_sha256": slice_phrase_sha256, "rev": rev, "slice": slice_no})
+    return "AUTHORIZED"
+
+
+def _restored_siblings(index, account, exec_id, rev, archived):
+    """F5 (M12D): the expected labels of siblings, with those RESTORED *by this very reversal plan* expected at their original labels (INBOX back).
+
+    A sibling counts as intentionally restored only when ALL hold: the reversal plan is genuinely approved (REVERSAL_APPROVED in the audit log); the sibling's item ledger is in the
+    strict state RESTORED (a completed, trusted, observed outcome - never UNKNOWN, OPEN or INCONSISTENT); and the authorization behind that outcome carries THIS reversal's id. Anything else
+    stays expected in its archived state, so an arbitrary INBOX label, a restoration by another plan, or any other change is still thread drift. Protected labels are checked separately."""
+    if not rev or not ledger_reversal_approved(index, account, rev):
+        return archived
+    out = dict(archived)
+    for ex_id, seq, _status in all_undos(index, account):
+        if ex_id != exec_id:
+            continue
+        status, auth, _i, _r = _state(_ledger(index, account, exec_id, seq))
+        if status != "RESTORED" or auth is None or auth["meta"].get("rev") != rev:
+            continue
+        row = _item_by_seq(index, account, exec_id, seq)
+        if row["state"] == "APPLIED" and row["prev_label_ids"] is not None:
+            out[row["message_id"]] = set(json.loads(row["prev_label_ids"]))
+    return out
+
+
 # ---------------------------------------------------------------- the undo itself
 def _context(ex, message_id, phase, intent_hash):
     return ce._context(ex, message_id, phase, intent_hash)
@@ -179,7 +217,11 @@ def _undo_item(index, account, exec_id, seq, mailbox, allow):
         raise ce.ExecError("UNDO_DRIFT", "the message's thread changed; nothing was changed")
     if sorted(state.label_ids) != archived:
         raise ce.ExecError("UNDO_DRIFT", "the message is not in exactly the archived state recorded for it; nothing was changed")
-    if cx._thread_problem(index, account, mid, state.thread_id, thread, cx._archived_by_this_execution(index, account, exec_id)):
+    expected = cx._archived_by_this_execution(index, account, exec_id)
+    rev = (auth["meta"].get("rev") if auth else None)  # set only by authorize_in_reversal: the id of the approved reversal plan this attempt belongs to
+    if rev is not None:
+        expected = _restored_siblings(index, account, exec_id, rev, expected)  # F5: siblings restored by THIS plan are expected restored; everything else is as before
+    if cx._thread_problem(index, account, mid, state.thread_id, thread, expected):
         raise ce.ExecError("UNDO_DRIFT", "the thread changed or contains a protected message; nothing was changed")
 
     # ---- durable intent, once per authorization, BEFORE any mutation (serialised by the write transaction)
@@ -230,12 +272,12 @@ def reconcile_undo(index, account, exec_id, seq, mailbox):
 
 
 def _reconcile_undo(index, account, exec_id, seq, mailbox, allow):
-    if allow not in ("FAKE", "OBSERVE"):  # reconciliation never runs through a mutation-capable live mailbox (the old LIVE mode was removed in M12D)
-        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "this mailbox is not accepted by this entry point; nothing was read or changed")
     """Resolve an undo whose intent has no result (interrupted) or whose result is UNKNOWN, from a fresh execution-bound trusted observation. Makes NO mutation.
 
     Exactly the originally recorded labels -> RESTORED; exactly the archived labels -> NOT_RESTORED (observed unmodified; this does not prove that no write occurred);
     anything else, including an absent message -> CONFLICT."""
+    if allow not in ("FAKE", "OBSERVE"):  # reconciliation never runs through a mutation-capable live mailbox (the old LIVE mode was removed in M12D)
+        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "this mailbox is not accepted by this entry point; nothing was read or changed")
     _gate(mailbox, allow)
     if mailbox.account.strip().lower() != account.strip().lower():
         raise ce.ExecError("ACCOUNT_MISMATCH", "the mailbox belongs to another account; nothing was changed")

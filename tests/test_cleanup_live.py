@@ -123,7 +123,7 @@ class DisabledByDefaultTests(LiveBase):
         cli = (SRC / "cli.py").read_text()
         for name in ("exec_live_mailbox", "cleanup_live", "LiveMailbox", "LIVE_EXECUTION_ENABLED", "execute_live_batch", "recover_live", "open_live_mailbox",
                      "LiveUndoMailbox", "LIVE_UNDO_ENABLED", "open_live_undo_mailbox", "undo_live", "reconcile_undo_live",
-                     "LiveObserveMailbox", "LIVE_OBSERVE_ENABLED", "open_live_observe_mailbox", "recover_observed", "reconcile_undo_observed"):  # M12C.3/4: the ordinary CLI reaches the live undo / observation paths only through undo_cli and reconcile_cli
+                     "LiveObserveMailbox", "LIVE_OBSERVE_ENABLED", "open_live_observe_mailbox", "recover_observed", "reconcile_undo_observed", "execute_live_slice", "reverse_slice_live"):  # M12C.3/4: the ordinary CLI reaches the live undo / observation paths only through undo_cli and reconcile_cli
             self.assertNotIn(name, cli)
         self.assertIn("execution is not available in this version", cli)
         importers = {}
@@ -133,18 +133,19 @@ class DisabledByDefaultTests(LiveBase):
                 for target in ("exec_live_mailbox", "cleanup_live"):
                     if any(m.split(".")[-1] == target for m in mods):
                         importers.setdefault(target, set()).add(path.name)
-        self.assertEqual(importers, {"exec_live_mailbox": {"cleanup_executor.py", "cleanup_canary.py", "cleanup_live.py", "cleanup_canary_cli.py", "cleanup_undo.py", "undo_cli.py", "reconcile_cli.py"},
-                                     "cleanup_live": {"cleanup_canary.py", "undo_cli.py", "reconcile_cli.py"}})  # the live modules are imported only by the disabled canary code and (M12C.3) the undo engine and the disabled undo entry point
+        self.assertEqual(importers, {"exec_live_mailbox": {"cleanup_executor.py", "cleanup_canary.py", "cleanup_live.py", "cleanup_canary_cli.py", "cleanup_undo.py", "undo_cli.py", "reconcile_cli.py", "cleanup_bulk.py", "bulk_cli.py"},
+                                     "cleanup_live": {"cleanup_canary.py", "undo_cli.py", "reconcile_cli.py", "cleanup_bulk.py"}})  # the live modules are imported only by the disabled canary code and (M12C.3) the undo engine and the disabled undo entry point
         callers = set()
         for path in SRC.glob("*.py"):
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) in ("_wrap", "_wrap_undo", "open_live_mailbox", "open_live_undo_mailbox", "execute_live_batch", "recover_live", "undo_live", "reconcile_undo_live",
-                                                                            "_wrap_observe", "open_live_observe_mailbox", "recover_observed", "reconcile_undo_observed"):
+                                                                            "_wrap_observe", "open_live_observe_mailbox", "recover_observed", "reconcile_undo_observed", "execute_live_slice", "reverse_slice_live"):
                     callers.add((path.name, getattr(node.func, "id", getattr(node.func, "attr", None)), len(node.args) + len(node.keywords)))
         self.assertEqual(callers, {("exec_live_mailbox.py", "_wrap", 2), ("cleanup_canary.py", "open_live_mailbox", 3), ("cleanup_canary.py", "execute_live_batch", 6),
                                    ("exec_live_mailbox.py", "_wrap_undo", 2), ("undo_cli.py", "open_live_undo_mailbox", 3), ("undo_cli.py", "undo_live", 5),
                                    ("exec_live_mailbox.py", "_wrap_observe", 2), ("reconcile_cli.py", "open_live_observe_mailbox", 3), ("reconcile_cli.py", "recover_observed", 3),
-                                   ("reconcile_cli.py", "reconcile_undo_observed", 5)})  # (reconcile_undo_live is no longer called by any production code)  # without a test factory; canary and the disabled undo entry point only
+                                   ("reconcile_cli.py", "reconcile_undo_observed", 5), ("cleanup_bulk.py", "open_live_mailbox", 3), ("cleanup_bulk.py", "execute_live_slice", 6),
+                                   ("undo_cli.py", "reverse_slice_live", 5)})  # (reconcile_undo_live is no longer called by any production code)  # without a test factory; canary and the disabled undo entry point only
 
     def test_the_public_constructor_has_no_clock_factory_or_transport_parameter(self):
         self.assertEqual(list(inspect.signature(live.open_live_mailbox).parameters), ["expected_account", "store", "client_path"])
@@ -418,8 +419,11 @@ class RestrictionTests(LiveBase):
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.Call) and any(k.arg == "_permit" for k in node.keywords):
                     passers.add(path.name)
-        self.assertEqual(passers, {"cleanup_canary.py"})
+        self.assertEqual(passers, {"cleanup_canary.py", "cleanup_bulk.py"})      # the canary and (M12D) the owner-confirmed bulk slice, each with its OWN permit
+        bulk_users = {p.name for p in SRC.glob("*.py") if "_BULK_PERMIT" in p.read_text()}
+        self.assertEqual(bulk_users, {"exec_live_mailbox.py", "cleanup_live.py", "cleanup_bulk.py"})
         self.assertNotIn("canary_ok", inspect.signature(cl.execute_live_batch).parameters)
+        self.assertNotIn("bulk_ok", inspect.signature(cl.execute_live_slice).parameters)
 
     def test_recovery_stays_read_only_through_the_live_boundary(self):
         self.enable()

@@ -1,4 +1,4 @@
-"""The undo LEDGER, read-only (M4D, moved here unchanged in M12C.3 so reporting can read it without importing the undo engine, the executor or any mailbox type).
+"""The undo and REVERSAL ledgers, read-only (M4D, moved here unchanged in M12C.3; reversal plans added in M12D so reporting can read it without importing the undo engine, the executor or any mailbox type).
 
 An undo's state is derived from the hash-chained, append-only audit log by a STRICT state machine: UNDO_AUTHORIZED -> UNDO_INTENT -> UNDO_RESULT (see `cleanup_undo`). Nothing here writes,
 contacts Gmail or takes a mailbox. Any event sequence the machine does not allow yields INCONSISTENT, which authorizes nothing and is only ever reported.
@@ -84,3 +84,96 @@ def all_undos(index, account):
             seen.add(key)
             out.append((key[0], key[1], undo_status(index, account, *key)))
     return out
+
+
+# ---------------------------------------------------------------- bulk reversal plans (M12D)
+# A reversal plan is NOT a new table: it is a sequence of events in the same hash-chained, append-only audit log, so it is immutable by construction (a plan's item list and digest are
+# fixed by its REVERSAL_PLANNED event). Its state is derived by a STRICT state machine; any other sequence is INCONSISTENT and authorizes nothing. Each item is still undone by the
+# unchanged per-item engine and keeps its own per-item undo ledger.
+REVERSAL_EVENTS = ("REVERSAL_PLANNED", "REVERSAL_APPROVED", "REVERSAL_SLICE_STARTED", "REVERSAL_ITEM_SKIPPED", "REVERSAL_SLICE_DONE", "REVERSAL_ABORTED")
+REVERSAL_STATES = ("PLANNED", "APPROVED", "IN_PROGRESS", "INTERRUPTED", "AWAITING_CONTINUATION", "COMPLETED", "STOPPED", "ABORTED", "INCONSISTENT")
+RUN_TTL_SECONDS = 30 * 60   # a started slice with no result for this long is INTERRUPTED (it can only be aborted, never resumed)
+
+
+def reversal_events(index, account, rev):
+    out = []
+    marks = ",".join("?" * len(REVERSAL_EVENTS))
+    for r in index._q(f"SELECT seq, event_type, at, meta, hash FROM cleanup_audit WHERE account=? AND event_type IN ({marks}) ORDER BY seq", account, *REVERSAL_EVENTS):
+        meta = json.loads(r["meta"])
+        if meta.get("rev") == rev:
+            out.append({"type": r["event_type"], "at": r["at"], "meta": meta, "hash": r["hash"]})
+    return out
+
+
+def reversal_state(events, now_iso=None):
+    """Derive a reversal plan's state from its events. Returns a dict (counts and sequence numbers only; no message ids)."""
+    bad = {"state": "INCONSISTENT"}
+    if not events or events[0]["type"] != "REVERSAL_PLANNED":
+        return bad
+    plan = events[0]["meta"]
+    sizes = plan.get("slices")
+    if not isinstance(sizes, list) or not sizes or not all(isinstance(x, int) and x > 0 for x in sizes) or sum(sizes) != len(plan.get("items", ())):
+        return bad
+    st = {"state": "PLANNED", "exec": plan.get("exec"), "items": list(plan["items"]), "digest": plan.get("digest"), "slices": list(sizes), "approved": False, "approval_expires": None,
+          "done": 0, "started": None, "started_at": None, "stopped": False, "aborted": False, "skipped": {}, "restored": 0, "unresolved": 0}
+    for ev in events[1:]:
+        kind, meta = ev["type"], ev["meta"]
+        if st["aborted"] or st["stopped"] and kind != "REVERSAL_ABORTED":
+            if not (kind == "REVERSAL_ABORTED" and not st["aborted"]):
+                return bad
+        if kind == "REVERSAL_PLANNED":
+            return bad
+        elif kind == "REVERSAL_APPROVED":
+            if st["approved"] or st["started"] is not None or st["done"] or meta.get("digest") != st["digest"]:
+                return bad
+            st["approved"], st["approval_expires"] = True, meta.get("expires")
+        elif kind == "REVERSAL_SLICE_STARTED":
+            if not st["approved"] or st["started"] is not None or meta.get("slice") != st["done"] + 1 or st["done"] >= len(sizes) or meta.get("size") != sizes[st["done"]]:
+                return bad
+            st["started"], st["started_at"] = meta["slice"], ev["at"]
+        elif kind == "REVERSAL_ITEM_SKIPPED":
+            if st["started"] is None or meta.get("slice") != st["started"] or not isinstance(meta.get("item"), int) or meta["item"] in st["skipped"]:
+                return bad
+            st["skipped"][meta["item"]] = meta.get("code")
+        elif kind == "REVERSAL_SLICE_DONE":
+            if st["started"] is None or meta.get("slice") != st["started"]:
+                return bad
+            st["done"], st["started"], st["started_at"] = st["done"] + 1, None, None
+            st["stopped"] = bool(meta.get("stopped"))
+            st["restored"] += int(meta.get("restored", 0))
+        elif kind == "REVERSAL_ABORTED":
+            if st["started"] is not None and not _expired(st["started_at"], now_iso):
+                return bad
+            st["aborted"] = True
+    if st["aborted"]:
+        st["state"] = "ABORTED"
+    elif st["started"] is not None:
+        st["state"] = "INTERRUPTED" if _expired(st["started_at"], now_iso) else "IN_PROGRESS"
+    elif st["stopped"]:
+        st["state"] = "STOPPED"
+    elif st["done"] == len(sizes):
+        st["state"] = "COMPLETED"
+    elif st["done"]:
+        st["state"] = "AWAITING_CONTINUATION"
+    else:
+        st["state"] = "APPROVED" if st["approved"] else "PLANNED"
+    return st
+
+
+def _expired(started_at, now_iso):
+    if not now_iso or not started_at:
+        return False
+    from datetime import datetime
+    a, b = datetime.fromisoformat(started_at.replace("Z", "+00:00")), datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+    return (b - a).total_seconds() > RUN_TTL_SECONDS
+
+
+def all_reversals(index, account):
+    """[rev ids] in creation order (read-only)."""
+    return [json.loads(r["meta"])["rev"] for r in index._q("SELECT meta FROM cleanup_audit WHERE account=? AND event_type='REVERSAL_PLANNED' ORDER BY seq", account)
+            if "rev" in json.loads(r["meta"])]
+
+
+def reversal_approved(index, account, rev):
+    return any(e["type"] == "REVERSAL_APPROVED" for e in reversal_events(index, account, rev))
+

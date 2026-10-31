@@ -1200,9 +1200,14 @@ def cmd_cleanup_execute(args):
     from gmail_intelligence import cleanup_exec, cleanup_exec_report
     from gmail_intelligence import cleanup_plans as cp
 
+    if getattr(args, "reserve", False):  # M12D: reserving a BULK execution; disabled in this build (refuses before the index or any credential)
+        from gmail_intelligence import bulk_cli
+        args.bulk_command = "reserve"
+        return bulk_cli.dispatch(args, with_index=_with_index, tty_input=_tty_input, fail=_fail)
+
     def go(index, account):
         if not args.dry_run:
-            return _fail("execution is not available in this version; only `--dry-run` exists (it writes nothing and consumes no approval)")
+            return _fail("execution is not available in this version without --dry-run (a preview that writes nothing and consumes no approval) or --reserve (live execution is disabled in this build)")
         try:
             print(cleanup_exec_report.dry_run_text(cleanup_exec.dry_run(index, account, args.plan_id)))
         except cp.PlanError as exc:
@@ -1494,6 +1499,12 @@ def _cmd_cleanup_exec_recovery_local(args):
         print(json.dumps(data, indent=2, sort_keys=True) if args.json else cleanup_exec_report.recovery_text(data))
         return 0
     return _with_readonly_index(args, go)
+
+
+def cmd_bulk(args):
+    """M12D: owner-operated bulk archive execution. confirm / run / reserve refuse while live execution is disabled (this build); abort is local."""
+    from gmail_intelligence import bulk_cli
+    return bulk_cli.dispatch(args, with_index=_with_index, tty_input=_tty_input, fail=_fail)
 
 
 def cmd_undo(args):
@@ -1793,10 +1804,11 @@ def build_parser():
     q.set_defaults(func=cmd_cleanup_audit_log)
     q = account_opt(cusub.add_parser("execute", help="dry run only (M4C-A): shows what a future execution would check; writes nothing"))
     q.add_argument("plan_id")
-    q.add_argument("--dry-run", action="store_true", help="required: execution itself does not exist in this version")
+    q.add_argument("--dry-run", action="store_true", help="preview what an execution would check and its slice boundaries; writes nothing")
+    q.add_argument("--reserve", action="store_true", help="M12D: consume the plan's approval with a typed phrase and freeze the targets (DISABLED in this build)")
     q.set_defaults(func=cmd_cleanup_execute)
     ex = cusub.add_parser("exec", help="inspect local execution records (read-only)")
-    exsub = ex.add_subparsers(dest="exec_command", required=True, metavar="{list,recovery,show}")
+    exsub = ex.add_subparsers(dest="exec_command", required=True, metavar="{list,recovery,show,run,confirm,abort}")
     account_opt(exsub.add_parser("list", help="list execution records")).set_defaults(func=cmd_cleanup_exec_list)
     un = cusub.add_parser("undo", help="archive undo for ONE archived message at a time (M12C.3): status/preview are local; authorize/run/reconcile are DISABLED in this build")
     unsub = un.add_subparsers(dest="undo_command", required=True, metavar="{status,preview,authorize,run,reconcile}")
@@ -1804,6 +1816,21 @@ def build_parser():
     q.add_argument("--exec-id", metavar="EXEC_ID", help="show the items of one execution")
     q.add_argument("--json", action="store_true", help="machine-readable output")
     q.set_defaults(func=cmd_undo)
+    rvp = unsub.add_parser("reversal", help="BULK reversal of a finished archive execution in reviewed, approved, bounded slices (M12D); run is DISABLED in this build")
+    rvsub = rvp.add_subparsers(dest="reversal_command", required=True, metavar="{create,show,approve,run,abort}")
+    q = account_opt(rvsub.add_parser("create", help="freeze a reversal plan from the undoable APPLIED items of a finished execution (local)"))
+    q.add_argument("exec_id", metavar="EXEC_ID")
+    q.add_argument("--exclude-item", type=int, action="append", metavar="SEQ", help="leave one item out (repeatable)")
+    q.set_defaults(func=cmd_undo)
+    q = account_opt(rvsub.add_parser("show", help="state, slices and progress of a reversal plan (local read-only)"))
+    q.add_argument("rev", metavar="REV")
+    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.set_defaults(func=cmd_undo)
+    for name, text in (("approve", "approve a reversal plan with a typed phrase (local; executes nothing)"), ("run", "run the NEXT slice with its own fresh typed phrase (DISABLED in this build)"),
+                       ("abort", "abandon a reversal plan that is not running (items already restored stay restored)")):
+        q = account_opt(rvsub.add_parser(name, help=text))
+        q.add_argument("rev", metavar="REV")
+        q.set_defaults(func=cmd_undo)
     for name, text in (("preview", "local read-only: eligibility of one item and the typed phrase an authorization needs"),
                        ("authorize", "record the owner's separate typed authorization to undo ONE item (disabled in this build)"),
                        ("run", "undo ONE authorized item, once (disabled in this build)"),
@@ -1812,6 +1839,12 @@ def build_parser():
         q.add_argument("exec_id", metavar="EXEC_ID")
         q.add_argument("item", type=int, metavar="SEQ", help="the item's sequence number in the execution")
         q.set_defaults(func=cmd_undo)
+    for name, text in (("run", "run the ONE confirmed slice of a reserved execution (typed phrase; DISABLED in this build)"),
+                       ("confirm", "confirm the NEXT slice with its own typed phrase (DISABLED in this build)"),
+                       ("abort", "abandon a PREPARED / AWAITING_CONTINUATION execution (local; typed phrase)")):
+        q = account_opt(exsub.add_parser(name, help=text))
+        q.add_argument("exec_id", metavar="EXEC_ID")
+        q.set_defaults(func=cmd_bulk, bulk_command=name)
     q = account_opt(exsub.add_parser("recovery", help="local read-only status of open or uncertain executions: known, UNKNOWN, manual review (M12C.1; no Gmail, no retry)"))
     q.add_argument("--json", action="store_true", help="machine-readable output (local status)")
     q.add_argument("--reconcile", action="store_true", help="LIVE read-only reconciliation from fresh Gmail reads (never changes Gmail; DISABLED in this build; typed confirmation)")
