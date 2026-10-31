@@ -13,10 +13,24 @@ sys.path.insert(0, str(ROOT / "tests"))
 from test_auth import A_TOK, ACCOUNT, R_TOK, utcnow  # noqa: E402
 from test_write_auth import WBase, WCreds, write_client_config  # noqa: E402
 
-from gmail_intelligence import config, gmail_write as gw, oauth, oauth_write  # noqa: E402
+from gmail_intelligence import cli, config, gmail_write as gw, oauth, oauth_write  # noqa: E402
 
 
 class RenewalCommandTests(WBase):
+    def run_tty(self, typed):
+        """`auth refresh-write` with the terminal-only confirmation answered by `typed` (a real terminal is required in production)."""
+        with mock.patch.object(cli, "_tty_input", return_value=typed):
+            return self.run_cli("auth", "refresh-write")
+
+    def test_piped_or_scripted_input_never_renews_a_credential(self):
+        self.stored(1)
+        before = dict(self.backend.items)
+        with mock.patch.object(oauth_write, "refresh_and_store", side_effect=AssertionError("must not refresh")), mock.patch("sys.stdin.isatty", return_value=False):
+            code, out, err = self.run_cli("auth", "refresh-write", stdin=oauth_write.REFRESH_PHRASE)   # the phrase is "typed", but not on a terminal
+        self.assertEqual(code, 1)
+        self.assertIn("interactive terminal", err)
+        self.assertEqual(self.backend.items, before)
+
     def stored(self, minutes=1):
         self.write_client_file()
         return self.store_blob(minutes)
@@ -47,7 +61,7 @@ class RenewalCommandTests(WBase):
         self.stored(1)
         before = dict(self.backend.items)
         with mock.patch.object(oauth_write, "refresh_and_store", side_effect=AssertionError("must not refresh")):
-            code, out, err = self.run_cli("auth", "refresh-write", stdin="yes")
+            code, out, err = self.run_tty("yes")
         self.assertEqual(code, 1)
         self.assertIn("declined", err)
         self.assertEqual(self.backend.items, before)
@@ -61,7 +75,7 @@ class RenewalCommandTests(WBase):
         sent = []
         with mock.patch.object(oauth_write, "blob_to_write_credentials", return_value=fresh), \
                 mock.patch.object(oauth_write, "default_oauth_request", lambda url: oauth_write.PinnedOAuthRequest(url, lambda u, **kw: sent.append((u, kw)) or "ok")):
-            code, out, err = self.run_cli("auth", "refresh-write", stdin=oauth_write.REFRESH_PHRASE)
+            code, out, err = self.run_tty(oauth_write.REFRESH_PHRASE)
         self.assertEqual((code, err), (0, ""))
         self.assertIn("renewed", out)
         self.assertEqual([u for u, _ in sent], [oauth_write.TOKEN_URI])                  # only Google's OAuth token endpoint, never the Gmail API
@@ -77,7 +91,7 @@ class RenewalCommandTests(WBase):
                       WCreds(minutes=1, raises=__import__("google.auth.exceptions", fromlist=["RefreshError"]).RefreshError("invalid_grant"))):
             with mock.patch.object(oauth_write, "blob_to_write_credentials", return_value=creds), \
                     mock.patch.object(oauth_write, "default_oauth_request", lambda url: oauth_write.PinnedOAuthRequest(url, lambda u, **kw: "ok")):
-                code, out, err = self.run_cli("auth", "refresh-write", stdin=oauth_write.REFRESH_PHRASE)
+                code, out, err = self.run_tty(oauth_write.REFRESH_PHRASE)
             self.assertEqual(code, 1)
             self.assertIn("was not changed", err)
             self.assertEqual(self.backend.items, before)
@@ -85,10 +99,10 @@ class RenewalCommandTests(WBase):
     def test_refresh_write_refuses_without_a_stored_authorization_or_attested_isolation(self):
         self.write_client_file()
         with mock.patch.object(oauth_write, "refresh_and_store", side_effect=AssertionError("no refresh")):
-            self.assertEqual(self.run_cli("auth", "refresh-write", stdin=oauth_write.REFRESH_PHRASE)[0], 1)   # nothing stored
+            self.assertEqual(self.run_tty(oauth_write.REFRESH_PHRASE)[0], 1)   # nothing stored
             self.store_blob(1)
             config.write_setup_path().unlink()                  # the owner's separate-project attestation is gone
-            self.assertEqual(self.run_cli("auth", "refresh-write", stdin=oauth_write.REFRESH_PHRASE)[0], 1)   # separation not attested
+            self.assertEqual(self.run_tty(oauth_write.REFRESH_PHRASE)[0], 1)   # separation not attested
 
     def test_status_and_the_undo_path_never_refresh_in_the_background(self):
         self.write_client_file()

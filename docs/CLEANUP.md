@@ -39,7 +39,8 @@ without claiming protection against concurrent changes.
 gmail-intelligence cleanup discover [--account EMAIL] [--limit N] [--min-group-size N] [--min-age-days N] [--json]   # M12A: grouped, explained view of the same candidates (read-only; see CLEANUP-DISCOVERY.md)
 gmail-intelligence cleanup preview --group DOMAIN [--exclude-id ID] [--show-ids] [--page N] [--json] [--account EMAIL]   # M12B: exact messages of the selected groups (read-only; see CLEANUP-REVIEW.md)
 gmail-intelligence cleanup plan create --group DOMAIN [--exclude-id ID] --selection-digest DIGEST [--account EMAIL]      # M12B: freeze that exact selection as a DRAFT plan
-gmail-intelligence cleanup undo status|preview EXEC_ID SEQ|authorize|run|reconcile [--account EMAIL]   # M12C.3: archive undo of ONE message at a time; status/preview local, the rest DISABLED (see M12C-UNDO-DESIGN.md)
+gmail-intelligence cleanup undo status|preview EXEC_ID SEQ|authorize|run|reconcile [--account EMAIL]   # M12C.3/4: archive undo of ONE message at a time; status/preview local; authorize/run DISABLED (undo switch); reconcile is READ-ONLY and DISABLED (observe switch)
+gmail-intelligence cleanup exec recovery --reconcile [--account EMAIL]   # M12C.4: live READ-ONLY reconciliation from fresh Gmail reads; DISABLED in this build (see CLEANUP-RECOVERY.md)
 gmail-intelligence auth refresh-write   # M12C.3: explicit, typed renewal of the write access token (Google's OAuth endpoint only)
 gmail-intelligence cleanup exec recovery [--account EMAIL] [--json]   # M12C.1: local read-only status of open or uncertain executions (see CLEANUP-RECOVERY.md)
 gmail-intelligence cleanup candidates --account EMAIL [--limit N] [--review] [--min-age-days N] [--show-ids] [--show-senders] [--by-domain]

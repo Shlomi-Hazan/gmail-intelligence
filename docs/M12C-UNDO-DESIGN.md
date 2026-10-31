@@ -13,7 +13,7 @@ Issues #61 and #41. **Status (M12C.3): the complete undo infrastructure is IMPLE
 | D6 outcome semantics | unchanged | `RESTORED` / `NOT_RESTORED` / `UNKNOWN` / `CONFLICT`; reconciliation never mutates |
 | D7 bulk undo | **contract only** (section 7) | orchestration deferred to M12D |
 | D8 write-token lifecycle | implemented | `auth refresh-write`: explicit, typed, Google OAuth endpoint only, same scope; expired tokens fail closed |
-| D9 read-only undo visibility | implemented | `cleanup exec recovery` now lists undo ledgers (`cleanup_undo_ledger`, read-only) |
+| D9 read-only undo visibility | implemented (M12C.3); live read-only reconciliation of undos via the separate OBSERVE capability added in M12C.4, disabled | `cleanup exec recovery` now lists undo ledgers (`cleanup_undo_ledger`, read-only) |
 
 ### The exact change to the live write-policy boundary
 Before: four request families; the only mutation body `{"removeLabelIds":["INBOX"]}`. After: the same four routes and the same archive body, plus ONE additional accepted body on the modify route, `{"addLabelIds":["INBOX"]}`, which is classified as the separate mutation kind `MESSAGE_MODIFY_UNDO`. Everything else is denied exactly as before. A transport/adapter built for archive cannot send it and vice versa (`DENIED_CAPABILITY`, `dispatched=False`). No OAuth scope changed (`gmail.modify` is still the one write scope).

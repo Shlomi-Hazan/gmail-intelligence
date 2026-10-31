@@ -32,6 +32,18 @@ def undo_live(index, account, exec_id, seq, mailbox):
     return cu._undo_item(index, account, exec_id, seq, mailbox, "LIVE")
 
 
+def recover_observed(index, account, mailbox):
+    """Recover interrupted work and reconcile UNKNOWN archive items AND open/uncertain undos from fresh execution-bound observations through a READ-ONLY observe mailbox (M12C.4). It can
+    only read Gmail and append local audit/journal results: it never mutates Gmail, retries, resumes or continues. Needs `LIVE_OBSERVE_ENABLED` (False in this build; independent of the
+    archive and undo switches). Returns a `cleanup_recovery.RecoveryReport`."""
+    return cr._recover(index, account, mailbox, "OBSERVE")
+
+
+def reconcile_undo_observed(index, account, exec_id, seq, mailbox):
+    """Resolve ONE open or UNKNOWN undo from a fresh execution-bound observation through a READ-ONLY observe mailbox. Never mutates. Disabled in this build."""
+    return cu._reconcile_undo(index, account, exec_id, seq, mailbox, "OBSERVE")
+
+
 def reconcile_undo_live(index, account, exec_id, seq, mailbox):
     """Resolve an open or UNKNOWN undo from a fresh execution-bound observation through a live undo mailbox. READ-ONLY: it never mutates. Disabled in this build."""
     return cu._reconcile_undo(index, account, exec_id, seq, mailbox, "LIVE")

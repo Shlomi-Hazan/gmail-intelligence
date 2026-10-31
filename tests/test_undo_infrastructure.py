@@ -27,7 +27,7 @@ from test_cleanup_recovery import UndoBase  # noqa: E402
 
 from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, cleanup_exec_report as rep, cleanup_executor as cx, cleanup_live as cl, cleanup_plans as cp  # noqa: E402
 from gmail_intelligence import cleanup_recovery as cr, cleanup_undo as cu, cli, exec_fake_mailbox as fm, exec_live_mailbox as live, gmail_write as gw, gmail_write_policy as pol  # noqa: E402
-from gmail_intelligence import index as idx, keystore_write, undo_cli  # noqa: E402
+from gmail_intelligence import index as idx, keystore_write, reconcile_cli, undo_cli  # noqa: E402
 
 Step = fm.Step
 H = {"content-type": "application/json"}
@@ -140,6 +140,14 @@ class LiveUndoBase(UndoBase):
         factory = fm._Factory(svc)
         adapter = gw.ArchiveAdapter(gw._Transport(svc.creds, factory, capabilities=("UNDO",)), ACCT, _clock=self.uc)
         return live._wrap_undo(adapter, ACCT, factory), svc
+
+    def live_observe_mailbox(self, mb, script=(), state=None, account=ACCT):
+        """A READ-ONLY live observe mailbox over the fake wire (the gate must be patched on by the caller)."""
+        st = state if state is not None else {m: (t, list(l)) for m, (t, l) in mb.service.messages.items()}
+        svc = fm._Service(account, st, tuple(script))
+        factory = fm._Factory(svc)
+        adapter = gw.ArchiveAdapter(gw._Transport(svc.creds, factory, capabilities=("OBSERVE",)), ACCT, _clock=self.uc)
+        return live._wrap_observe(adapter, ACCT, factory), svc
 
     def current(self, svc):
         return {m: (t, list(l)) for m, (t, l) in svc.messages.items()}
@@ -403,7 +411,7 @@ class VisibilityTests(LiveUndoBase):
 
 
 class CliTests(LiveUndoBase):
-    def run_cmd(self, *argv, typed=(), live_mailbox=None):
+    def run_cmd(self, *argv, typed=(), live_mailbox=None, observe_mailbox=None):
         out, err = io.StringIO(), io.StringIO()
         feed = iter(typed)
         now = lambda n=None: n if n is not None else self.uc()  # noqa: E731
@@ -413,6 +421,8 @@ class CliTests(LiveUndoBase):
                    mock.patch.object(keystore_write, "WriteTokenStore", mock.MagicMock(name="WriteTokenStore"))]
         if live_mailbox is not None:
             patches.append(mock.patch.object(live, "open_live_undo_mailbox", return_value=live_mailbox))
+        if observe_mailbox is not None:
+            patches.append(mock.patch.object(live, "open_live_observe_mailbox", return_value=observe_mailbox))
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
@@ -433,9 +443,9 @@ class CliTests(LiveUndoBase):
         self.assertIn("UNDO 1 " + ex["exec_id"], self.run_cmd("preview", ex["exec_id"], "1")[1])
         self.assertIn("DISABLED", self.run_cmd("preview", ex["exec_id"], "1")[1])
         with mock.patch.object(idx, "Index", side_effect=AssertionError("the index must not be opened")):
-            for cmd in ("authorize", "run", "reconcile"):
+            for cmd, message in (("authorize", undo_cli.DISABLED), ("run", undo_cli.DISABLED), ("reconcile", reconcile_cli.DISABLED)):   # (reconcile is read-only: its own observe switch, M12C.4)
                 code, out, err = self.run_cmd(cmd, ex["exec_id"], "1")
-                self.assertEqual((code, out, err), (2, undo_cli.DISABLED + "\n", ""), cmd)
+                self.assertEqual((code, out, err), (2, message + "\n", ""), cmd)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.undo_events(), [])
 
@@ -462,7 +472,7 @@ class CliTests(LiveUndoBase):
         self.assertEqual(svc.undos(), 1)
         self.assertNotRegex(out + err, r"Traceback|https?://")
 
-    def test_cli_reconcile_is_read_only_and_ambiguity_is_reported(self):
+    def test_cli_reconcile_is_read_only_gated_by_the_observe_switch_and_ambiguity_is_reported(self):
         ex, mb = self.archived()
         self.enable_undo()
         lm, svc = self.live_undo(mb, [Step("UNDO", raises=TimeoutError(), apply=True)])
@@ -471,12 +481,13 @@ class CliTests(LiveUndoBase):
         self.assertEqual(code, 1)
         self.assertIn("UNKNOWN", out)
         self.assertIn("Nothing is retried", out)
-        lm2, svc2 = self.live_undo(mb, state=self.current(svc))
-        code, out, err = self.run_cmd("reconcile", ex["exec_id"], "1", live_mailbox=lm2)
-        self.assertEqual(code, 0)
+        with mock.patch.object(live, "LIVE_UNDO_ENABLED", False), mock.patch.object(live, "LIVE_OBSERVE_ENABLED", True):    # observation needs ITS switch only
+            observed = self.live_observe_mailbox(mb, state=self.current(svc))
+            code, out, err = self.run_cmd("reconcile", ex["exec_id"], "1", typed=[reconcile_cli.OBSERVE_PHRASE], observe_mailbox=observed[0])
+        self.assertEqual((code, err), (0, ""))
         self.assertIn("RESTORED", out)
         self.assertIn("read-only", out)
-        self.assertEqual(svc2.undos(), 0)
+        self.assertEqual(observed[1].undos(), 0)
 
     def test_bad_input_has_fixed_messages(self):
         ex, mb = self.archived()

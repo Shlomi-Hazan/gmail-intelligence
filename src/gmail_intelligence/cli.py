@@ -401,7 +401,11 @@ def cmd_auth_refresh_write(args):
         return _fail(exc)
     print("This renews the short-lived write ACCESS token from the stored refresh token. It contacts Google's OAuth token endpoint only (not the Gmail API); the permission "
           "stays exactly the same; nothing is archived, restored or changed; it does not enable any live capability by itself.")
-    if input(f"To continue type exactly: {oauth_write.REFRESH_PHRASE}\n> ").strip() != oauth_write.REFRESH_PHRASE:
+    try:
+        typed = _tty_input(f"To continue type exactly: {oauth_write.REFRESH_PHRASE}\n> ")  # terminal only: piped or scripted input never renews a credential
+    except EOFError:
+        return _fail("cancelled: renewing the write authorization needs a real interactive terminal; the stored write authorization was not changed")
+    if typed.strip() != oauth_write.REFRESH_PHRASE:
         return _fail("declined; the stored write authorization was not changed")
     try:
         creds, _new = oauth_write.refresh_and_store(store, blob, client)
@@ -1467,6 +1471,13 @@ def cmd_labels_report(args):
 
 
 def cmd_cleanup_exec_recovery(args):
+    if getattr(args, "reconcile", False):  # M12C.4: LIVE read-only reconciliation; disabled in this build (refuses before any index/credential/network access)
+        from gmail_intelligence import reconcile_cli
+        return reconcile_cli.dispatch_recovery(args, with_index=_with_index, tty_input=_tty_input, fail=_fail)
+    return _cmd_cleanup_exec_recovery_local(args)
+
+
+def _cmd_cleanup_exec_recovery_local(args):
     """M12C.1: LOCAL read-only status of open or uncertain executions (known / UNKNOWN / manual review). Reads the journal only; contacts no one, retries and resumes nothing."""
     import json
 
@@ -1796,7 +1807,8 @@ def build_parser():
         q.add_argument("item", type=int, metavar="SEQ", help="the item's sequence number in the execution")
         q.set_defaults(func=cmd_undo)
     q = account_opt(exsub.add_parser("recovery", help="local read-only status of open or uncertain executions: known, UNKNOWN, manual review (M12C.1; no Gmail, no retry)"))
-    q.add_argument("--json", action="store_true", help="machine-readable output")
+    q.add_argument("--json", action="store_true", help="machine-readable output (local status)")
+    q.add_argument("--reconcile", action="store_true", help="LIVE read-only reconciliation from fresh Gmail reads (never changes Gmail; DISABLED in this build; typed confirmation)")
     q.set_defaults(func=cmd_cleanup_exec_recovery)
     q = account_opt(exsub.add_parser("show", help="state, slices and item counts of one execution"))
     q.add_argument("exec_id")
