@@ -11,7 +11,7 @@ Issues #61 and #41. **Status (M12C.3): the complete undo infrastructure is IMPLE
 | D4 context-bound observations | implemented | the real adapter's `observe` with `UNDO_POSTREAD` / `UNDO_RECONCILE` contexts (same validation as archive evidence) |
 | D5 eligibility and drift | unchanged, reused | `_original` + live preflight (exact archived state, thread, protected siblings) before the durable intent |
 | D6 outcome semantics | unchanged | `RESTORED` / `NOT_RESTORED` / `UNKNOWN` / `CONFLICT`; reconciliation never mutates |
-| D7 bulk undo | **contract only** (section 7) | orchestration deferred to M12D |
+| D7 bulk undo | **implemented in M12D (disabled)**: reversal plans in the audit log over this engine, F5 thread rule; see [M12D-BULK-EXECUTION.md](M12D-BULK-EXECUTION.md) | `cleanup_reversal.py` |
 | D8 write-token lifecycle | implemented | `auth refresh-write`: explicit, typed, Google OAuth endpoint only, same scope; expired tokens fail closed |
 | D9 read-only undo visibility | implemented (M12C.3); live read-only reconciliation of undos via the separate OBSERVE capability added in M12C.4, disabled | `cleanup exec recovery` now lists undo ledgers (`cleanup_undo_ledger`, read-only) |
 
