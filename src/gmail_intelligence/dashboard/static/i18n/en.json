@@ -440,5 +440,14 @@
  "type.UNCLASSIFIED": "Not classified",
  "type.UNKNOWN": "Unknown",
  "type.UNRECOGNISED": "Unrecognised type",
- "yes": "yes"
+ "yes": "yes",
+ "event.BULK_SLICE_CONFIRMED": "Bulk slice run confirmed",
+ "event.BULK_REJECTED": "Bulk run confirmation rejected",
+ "event.REVERSAL_PLANNED": "Reversal plan created",
+ "event.REVERSAL_APPROVED": "Reversal plan approved",
+ "event.REVERSAL_REJECTED": "Reversal confirmation rejected",
+ "event.REVERSAL_SLICE_STARTED": "Reversal slice started",
+ "event.REVERSAL_ITEM_SKIPPED": "Reversal item skipped",
+ "event.REVERSAL_SLICE_DONE": "Reversal slice finished",
+ "event.REVERSAL_ABORTED": "Reversal plan abandoned"
 }

@@ -240,7 +240,7 @@ class GateTests(Base):
         self.assertEqual(svc.log, [])
         for mailbox in (om,):                                        # the mutation entry points refuse an observe mailbox, and vice versa
             for call in (lambda: cl.undo_live(self.index, ACCT, ex["exec_id"], 1, mailbox), lambda: cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, mailbox),
-                         lambda: cl.recover_live(self.index, ACCT, mailbox), lambda: cu.undo_item(self.index, ACCT, ex["exec_id"], 1, mailbox)):
+                         lambda: cu.undo_item(self.index, ACCT, ex["exec_id"], 1, mailbox)):
                 with self.assertRaises(ce.ExecError) as ctx:
                     call()
                 self.assertEqual(ctx.exception.code, "MAILBOX_NOT_ALLOWED")

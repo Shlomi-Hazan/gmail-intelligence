@@ -6,6 +6,8 @@ Commands (`gmail-intelligence cleanup undo ...`, wired in `cli.py` through `disp
   preview EXEC_ID SEQ             LOCAL, read-only: eligibility of ONE item, its undo state, the exact typed phrase an authorization needs, and what is and is not enabled
   authorize EXEC_ID SEQ           records the owner's SEPARATE typed authorization for ONE item (a local ledger entry; valid 15 minutes; one attempt) - needs the live-undo switch
   run EXEC_ID SEQ                 the one controlled undo of that item through `cleanup_live.undo_live` - needs the live-undo switch
+  reversal create|show|approve|run|abort   BULK reversal of a finished archive execution (M12D): create / show / approve / abort are local; `run` (one bounded slice per command, each with its own
+                                  fresh typed phrase) goes through the unchanged per-item engine and needs the live-undo switch
   reconcile EXEC_ID SEQ           READ-ONLY resolution of an open/UNKNOWN undo from a fresh observation: delegated to `reconcile_cli` (M12C.4), which needs the separate live-OBSERVE switch
                                   (not the undo switch) and an observe-only mailbox that cannot restore anything
 
@@ -16,10 +18,26 @@ Commands (`gmail-intelligence cleanup undo ...`, wired in `cli.py` through `disp
 """
 import json
 
-from gmail_intelligence import cleanup_exec as ce, cleanup_live as cl, cleanup_plans as cp, cleanup_undo as cu, config, exec_live_mailbox as live
+from gmail_intelligence import cleanup_exec as ce, cleanup_live as cl, cleanup_plans as cp, cleanup_reversal as rv, cleanup_undo as cu, config, exec_live_mailbox as live
 from gmail_intelligence import cleanup_undo_ledger as ledger
 
 DISABLED = "Live archive undo is disabled in this build; nothing was read or changed."
+
+
+def reversal_text(d):
+    if d.get("state") == "INCONSISTENT":
+        return f"Reversal plan {d['rev']}: INCONSISTENT ledger (never acted on; manual owner review)"
+    out = [f"Reversal plan {d['rev']} of execution {d['exec_id']}: {d['state']}; {d['items']} item(s) in {len(d['slices'])} slice(s) {d['slices']}; {d['slices_done']} done, {d['restored']} restored, {d['skipped']} skipped",
+           f"  selection digest {d['digest'][:16]}...; excluded at planning {d['excluded_at_planning']}; refused at planning {d['refused_at_planning'] or 'none'}; item undo states {d['item_states']}"]
+    if d["state"] == "PLANNED":
+        out.append(f"  next: cleanup undo reversal approve {d['rev']} (typed phrase; executes nothing)")
+    if d["next"]:
+        out.append(f"  next slice {d['next']['slice']}: items {d['next']['items'][0]}-{d['next']['items'][1]}; `reversal run` needs its own fresh typed phrase (and the live-undo switch)")
+    if d["blocked_by_uncertain_items"]:
+        out.append("  BLOCKED: an item is OPEN / UNKNOWN / INCONSISTENT; settle it read-only (`cleanup undo reconcile`) - it is never retried")
+    if d["state"] in ("STOPPED", "INTERRUPTED"):
+        out.append("  FINAL: the remaining items are never attempted by this plan; settle anything uncertain read-only and, if needed, create a new plan")
+    return "\n".join(out + ["", _NOTE])
 LIVE_COMMANDS = ("authorize", "run")  # mutation-side commands, gated by LIVE_UNDO_ENABLED; `reconcile` is read-only and gated by LIVE_OBSERVE_ENABLED (reconcile_cli)
 _NOTE = ("Undo restores INBOX on ONE message that an execution archived and recorded with trusted evidence; it never touches other labels, other messages, Trash or deletion, and "
          "it is never retried. An uncertain result stays UNKNOWN until a fresh observation settles it.")
@@ -83,6 +101,8 @@ def _result_line(res):
 def dispatch(args, *, with_index, with_readonly, tty_input, fail, mailbox_factory=None, store_factory=None):
     """Run one `cleanup undo` subcommand. `with_index` / `with_readonly` are the CLI's index openers (account lookup and error handling stay there)."""
     cmd = args.undo_command
+    if cmd == "reversal":
+        return _reversal(args, with_index, with_readonly, tty_input, fail, mailbox_factory, store_factory)
     if cmd == "reconcile":
         from gmail_intelligence import reconcile_cli
         return reconcile_cli.dispatch_undo_reconcile(args, with_index=with_index, tty_input=tty_input, fail=fail, mailbox_factory=mailbox_factory, store_factory=store_factory)
@@ -139,3 +159,61 @@ def dispatch(args, *, with_index, with_readonly, tty_input, fail, mailbox_factor
         except Exception as exc:  # noqa: BLE001 - never print a traceback, token or identifier from an unexpected failure
             return fail(f"{type(exc).__name__}; nothing further was attempted (if an undo was started, reconcile it read-only before deciding anything)")
     return with_index(args, go)
+
+
+def _reversal(args, with_index, with_readonly, tty_input, fail, mailbox_factory, store_factory):
+    sub_cmd = args.reversal_command
+    if sub_cmd == "run" and live.LIVE_UNDO_ENABLED is not True:  # refuse before the index, a credential store or the network is touched
+        print(DISABLED)
+        return 2
+    if sub_cmd == "show":
+        def go_show(index, account):
+            try:
+                d = rv.describe(index, account, args.rev)
+            except ce.ExecError as exc:
+                return fail(exc)
+            print(json.dumps(d, indent=2, sort_keys=True) if args.json else reversal_text(d))
+            return 0
+        return with_readonly(args, go_show)
+
+    def go(index, account):
+        try:
+            if sub_cmd == "create":
+                d = rv.create_reversal_plan(index, account, args.exec_id, args.exclude_item or [])
+                print(reversal_text(d))
+                return 0
+            d = rv.describe(index, account, args.rev)
+            if sub_cmd == "approve":
+                print(f"This approves ONE reversal plan of {d['items']} archived item(s) (INBOX goes back on each, one at a time, in bounded slices). It executes nothing.")
+                typed = tty_input(f"Type exactly  {rv.approval_phrase(args.rev, d['items'], d['digest'])}  to approve (anything else aborts): ")
+                print(reversal_text(rv.approve_reversal(index, account, args.rev, typed)))
+                return 0
+            if sub_cmd == "abort":
+                typed = tty_input(f"Type exactly  {rv.abort_phrase(args.rev)}  to abandon this plan (items already restored stay restored): ")
+                print(reversal_text(rv.abort_reversal(index, account, args.rev, typed)))
+                return 0
+            nxt = d["next"]
+            if not nxt:
+                return fail("this plan has no slice that can run now (see `cleanup undo reversal show`)")
+            print(f"This runs slice {nxt['slice']} ({nxt['size']} item(s)) of the reversal against Gmail, one message at a time, each re-verified first. An uncertain result stops the whole plan and is never retried.")
+            typed = tty_input(f"Type exactly  {rv.slice_phrase(args.rev, nxt['slice'], nxt['size'], d['digest'])}  to run it (anything else aborts): ")
+            if store_factory is None:
+                from gmail_intelligence.keystore_write import WriteTokenStore
+                factory = WriteTokenStore
+            else:
+                factory = store_factory
+            mailbox = (mailbox_factory or (lambda: live.open_live_undo_mailbox(account, factory(), config.write_client_secret_path())))()
+            res = cl.reverse_slice_live(index, account, args.rev, typed, mailbox)
+            print(f"slice {res.slice_no} finished: {res.restored} restored, {res.skipped} skipped (changed or gone; nothing sent), {res.mutations} undo request(s); plan {res.state}"
+                  + (f"; STOPPED ({res.reason})" if res.stopped else ""))
+            if res.stopped:
+                print("Nothing further is attempted and nothing is retried. Settle any UNKNOWN item read-only with `cleanup undo reconcile`.")
+            return 1 if res.stopped else 0
+        except (ce.ExecError, cp.PlanError, live.LiveUndoDisabled) as exc:
+            return fail(exc)
+        except EOFError:
+            return fail("cancelled: this step needs a real interactive terminal; nothing was changed")
+        except Exception as exc:  # noqa: BLE001 - never print a traceback, token or identifier from an unexpected failure
+            return fail(f"{type(exc).__name__}; nothing further was attempted (settle anything started read-only before deciding anything)")
+    return with_index(args, go)
+

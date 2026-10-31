@@ -815,8 +815,8 @@ class DryRunAndCliTests(ExecBase):
         self.assertEqual(self.index.conn.total_changes, changes)
         self.assertEqual(self.approval_status(plan["plan_id"]), ["VALID"])
         for argv in (["cleanup", "execute", plan["plan_id"], "--yes", "--account", ACCT], ["cleanup", "exec", "reserve", "x", "--account", ACCT],
-                     ["cleanup", "exec", "start", "x", "--account", ACCT], ["cleanup", "exec", "abort", "x", "--account", ACCT]):
-            self.assertEqual(self.run_cli(*argv)[0], 2, argv)  # no production path reserves, starts, aborts or confirms
+                     ["cleanup", "exec", "start", "x", "--account", ACCT]):
+            self.assertEqual(self.run_cli(*argv)[0], 2, argv)  # no production path reserves or starts outside the DISABLED M12D entry points (`execute --reserve`, `exec run|confirm`; `exec abort` is local)
 
     def test_cli_exec_listing_and_show_are_read_only_and_private(self):
         self.reserve(self.approved_plan(["m1", "m2"]))
@@ -1796,7 +1796,7 @@ class SourceGuards(unittest.TestCase):
                     names = [node.module or ""] + [f"{node.module}.{a.name}" for a in node.names]
                 if any(n.split(".")[-1] in ("cleanup_exec", "cleanup_exec_report") for n in names):
                     importers.append(path.name)
-        self.assertEqual(sorted(set(importers)), ["cleanup_canary.py", "cleanup_canary_cli.py", "cleanup_executor.py", "cleanup_recovery.py", "cleanup_undo.py", "cli.py", "reconcile_cli.py", "sync_lease.py", "undo_cli.py"])  # besides the CLI: the executor, undo, recovery and the disabled canary; M7A sync_lease imports it ONLY to verify the D145 guard handshake (constant + source of the sync-health refusal), never to call it
+        self.assertEqual(sorted(set(importers)), ["bulk_cli.py", "cleanup_bulk.py", "cleanup_canary.py", "cleanup_canary_cli.py", "cleanup_executor.py", "cleanup_recovery.py", "cleanup_reversal.py", "cleanup_undo.py", "cli.py", "reconcile_cli.py", "sync_lease.py", "undo_cli.py"])  # besides the CLI: the executor, undo, recovery and the disabled canary; M7A sync_lease imports it ONLY to verify the D145 guard handshake (constant + source of the sync-health refusal), never to call it
 
 
 if __name__ == "__main__":

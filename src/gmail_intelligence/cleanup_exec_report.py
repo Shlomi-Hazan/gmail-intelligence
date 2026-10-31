@@ -42,10 +42,19 @@ def _last_reason(index, account, ex):
     return None
 
 
+def _ranges(sizes):
+    out, first = [], 1
+    for size in sizes:
+        out.append((first, first + size - 1))
+        first += size
+    return out
+
+
 def dry_run_text(d):
     out = [f"DRY RUN for plan {d['plan_id']} (account {cleanup_protect.HIDDEN_ACCOUNT})",
            f"  action: {d['action']}   targets: {d['targets']}   plan state: {d['plan_state']}   hash: {d['hash8']}",
-           f"  slice sizes if executed: {', '.join(str(s) for s in d['slices'])} (canary 25 for plans over 100, then slices of at most 100)"]
+           f"  slice sizes if executed: {', '.join(str(s) for s in d['slices'])} (canary 25 for plans over 100, then slices of at most 100)",
+           "  slice boundaries (item numbers): " + ", ".join(f"{a}-{b}" for a, b in _ranges(d["slices"])) + "; each slice needs its own typed confirmation, one after the other"]
     if d["problems"]:
         out.append("  NOT executable now: " + ", ".join(f"{k}={v}" for k, v in sorted(d["problems"].items())))
     else:
@@ -68,8 +77,10 @@ def show_text(index, account, ex, show_ids=False):
     out = [f"Execution {ex['exec_id']} for plan {ex['plan_id']} (account {cleanup_protect.HIDDEN_ACCOUNT})",
            f"  state: {ex['state']}   action: {ex['action']}   targets: {ex['item_count']}   created {ex['created_at']}   changed {ex['state_changed_at']}",
            "  items by state: " + (", ".join(f"{k}={v}" for k, v in sorted(ce.item_counts(index, account, ex["exec_id"]).items())) or "-")]
+    first = 1
     for s in ce.slices(index, account, ex["exec_id"]):
-        out.append(f"  slice {s['slice_no']}: {s['state']:<10} size {s['size']}" + (f"  confirmed {s['confirmed_at']}" if s["confirmed_at"] else ""))
+        out.append(f"  slice {s['slice_no']}: {s['state']:<10} size {s['size']} (items {first}-{first + s['size'] - 1})" + (f"  confirmed {s['confirmed_at']}" if s["confirmed_at"] else ""))
+        first += s["size"]
     codes = ce.code_counts(index, account, ex["exec_id"])
     if codes:
         out.append("  reasons for items not recorded as applied (state / reason / count):")
@@ -207,6 +218,18 @@ UNDO_MEANING = {"restored": "restored (confirmed by a fresh observation)", "not_
                 "conflict": "CONFLICT (the mailbox shows something unexpected; manual owner review; final, not a restoration)",
                 "inconsistent": "INCONSISTENT ledger (never acted on; manual owner review)", "pending": "authorized but not run (the authorization expires; nothing happened)"}
 UNDO_NEEDS_OWNER = ("unresolved", "conflict", "inconsistent", "pending")
+REVERSAL_NEEDS_OWNER = ("PLANNED", "APPROVED", "AWAITING_CONTINUATION", "INTERRUPTED", "STOPPED", "INCONSISTENT")   # a plan awaiting a decision, or ended unfinished; COMPLETED / ABORTED / IN_PROGRESS do not
+
+
+def reversal_data(index, account, now=None):
+    """Read-only view of every bulk reversal plan (M12D): state, item and slice counts, restored and skipped counts. Reversal ids and counts only; no message ids, labels or accounts."""
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for rev in undo_ledger.all_reversals(index, account):
+        st = undo_ledger.reversal_state(undo_ledger.reversal_events(index, account, rev), _iso(now))
+        out.append({"rev": rev, "state": st["state"], "items": len(st.get("items", ())), "slices": len(st.get("slices", ())), "slices_done": st.get("done", 0),
+                    "restored": st.get("restored", 0), "skipped": len(st.get("skipped", {}))})
+    return out
 
 
 def undo_data(index, account):
@@ -219,8 +242,9 @@ def recovery_data(index, account, now=None):
     """The M12C.1 status as plain data (counts, states and item sequence numbers; no message ids, account address, labels, senders or credentials; local execution ids may appear)."""
     reports, needs = status(index, account, now)
     undos = undo_data(index, account)
-    needs = needs or any(u["category"] in UNDO_NEEDS_OWNER for u in undos)
-    return {"executions": [view(r) for r in reports], "undos": undos, "needs_owner": needs, "read_only": True, "gmail_contacted": False, "retried_or_changed": 0}
+    reversals = reversal_data(index, account, now)
+    needs = needs or any(u["category"] in UNDO_NEEDS_OWNER for u in undos) or any(r["state"] in REVERSAL_NEEDS_OWNER for r in reversals)
+    return {"executions": [view(r) for r in reports], "undos": undos, "reversals": reversals, "needs_owner": needs, "read_only": True, "gmail_contacted": False, "retried_or_changed": 0}
 
 
 def recovery_text(data):
@@ -234,8 +258,10 @@ def recovery_text(data):
         out += [f"    note: {n}" for n in e["notes"]]
     if not data["executions"]:
         out.append("  no open or uncertain executions")
+    for r in data.get("reversals", ()):
+        out.append(f"  reversal plan {r['rev']}: {r['state']}; {r['items']} item(s), {r['slices_done']}/{r['slices']} slice(s) done, {r['restored']} restored, {r['skipped']} skipped")
     if data.get("undos"):
         out.append("  archive undos (per item, by sequence number):")
         out += [f"    execution {u['exec_id']} item {u['item']}: {UNDO_MEANING[u['category']]}" for u in data["undos"]]
-    out.append("  OWNER ACTION REQUIRED" if data["needs_owner"] else "  no owner decision needed right now; open executions or finished undos remain (see above)" if data["executions"] or data.get("undos") else "  nothing needs the owner")
+    out.append("  OWNER ACTION REQUIRED" if data["needs_owner"] else "  no owner decision needed right now; open executions, finished undos or reversal plans remain (see above)" if data["executions"] or data.get("undos") or data.get("reversals") else "  nothing needs the owner")
     return "\n".join(out + ["", RECOVERY_NOTE])
