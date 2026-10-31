@@ -254,8 +254,8 @@ def _run_slice(index, account, rev, phrase, mailbox, allow):
     stopped, reason, ended = False, "", False
     for seq in batch:
         cur = ledger.reversal_state(ledger.reversal_events(index, account, rev), cp._iso(cu._now(mailbox)))["state"]
-        if cur not in ("IN_PROGRESS", "INTERRUPTED"):      # the plan was aborted (or its log became inconsistent) while this slice ran: stop before the next item, record nothing more
-            stopped, reason, ended = True, "PLAN_NOT_RUNNING", True
+        if cur != "IN_PROGRESS":      # only a slice still inside its window may start another undo: an expired slice (INTERRUPTED), an aborted plan or an inconsistent log stops here
+            stopped, reason, ended = True, "SLICE_EXPIRED" if cur == "INTERRUPTED" else "PLAN_NOT_RUNNING", True   # nothing more is recorded: the plan stays INTERRUPTED (abortable, never resumed)
             break
         try:
             if ledger.undo_status(index, account, exec_id, seq) not in ("NONE", "NOT_RESTORED"):

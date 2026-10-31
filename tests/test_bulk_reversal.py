@@ -399,6 +399,49 @@ class AbortWhileRunningTests(ReversalBase):
         self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
 
 
+class SliceWindowTests(ReversalBase):
+    N = 30
+
+    def test_a_slice_that_outlives_its_window_starts_no_further_undo_and_stays_interrupted(self):
+        ex = self.archived_execution(30)
+        self.enable_undo()
+        rev = self.approved(ex)
+        expire = lambda f: setattr(self.clk, "at", self.clk.at + timedelta(seconds=ledger.RUN_TTL_SECONDS + 60))   # the window passes right after item 1 was restored
+        self.svc.script.append(Step("UNDO", nth=1, after=expire))
+        before = self.audit_rows()
+        r = self.run_rev(rev)
+        self.assertEqual((r.restored, r.stopped, r.reason, r.mutations, self.svc.undos()), (1, True, "SLICE_EXPIRED", 1, 1))      # item 2 received no undo request
+        self.assertEqual([ledger.undo_status(self.index, ACCT, ex["exec_id"], s) for s in (1, 2, 3)], ["RESTORED", "NONE", "NONE"])  # item 1 stays restored; item 2 was never even authorized
+        self.assertEqual(self.state(rev), "INTERRUPTED")                                             # reported accurately; no DONE event was written
+        self.assertNotIn("REVERSAL_SLICE_DONE", [e[3] for e in self.audit_rows()[len(before):]])
+        undos = self.svc.undos()
+        for call in (lambda: self.run_rev(rev, phrase="x"), lambda: cu.authorize_in_reversal(self.index, ACCT, ex["exec_id"], 2, rev, 1, "0" * 64, now=self.clk())):
+            with self.assertRaises(ce.ExecError):                                                    # nothing resumes, nothing is authorized
+                call()
+        data = rep.recovery_data(self.index, ACCT, self.clk())
+        self.assertEqual([(x["state"], x["restored"]) for x in data["reversals"]], [("INTERRUPTED", 0)])
+        self.assertTrue(data["needs_owner"])
+        rv.abort_reversal(self.index, ACCT, rev, rv.abort_phrase(rev), now=self.clk())               # abandoning an expired slice authorizes nothing further
+        self.assertEqual(self.state(rev), "ABORTED")
+        for call in (lambda: self.run_rev(rev, phrase="x"), lambda: cu.authorize_in_reversal(self.index, ACCT, ex["exec_id"], 2, rev, 1, "0" * 64, now=self.clk())):
+            with self.assertRaises(ce.ExecError):
+                call()
+        self.assertEqual((self.svc.undos(), ledger.undo_status(self.index, ACCT, ex["exec_id"], 2)), (undos, "NONE"))
+        self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
+
+    def test_an_open_item_of_an_expired_slice_remains_available_for_read_only_reconciliation(self):
+        ex = self.archived_execution(30)
+        self.enable_undo()
+        rev = self.approved(ex)
+        self.svc.script.append(Step("UNDO", nth=2, raises=Crash(), apply=True))
+        with self.assertRaises(Crash):
+            self.run_rev(rev)
+        self.clk.at = self.clk.at + timedelta(seconds=ledger.RUN_TTL_SECONDS + 60)
+        self.assertEqual((self.state(rev), ledger.undo_status(self.index, ACCT, ex["exec_id"], 2)), ("INTERRUPTED", "OPEN"))
+        res = cl.reconcile_undo_observed(self.index, ACCT, ex["exec_id"], 2, self.observe_mailbox())
+        self.assertEqual((res.status, res.mutations, self.svc.undos(), self.state(rev)), ("RESTORED", 0, 2, "INTERRUPTED"))
+
+
 class BoundaryTests(ReversalBase):
     N = 12
     SHARED = {2: 1, 3: 1}
