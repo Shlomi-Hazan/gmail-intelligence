@@ -111,10 +111,17 @@ def reversal_state(events, now_iso=None):
     if not events or events[0]["type"] != "REVERSAL_PLANNED":
         return bad
     plan = events[0]["meta"]
-    sizes = plan.get("slices")
-    if not isinstance(sizes, list) or not sizes or not all(isinstance(x, int) and x > 0 for x in sizes) or sum(sizes) != len(plan.get("items", ())):
+    raw_sizes, raw_items = plan.get("slices"), plan.get("items")      # flat audit metadata: {"1": size, ...} and {"<item seq>": slice number}
+    try:
+        sizes = [raw_sizes[str(i)] for i in range(1, len(raw_sizes) + 1)]
+        items = sorted(int(k) for k in raw_items)
+        assign = {int(k): v for k, v in raw_items.items()}
+    except (TypeError, KeyError, ValueError, AttributeError):
         return bad
-    st = {"state": "PLANNED", "exec": plan.get("exec"), "items": list(plan["items"]), "digest": plan.get("digest"), "slices": list(sizes), "approved": False, "approval_expires": None,
+    if not sizes or not all(isinstance(x, int) and x > 0 for x in sizes) or sum(sizes) != len(items) or any(
+            sum(1 for s in items if assign[s] == n) != sizes[n - 1] for n in range(1, len(sizes) + 1)) or any(assign[s] > assign[t] for s, t in zip(items, items[1:])):
+        return bad
+    st = {"state": "PLANNED", "exec": plan.get("exec"), "items": items, "assign": assign, "digest": plan.get("digest"), "slices": list(sizes), "approved": False, "approval_expires": None,
           "done": 0, "started": None, "started_at": None, "stopped": False, "aborted": False, "skipped": {}, "restored": 0, "unresolved": 0}
     for ev in events[1:]:
         kind, meta = ev["type"], ev["meta"]

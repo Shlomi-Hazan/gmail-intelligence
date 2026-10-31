@@ -115,7 +115,12 @@ def create_reversal_plan(index, account, exec_id, exclude_seqs=(), now=None):
         digest = _digest(index, account, exec_id, items, ex["plan_hash"])
         rev = "rev-" + secrets.token_hex(4)
         sizes = ce.plan_slices(len(items))
-        audit.append(index, account, ex["plan_id"], "REVERSAL_PLANNED", at, {"rev": rev, "exec": exec_id, "items": items, "digest": digest, "slices": sizes,
+        assign, pos = {}, 0
+        for n, size in enumerate(sizes, 1):                           # the plan fixes which item belongs to which slice (flat audit metadata: item seq -> slice number)
+            for seq in items[pos:pos + size]:
+                assign[str(seq)] = n
+            pos += size
+        audit.append(index, account, ex["plan_id"], "REVERSAL_PLANNED", at, {"rev": rev, "exec": exec_id, "items": assign, "digest": digest, "slices": {str(n): s for n, s in enumerate(sizes, 1)},
                                                                              "source_plan_hash": ex["plan_hash"], "excluded": len(exclude), "refused": refused})
     return describe(index, account, rev, now)
 
@@ -243,8 +248,7 @@ def _run_slice(index, account, rev, phrase, mailbox, allow):
         if err.code == "BAD_CONFIRMATION" and plan_id:
             cp._reject(index, account, plan_id, "REVERSAL_REJECTED", at, err.code)
         raise err
-    offset = sum(st["slices"][:slice_no - 1])
-    batch = st["items"][offset:offset + size]
+    batch = [s for s in st["items"] if st["assign"][s] == slice_no]
     phrase_sha = sha256(phrase.strip() + rev)
     restored = skipped = mutations = 0
     stopped, reason = False, ""

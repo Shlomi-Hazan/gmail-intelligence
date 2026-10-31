@@ -406,7 +406,7 @@ class VisibilityTests(LiveUndoBase):
         cl.undo_live(self.index, ACCT, ex["exec_id"], 1, lm)
         data = rep.recovery_data(self.index, ACCT, self.uc())
         self.assertFalse(data["needs_owner"])
-        self.assertIn("finished undos remain", rep.recovery_text(data))
+        self.assertIn("reversal plans remain", rep.recovery_text(data))
         # the library report of the M4D recovery engine and the CLI-safe ledger module agree
         self.assertEqual(cr.status_report(self.index, ACCT).undos, ())
 

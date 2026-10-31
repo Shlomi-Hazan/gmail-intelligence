@@ -207,6 +207,18 @@ UNDO_MEANING = {"restored": "restored (confirmed by a fresh observation)", "not_
                 "conflict": "CONFLICT (the mailbox shows something unexpected; manual owner review; final, not a restoration)",
                 "inconsistent": "INCONSISTENT ledger (never acted on; manual owner review)", "pending": "authorized but not run (the authorization expires; nothing happened)"}
 UNDO_NEEDS_OWNER = ("unresolved", "conflict", "inconsistent", "pending")
+REVERSAL_NEEDS_OWNER = ("PLANNED", "APPROVED", "AWAITING_CONTINUATION", "INTERRUPTED", "STOPPED", "INCONSISTENT")   # a plan awaiting a decision, or ended unfinished; COMPLETED / ABORTED / IN_PROGRESS do not
+
+
+def reversal_data(index, account, now=None):
+    """Read-only view of every bulk reversal plan (M12D): state, item and slice counts, restored and skipped counts. Reversal ids and counts only; no message ids, labels or accounts."""
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for rev in undo_ledger.all_reversals(index, account):
+        st = undo_ledger.reversal_state(undo_ledger.reversal_events(index, account, rev), _iso(now))
+        out.append({"rev": rev, "state": st["state"], "items": len(st.get("items", ())), "slices": len(st.get("slices", ())), "slices_done": st.get("done", 0),
+                    "restored": st.get("restored", 0), "skipped": len(st.get("skipped", {}))})
+    return out
 
 
 def undo_data(index, account):
@@ -219,8 +231,9 @@ def recovery_data(index, account, now=None):
     """The M12C.1 status as plain data (counts, states and item sequence numbers; no message ids, account address, labels, senders or credentials; local execution ids may appear)."""
     reports, needs = status(index, account, now)
     undos = undo_data(index, account)
-    needs = needs or any(u["category"] in UNDO_NEEDS_OWNER for u in undos)
-    return {"executions": [view(r) for r in reports], "undos": undos, "needs_owner": needs, "read_only": True, "gmail_contacted": False, "retried_or_changed": 0}
+    reversals = reversal_data(index, account, now)
+    needs = needs or any(u["category"] in UNDO_NEEDS_OWNER for u in undos) or any(r["state"] in REVERSAL_NEEDS_OWNER for r in reversals)
+    return {"executions": [view(r) for r in reports], "undos": undos, "reversals": reversals, "needs_owner": needs, "read_only": True, "gmail_contacted": False, "retried_or_changed": 0}
 
 
 def recovery_text(data):
@@ -234,8 +247,10 @@ def recovery_text(data):
         out += [f"    note: {n}" for n in e["notes"]]
     if not data["executions"]:
         out.append("  no open or uncertain executions")
+    for r in data.get("reversals", ()):
+        out.append(f"  reversal plan {r['rev']}: {r['state']}; {r['items']} item(s), {r['slices_done']}/{r['slices']} slice(s) done, {r['restored']} restored, {r['skipped']} skipped")
     if data.get("undos"):
         out.append("  archive undos (per item, by sequence number):")
         out += [f"    execution {u['exec_id']} item {u['item']}: {UNDO_MEANING[u['category']]}" for u in data["undos"]]
-    out.append("  OWNER ACTION REQUIRED" if data["needs_owner"] else "  no owner decision needed right now; open executions or finished undos remain (see above)" if data["executions"] or data.get("undos") else "  nothing needs the owner")
+    out.append("  OWNER ACTION REQUIRED" if data["needs_owner"] else "  no owner decision needed right now; open executions, finished undos or reversal plans remain (see above)" if data["executions"] or data.get("undos") or data.get("reversals") else "  nothing needs the owner")
     return "\n".join(out + ["", RECOVERY_NOTE])
