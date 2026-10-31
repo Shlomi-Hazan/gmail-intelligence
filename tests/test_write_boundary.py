@@ -45,7 +45,7 @@ class ImportBoundaryTests(unittest.TestCase):
             hits = {n.split(".")[-1] for n, _ in imported_names(tree) if n.split(".")[-1] in WRITE_MODULES}
             if path.name in WRITE_FILES:
                 continue
-            if path.name in ("cleanup_canary_cli.py", "undo_cli.py"):  # (undo_cli: M12C.3, same lazy pattern) the DISABLED owner entry point reaches the Keychain store class only, lazily, after its first-statement gate
+            if path.name in ("cleanup_canary_cli.py", "undo_cli.py", "reconcile_cli.py"):  # (undo_cli: M12C.3, same lazy pattern) the DISABLED owner entry point reaches the Keychain store class only, lazily, after its first-statement gate
                 self.assertEqual(hits, {"keystore_write"})
                 top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
                 self.assertFalse({n.split(".")[-1] for t in top for n, _ in imported_names(ast.Module(body=[t], type_ignores=[])) if n.split(".")[-1] in WRITE_MODULES})
@@ -89,9 +89,10 @@ class ImportBoundaryTests(unittest.TestCase):
         fake_only["archive_message"] |= {("exec_live_mailbox.py", "archive_message")}
         fake_only["open_archive_adapter"] = {("exec_live_mailbox.py", "open_live_mailbox")}  # reachable only through the disabled switch; nothing calls it
         fake_only["open_undo_adapter"] = {("exec_live_mailbox.py", "open_live_undo_mailbox")}  # M12C.3: reachable only through the separate disabled undo switch
+        fake_only["open_observe_adapter"] = {("exec_live_mailbox.py", "open_live_observe_mailbox")}  # M12C.4: reachable only through the separate disabled observation switch
         fake_only["restore_inbox"] = {("cleanup_undo.py", "_undo_item"), ("exec_fake_mailbox.py", "restore_inbox"), ("exec_live_mailbox.py", "restore_inbox")}
         fake_only["refresh_and_store"] = {("cli.py", "cmd_auth_refresh_write")}  # M12C.3: the one explicit, owner-typed renewal command
-        for attr in ("refresh_write_credentials", "refresh_and_store", "open_archive_adapter", "open_undo_adapter", "archive_message", "restore_inbox", "verify_account"):
+        for attr in ("refresh_write_credentials", "refresh_and_store", "open_archive_adapter", "open_undo_adapter", "open_observe_adapter", "archive_message", "restore_inbox", "verify_account"):
             outside = {c for c in self.callers(attr) if c[0] not in WRITE_FILES}
             # the only consumers are the executor's single per-item flow (shared by execute_one and execute_batch) and the fake-only mailbox it accepts (M4C-C2); no production code builds a real adapter
             self.assertEqual(outside, fake_only.get(attr, set()), attr)

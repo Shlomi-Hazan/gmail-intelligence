@@ -14,7 +14,7 @@ from datetime import timezone
 from gmail_intelligence import cleanup_exec as ce, cleanup_executor as cx, cleanup_plans as cp, cleanup_undo as cu
 from gmail_intelligence.cleanup_exec_report import ExecutionReport, _counts, _execution_report, _relevant  # noqa: F401 - moved to the read-only report module the CLI already uses (M12C.1); names kept here
 
-_STOP_CODES = ("AUTH_PROBLEM", "ACCOUNT_MISMATCH", "ACCOUNT_NOT_VERIFIED")
+_STOP_CODES = ("AUTH_PROBLEM", "ACCOUNT_MISMATCH", "ACCOUNT_NOT_VERIFIED", "LIVE_OBSERVE_DISABLED")
 
 
 @dataclass(frozen=True)
@@ -85,10 +85,10 @@ def _recover(index, account, mailbox, allow):
                             break
                 if stopped:
                     break
-        if not stopped and allow == "FAKE":  # undo exists only for the fake mailbox; a live undo is deferred
+        if not stopped and allow in ("FAKE", "OBSERVE"):  # uncertain undos are reconciled from fresh observations only (never by repeating the mutation); LIVE (archive) mailboxes have no undo
             for exec_id, seq, _ in undo_open:
                 try:
-                    cu.reconcile_undo(index, account, exec_id, seq, mailbox)
+                    cu._reconcile_undo(index, account, exec_id, seq, mailbox, allow)
                     undos_resolved += 1
                 except sqlite3.Error:
                     stopped = "DATABASE_ERROR"

@@ -46,6 +46,8 @@ def _wired(mailbox, allow):
         return type(mailbox) is FakeMailbox and wiring_is_fake(mailbox)
     if allow == "LIVE":
         return type(mailbox) is live.LiveUndoMailbox and live.live_undo_wiring_ok(mailbox)
+    if allow == "OBSERVE":  # reconciliation only (M12C.4): a read-only mailbox that cannot restore anything
+        return type(mailbox) is live.LiveObserveMailbox and live.live_observe_wiring_ok(mailbox)
     return False
 
 
@@ -54,6 +56,8 @@ def _gate(mailbox, allow="FAKE"):
     accepts only a `LiveUndoMailbox` and additionally needs the build's undo switch. Each mode refuses the other's type. A live ARCHIVE mailbox is never accepted."""
     if allow == "LIVE" and type(mailbox) is live.LiveUndoMailbox and live.LIVE_UNDO_ENABLED is not True:
         raise ce.ExecError("LIVE_UNDO_DISABLED", "live archive undo is disabled in this build; nothing was read or changed")
+    if allow == "OBSERVE" and type(mailbox) is live.LiveObserveMailbox and live.LIVE_OBSERVE_ENABLED is not True:
+        raise ce.ExecError("LIVE_OBSERVE_DISABLED", "live Gmail observation is disabled in this build; nothing was read or changed")
     if not _wired(mailbox, allow):
         raise ce.ExecError("MAILBOX_NOT_ALLOWED", "only the fake test mailbox is accepted in this version; nothing was read or changed" if allow == "FAKE"
                            else "this mailbox is not accepted by the live undo entry point; nothing was read or changed")
@@ -150,6 +154,8 @@ def undo_item(index, account, exec_id, seq, mailbox):
 def _undo_item(index, account, exec_id, seq, mailbox, allow):
     """Run ONE authorized undo. Refusals before the intent raise ExecError and change nothing (the authorization stays until it expires);
     after the intent there is exactly one mutation attempt, and anything unclear is UNKNOWN."""
+    if allow not in ("FAKE", "LIVE"):  # a read-only (OBSERVE) mailbox can never mutate
+        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "this mailbox is not accepted by this entry point; nothing was read or changed")
     _gate(mailbox, allow)
     if mailbox.account.strip().lower() != account.strip().lower():
         raise ce.ExecError("ACCOUNT_MISMATCH", "the mailbox belongs to another account; nothing was changed")

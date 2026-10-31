@@ -49,6 +49,10 @@ def _gate(mailbox, allow):
         if type(mailbox) is live.LiveMailbox and live.LIVE_EXECUTION_ENABLED is not True:
             raise ce.ExecError("LIVE_DISABLED", "live Gmail execution is disabled in this build; nothing was read or changed")
         ok = type(mailbox) is live.LiveMailbox and live.live_wiring_ok(mailbox)
+    elif allow == "OBSERVE":  # M12C.4: read-only recovery; independent of the archive switch
+        if type(mailbox) is live.LiveObserveMailbox and live.LIVE_OBSERVE_ENABLED is not True:
+            raise ce.ExecError("LIVE_OBSERVE_DISABLED", "live Gmail observation is disabled in this build; nothing was read or changed")
+        ok = type(mailbox) is live.LiveObserveMailbox and live.live_observe_wiring_ok(mailbox)
     else:
         ok = False
     if not ok:

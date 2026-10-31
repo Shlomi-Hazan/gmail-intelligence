@@ -7,7 +7,7 @@ Design:
     nothing is refreshed here. An expired token stops the call; refresh/revocation are separate OAuth operations (oauth_write).
   * The adapter exposes verify_account / message_state / thread_state / observe / archive_message / restore_inbox only - never the connection, token or credentials.
   * Archive and undo are SEPARATE capabilities fixed when the transport is built: `archive_message` needs "ARCHIVE", `restore_inbox` needs "UNDO", and the transport itself refuses
-    (before any dispatch) the mutation kind its capabilities do not include. A transport holds EXACTLY ONE capability (never both): `open_archive_adapter` -> ARCHIVE, `open_undo_adapter` -> UNDO.
+    (before any dispatch) the mutation kind its capabilities do not include. A transport holds EXACTLY ONE capability (never several): `open_archive_adapter` -> ARCHIVE, `open_undo_adapter` -> UNDO, `open_observe_adapter` -> OBSERVE (reads only, no mutation).
   * Failures map to fixed codes; messages never contain tokens, ids, URLs or account identifiers.
   * Once dispatch may have begun, EVERY unclear result of the single mutation request (timeout, interruption, redirect, oversized/malformed/
     unexpected answer, any unexpected exception) is reported as UncertainOutcome, which the executor must record as UNKNOWN and reconcile; it
@@ -163,9 +163,10 @@ class _Transport:
     __slots__ = ("_creds", "_factory", "_sent", "_allowed", "_bound", "_caps")
 
     def __init__(self, creds, connection_factory=None, capabilities=("ARCHIVE",)):
-        # Archive and undo are STRICTLY separate: a transport holds exactly ONE capability. Empty, unknown, repeated, string or combined sets are refused.
-        if type(capabilities) not in (tuple, list, frozenset) or len(capabilities) != 1 or next(iter(capabilities)) not in ("ARCHIVE", "UNDO"):
-            raise ValueError("a transport takes exactly one capability: ARCHIVE or UNDO")
+        # Archive, undo and observation are STRICTLY separate: a transport holds exactly ONE capability. Empty, unknown, repeated, string or combined sets are refused.
+        # OBSERVE is the read-only capability: it grants NO mutation kind (the transport itself refuses both modify requests), so it can read and nothing else.
+        if type(capabilities) not in (tuple, list, frozenset) or len(capabilities) != 1 or next(iter(capabilities)) not in ("ARCHIVE", "UNDO", "OBSERVE"):
+            raise ValueError("a transport takes exactly one capability: ARCHIVE, UNDO or OBSERVE")
         self._caps = frozenset(capabilities)  # which mutation kind this transport may send; fixed at construction
         self._creds, self._factory, self._sent = creds, connection_factory or _default_connection, 0
         self._bound = False  # a transport (its credentials and its verified state) belongs to exactly one adapter
@@ -485,7 +486,7 @@ class ArchiveAdapter:
 
 def fetch_profile_email(creds, connection_factory=None):
     """One allowed profile read with fresh credentials (used by `auth login-write` to learn which account was authorized)."""
-    return ArchiveAdapter(_Transport(creds, connection_factory), None)._profile_email()
+    return ArchiveAdapter(_Transport(creds, connection_factory, capabilities=("OBSERVE",)), None)._profile_email()  # one read: least privilege
 
 
 def _open_adapter(expected_account, store, client_path, now, connection_factory, capabilities):
@@ -517,3 +518,9 @@ def open_undo_adapter(expected_account, store, client_path, now=None, connection
     """Like `open_archive_adapter`, but the transport holds the UNDO capability ONLY (it can restore INBOX on one message and can never archive). Same local checks, same stored
     write authorization, exact scope, client identity, account and at least ten minutes of access-token life; no refresh, no network, no prompt."""
     return _open_adapter(expected_account, store, client_path, now, connection_factory, ("UNDO",))
+
+
+def open_observe_adapter(expected_account, store, client_path, now=None, connection_factory=None):
+    """Like `open_archive_adapter`, but the transport holds the OBSERVE capability ONLY: it can verify the account and read (profile, message labels, thread labels, trusted observations)
+    and can never archive or undo (both modify requests are refused before any dispatch). Same local checks and stored write authorization; no refresh, no network, no prompt."""
+    return _open_adapter(expected_account, store, client_path, now, connection_factory, ("OBSERVE",))
