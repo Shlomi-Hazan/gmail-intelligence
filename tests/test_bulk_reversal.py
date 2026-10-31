@@ -380,6 +380,76 @@ class ThreadRuleTests(ReversalBase):
         self.assertEqual(res.status, "RESTORED")                                                # settled read-only; still a restoration by ANOTHER plan, so still not trusted for rev_c
 
 
+class AbortWhileRunningTests(ReversalBase):
+    N = 30
+
+    def test_an_abort_recorded_while_a_slice_runs_stops_it_before_the_next_item(self):
+        ex = self.archived_execution(30)
+        self.enable_undo()
+        rev = self.approved(ex)
+
+        def abort_from_another_process(f):
+            # the slice looks stale (30+ minutes) to another process, which abandons the plan while this run is still alive
+            self.clk.at = self.clk.at + timedelta(seconds=ledger.RUN_TTL_SECONDS + 60)
+            rv.abort_reversal(self.index, ACCT, rev, rv.abort_phrase(rev), now=self.clk())
+        self.svc.script.append(Step("UNDO", nth=3, after=abort_from_another_process))
+        r = self.run_rev(rev)
+        self.assertEqual((r.restored, r.stopped, r.reason, self.svc.undos()), (3, True, "PLAN_NOT_RUNNING", 3))        # nothing after the abort
+        self.assertEqual(self.state(rev), "ABORTED")
+        self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
+
+
+class BoundaryTests(ReversalBase):
+    N = 12
+    SHARED = {2: 1, 3: 1}
+
+    def test_the_reversal_authorization_exists_only_inside_a_running_approved_slice(self):
+        ex = self.archived_execution(12)
+        rev = self.plan(ex)["rev"]                                                   # planned, not approved, not running
+        for call in (lambda: cu.authorize_in_reversal(self.index, ACCT, ex["exec_id"], 1, rev, 1, "0" * 64, now=self.clk()),
+                     lambda: cu.authorize_in_reversal(self.index, ACCT, ex["exec_id"], 1, "rev-00000000", 1, "0" * 64, now=self.clk())):
+            with self.assertRaises(ce.ExecError) as ctx:
+                call()
+            self.assertEqual(ctx.exception.code if ctx.exception.code != "NO_SUCH_REVERSAL" else "NOT_IN_REVERSAL", "NOT_IN_REVERSAL")
+        self.approve(rev)
+        with self.assertRaises(ce.ExecError) as ctx:                                  # approved but no slice started
+            cu.authorize_in_reversal(self.index, ACCT, ex["exec_id"], 1, rev, 1, "0" * 64, now=self.clk())
+        self.assertEqual(ctx.exception.code, "NOT_IN_REVERSAL")
+        self.assertEqual(ledger.undo_status(self.index, ACCT, ex["exec_id"], 1), "NONE")
+
+    def test_a_forged_reversal_id_never_relaxes_the_thread_rule(self):
+        ex = self.archived_execution(12)
+        self.enable_undo()
+        mb = self.undo_mailbox()
+        plan = cp.get_plan(self.index, ACCT, ex["plan_id"])
+        cu.authorize_undo(self.index, ACCT, ex["exec_id"], 1, cu.undo_phrase(plan, ex["exec_id"], 1), now=self.clk())
+        self.assertEqual(cl.undo_live(self.index, ACCT, ex["exec_id"], 1, mb).status, "RESTORED")
+        with cp._txn(self.index):                                                       # a hand-written authorization naming a plan that was never approved
+            audit.append(self.index, ACCT, ex["plan_id"], "UNDO_AUTHORIZED", cp._iso(self.clk()), {"exec": ex["exec_id"], "item": 2, "phrase_sha256": "0" * 64, "rev": "rev-feedface"})
+        with self.assertRaises(ce.ExecError) as ctx:
+            cl.undo_live(self.index, ACCT, ex["exec_id"], 2, mb)
+        self.assertEqual(ctx.exception.code, "UNDO_DRIFT")                                 # siblings are only trusted through a genuinely approved plan
+
+
+class ScaleTests(ReversalBase):
+    N = 500
+
+    def test_the_maximum_plan_is_archived_and_fully_reversed_in_bounded_slices(self):
+        ex = self.archived_execution()
+        self.enable_undo()
+        rev = self.approved(ex)
+        d = rv.describe(self.index, ACCT, rev, self.clk())
+        self.assertEqual(d["slices"], [25, 100, 100, 100, 100, 75])
+        results = []
+        while self.state(rev) in ("APPROVED", "AWAITING_CONTINUATION"):
+            results.append(self.run_rev(rev))
+        self.assertEqual([r.restored for r in results], [25, 100, 100, 100, 100, 75])
+        self.assertEqual((self.state(rev), self.svc.undos(), self.svc.posts()), ("COMPLETED", 500, 500))
+        self.assertTrue(all(set(labels) == set(LABELS) for _t, labels in self.svc.messages.values()))
+        self.assertEqual(self.history(), self.snapshot_before)
+        self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
+
+
 class GateAndCliTests(ReversalBase):
     N = 30
 

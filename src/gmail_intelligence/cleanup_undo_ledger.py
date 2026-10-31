@@ -10,14 +10,26 @@ RESULTS = ("RESTORED", "NOT_RESTORED", "CONFLICT", "UNKNOWN")
 STATUSES = ("NONE", "AUTHORIZED", "OPEN", "INCONSISTENT") + RESULTS
 
 
-def _ledger(index, account, exec_id, seq):
+def _filtered(index, account, events, **fields):
+    """Audit rows of the given event types whose metadata carries the given exact field values, oldest first. SQLite's JSON functions pre-select the rows (a bulk plan reads many
+    ledgers); the exact test is repeated in Python, and a SQLite build without JSON functions simply falls back to scanning."""
+    marks = ",".join("?" * len(events))
+    where = " AND ".join(f"json_extract(meta,'$.{k}')=?" for k in fields)
+    try:
+        rows = index._q(f"SELECT seq, event_type, at, meta, hash FROM cleanup_audit WHERE account=? AND event_type IN ({marks})" + (f" AND {where}" if where else "") + " ORDER BY seq",
+                        account, *events, *fields.values())
+    except Exception:  # noqa: BLE001 - no JSON functions: scan everything
+        rows = index._q(f"SELECT seq, event_type, at, meta, hash FROM cleanup_audit WHERE account=? AND event_type IN ({marks}) ORDER BY seq", account, *events)
     out = []
-    marks = ",".join("?" * len(UNDO_EVENTS))
-    for r in index._q(f"SELECT seq, event_type, at, meta, hash FROM cleanup_audit WHERE account=? AND event_type IN ({marks}) ORDER BY seq", account, *UNDO_EVENTS):
+    for r in rows:
         meta = json.loads(r["meta"])
-        if meta.get("exec") == exec_id and meta.get("item") == seq:
+        if all(meta.get(k) == v for k, v in fields.items()):
             out.append({"type": r["event_type"], "at": r["at"], "meta": meta, "hash": r["hash"]})
     return out
+
+
+def _ledger(index, account, exec_id, seq):
+    return _filtered(index, account, UNDO_EVENTS, exec=exec_id, item=seq)
 
 
 def _state(ledger):
@@ -96,13 +108,7 @@ RUN_TTL_SECONDS = 30 * 60   # a started slice with no result for this long is IN
 
 
 def reversal_events(index, account, rev):
-    out = []
-    marks = ",".join("?" * len(REVERSAL_EVENTS))
-    for r in index._q(f"SELECT seq, event_type, at, meta, hash FROM cleanup_audit WHERE account=? AND event_type IN ({marks}) ORDER BY seq", account, *REVERSAL_EVENTS):
-        meta = json.loads(r["meta"])
-        if meta.get("rev") == rev:
-            out.append({"type": r["event_type"], "at": r["at"], "meta": meta, "hash": r["hash"]})
-    return out
+    return _filtered(index, account, REVERSAL_EVENTS, rev=rev)
 
 
 def reversal_state(events, now_iso=None):

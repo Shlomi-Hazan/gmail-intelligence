@@ -204,7 +204,7 @@ def _skip_code(exc):
     cause = exc.__cause__
     if exc.code == "UNDO_DRIFT":
         return "UNDO_DRIFT"
-    if exc.code == "UNDO_PREFLIGHT_FAILED" and getattr(cause, "code", None) == "NOT_FOUND":
+    if exc.code == "UNDO_PREFLIGHT_FAILED" and getattr(cause, "code", None) == "NOT_FOUND" and getattr(cause, "absent_confirmed", False) is True:
         return "UNDO_GONE"        # the message no longer exists: nothing to restore (an unconfirmed 404 or any other read problem is NOT this: it stops)
     return None
 
@@ -251,8 +251,12 @@ def _run_slice(index, account, rev, phrase, mailbox, allow):
     batch = [s for s in st["items"] if st["assign"][s] == slice_no]
     phrase_sha = sha256(phrase.strip() + rev)
     restored = skipped = mutations = 0
-    stopped, reason = False, ""
+    stopped, reason, ended = False, "", False
     for seq in batch:
+        cur = ledger.reversal_state(ledger.reversal_events(index, account, rev), cp._iso(cu._now(mailbox)))["state"]
+        if cur not in ("IN_PROGRESS", "INTERRUPTED"):      # the plan was aborted (or its log became inconsistent) while this slice ran: stop before the next item, record nothing more
+            stopped, reason, ended = True, "PLAN_NOT_RUNNING", True
+            break
         try:
             if ledger.undo_status(index, account, exec_id, seq) not in ("NONE", "NOT_RESTORED"):
                 raise ReversalError("ITEM_STATE", "an item is no longer in a state that can be undone")
@@ -273,7 +277,8 @@ def _run_slice(index, account, rev, phrase, mailbox, allow):
             continue
         stopped, reason = True, res.status        # UNKNOWN (never retried) or a provably refused request: stop the whole reversal
         break
-    with cp._txn(index):
-        audit.append(index, account, plan_id, "REVERSAL_SLICE_DONE", cp._iso(cu._now(mailbox)), {"rev": rev, "slice": slice_no, "restored": restored, "skipped": skipped,
-                                                                                           "stopped": stopped, "reason": reason})
+    if not ended:
+        with cp._txn(index):
+            audit.append(index, account, plan_id, "REVERSAL_SLICE_DONE", cp._iso(cu._now(mailbox)), {"rev": rev, "slice": slice_no, "restored": restored, "skipped": skipped,
+                                                                                               "stopped": stopped, "reason": reason})
     return SliceResult(slice_no, restored, skipped, stopped, reason, mutations, describe(index, account, rev, cu._now(mailbox))["state"])

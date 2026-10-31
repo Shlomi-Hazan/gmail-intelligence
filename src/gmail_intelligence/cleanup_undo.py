@@ -23,7 +23,7 @@ from datetime import timedelta, timezone
 from gmail_intelligence import cleanup_audit as audit, cleanup_exec as ce, cleanup_executor as cx, cleanup_plans as cp, exec_live_mailbox as live
 from gmail_intelligence.cleanup_audit import sha256
 from gmail_intelligence.cleanup_undo_ledger import RESULTS, STATUSES, UNDO_EVENTS, _ledger, _state, all_undos, open_undos, undo_status  # noqa: F401 - the read-only ledger lives in its own module
-from gmail_intelligence.cleanup_undo_ledger import reversal_approved as ledger_reversal_approved
+from gmail_intelligence.cleanup_undo_ledger import reversal_approved as ledger_reversal_approved, reversal_events, reversal_state
 from gmail_intelligence.exec_fake_mailbox import FakeMailbox, wiring_is_fake
 
 UNDO_AUTH_TTL = timedelta(minutes=15)
@@ -133,6 +133,9 @@ def authorize_in_reversal(index, account, exec_id, seq, rev, slice_no, slice_phr
     with cp._txn(index):
         cp._check_clock(index, account, now)
         ex, item, plan = _original(index, account, exec_id, seq)
+        st = reversal_state(reversal_events(index, account, rev), at)     # only inside a genuinely running, approved reversal slice that really contains this item
+        if st["state"] != "IN_PROGRESS" or st.get("exec") != exec_id or st["assign"].get(seq) != slice_no or st["started"] != slice_no:
+            raise ce.ExecError("NOT_IN_REVERSAL", "this item is not part of a running slice of an approved reversal plan; nothing was authorized")
         status = undo_status(index, account, exec_id, seq)
         if status not in ("NONE", "NOT_RESTORED"):
             raise ce.ExecError("UNDO_NOT_ALLOWED", f"this item's undo state is {status}; a new authorization is not possible")
@@ -140,7 +143,7 @@ def authorize_in_reversal(index, account, exec_id, seq, rev, slice_no, slice_phr
     return "AUTHORIZED"
 
 
-def _restored_siblings(index, account, exec_id, rev, archived):
+def _restored_siblings(index, account, exec_id, rev, archived, thread_id):
     """F5 (M12D): the expected labels of siblings, with those RESTORED *by this very reversal plan* expected at their original labels (INBOX back).
 
     A sibling counts as intentionally restored only when ALL hold: the reversal plan is genuinely approved (REVERSAL_APPROVED in the audit log); the sibling's item ledger is in the
@@ -149,14 +152,12 @@ def _restored_siblings(index, account, exec_id, rev, archived):
     if not rev or not ledger_reversal_approved(index, account, rev):
         return archived
     out = dict(archived)
-    for ex_id, seq, _status in all_undos(index, account):
-        if ex_id != exec_id:
+    members = {r["id"] for r in index._q("SELECT id FROM messages WHERE account=? AND thread_id=?", account, thread_id)}   # only the siblings of THIS thread matter
+    for row in index._q("SELECT seq, message_id, prev_label_ids FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state='APPLIED' AND prev_label_ids IS NOT NULL", account, exec_id):
+        if row["message_id"] not in members:
             continue
-        status, auth, _i, _r = _state(_ledger(index, account, exec_id, seq))
-        if status != "RESTORED" or auth is None or auth["meta"].get("rev") != rev:
-            continue
-        row = _item_by_seq(index, account, exec_id, seq)
-        if row["state"] == "APPLIED" and row["prev_label_ids"] is not None:
+        status, auth, _i, _r = _state(_ledger(index, account, exec_id, row["seq"]))
+        if status == "RESTORED" and auth is not None and auth["meta"].get("rev") == rev:
             out[row["message_id"]] = set(json.loads(row["prev_label_ids"]))
     return out
 
@@ -220,7 +221,7 @@ def _undo_item(index, account, exec_id, seq, mailbox, allow):
     expected = cx._archived_by_this_execution(index, account, exec_id)
     rev = (auth["meta"].get("rev") if auth else None)  # set only by authorize_in_reversal: the id of the approved reversal plan this attempt belongs to
     if rev is not None:
-        expected = _restored_siblings(index, account, exec_id, rev, expected)  # F5: siblings restored by THIS plan are expected restored; everything else is as before
+        expected = _restored_siblings(index, account, exec_id, rev, expected, state.thread_id)  # F5: siblings restored by THIS plan are expected restored; everything else is as before
     if cx._thread_problem(index, account, mid, state.thread_id, thread, expected):
         raise ce.ExecError("UNDO_DRIFT", "the thread changed or contains a protected message; nothing was changed")
 

@@ -42,10 +42,19 @@ def _last_reason(index, account, ex):
     return None
 
 
+def _ranges(sizes):
+    out, first = [], 1
+    for size in sizes:
+        out.append((first, first + size - 1))
+        first += size
+    return out
+
+
 def dry_run_text(d):
     out = [f"DRY RUN for plan {d['plan_id']} (account {cleanup_protect.HIDDEN_ACCOUNT})",
            f"  action: {d['action']}   targets: {d['targets']}   plan state: {d['plan_state']}   hash: {d['hash8']}",
-           f"  slice sizes if executed: {', '.join(str(s) for s in d['slices'])} (canary 25 for plans over 100, then slices of at most 100)"]
+           f"  slice sizes if executed: {', '.join(str(s) for s in d['slices'])} (canary 25 for plans over 100, then slices of at most 100)",
+           "  slice boundaries (item numbers): " + ", ".join(f"{a}-{b}" for a, b in _ranges(d["slices"])) + "; each slice needs its own typed confirmation, one after the other"]
     if d["problems"]:
         out.append("  NOT executable now: " + ", ".join(f"{k}={v}" for k, v in sorted(d["problems"].items())))
     else:
@@ -68,8 +77,10 @@ def show_text(index, account, ex, show_ids=False):
     out = [f"Execution {ex['exec_id']} for plan {ex['plan_id']} (account {cleanup_protect.HIDDEN_ACCOUNT})",
            f"  state: {ex['state']}   action: {ex['action']}   targets: {ex['item_count']}   created {ex['created_at']}   changed {ex['state_changed_at']}",
            "  items by state: " + (", ".join(f"{k}={v}" for k, v in sorted(ce.item_counts(index, account, ex["exec_id"]).items())) or "-")]
+    first = 1
     for s in ce.slices(index, account, ex["exec_id"]):
-        out.append(f"  slice {s['slice_no']}: {s['state']:<10} size {s['size']}" + (f"  confirmed {s['confirmed_at']}" if s["confirmed_at"] else ""))
+        out.append(f"  slice {s['slice_no']}: {s['state']:<10} size {s['size']} (items {first}-{first + s['size'] - 1})" + (f"  confirmed {s['confirmed_at']}" if s["confirmed_at"] else ""))
+        first += s["size"]
     codes = ce.code_counts(index, account, ex["exec_id"])
     if codes:
         out.append("  reasons for items not recorded as applied (state / reason / count):")
