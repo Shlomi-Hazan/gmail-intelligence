@@ -19,17 +19,35 @@ from gmail_intelligence import cli, config, gmail_write as gw, oauth, oauth_writ
 class RenewalCommandTests(WBase):
     def run_tty(self, typed):
         """`auth refresh-write` with the terminal-only confirmation answered by `typed` (a real terminal is required in production)."""
-        with mock.patch.object(cli, "_tty_input", return_value=typed):
-            return self.run_cli("auth", "refresh-write")
+        return self.run_cli("auth", "refresh-write", stdin=typed)       # (run_cli answers every terminal-only confirmation with `typed`)
 
-    def test_piped_or_scripted_input_never_renews_a_credential(self):
+    def piped(self, *argv):
+        """Run a command with the REAL terminal-only confirmation (stdin is not a terminal), as a script piping the phrase would."""
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch("sys.stdin", io.StringIO(oauth_write.REFRESH_PHRASE + "\n")):
+            try:
+                code = cli.main(list(argv))
+            except SystemExit as exc:
+                code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_piped_or_scripted_input_never_renews_starts_or_revokes_a_credential(self):
         self.stored(1)
         before = dict(self.backend.items)
-        with mock.patch.object(oauth_write, "refresh_and_store", side_effect=AssertionError("must not refresh")), mock.patch("sys.stdin.isatty", return_value=False):
-            code, out, err = self.run_cli("auth", "refresh-write", stdin=oauth_write.REFRESH_PHRASE)   # the phrase is "typed", but not on a terminal
-        self.assertEqual(code, 1)
-        self.assertIn("interactive terminal", err)
-        self.assertEqual(self.backend.items, before)
+        with mock.patch.object(oauth_write, "refresh_and_store", side_effect=AssertionError("must not refresh")), \
+                mock.patch.object(oauth_write, "run_login_write", side_effect=AssertionError("must not log in")), \
+                mock.patch.object(oauth_write, "revoke_refresh_token", side_effect=AssertionError("must not revoke")):
+            for argv in (("auth", "refresh-write"), ("auth", "revoke-write")):
+                code, out, err = self.piped(*argv)
+                self.assertEqual(code, 1, argv)
+                self.assertIn("interactive terminal", err, argv)
+            self.assertEqual(self.backend.items, before)
+            self.wstore.delete()                                  # login needs nothing stored: still no scripted start
+            code, out, err = self.piped("auth", "login-write", "--expect-account", ACCOUNT)
+            self.assertEqual(code, 1)
+            self.assertIn("interactive terminal", err)
 
     def stored(self, minutes=1):
         self.write_client_file()

@@ -314,7 +314,11 @@ def cmd_auth_login_write(args):
     except (KeystoreError, oauth.AuthError) as exc:
         return _fail(exc)
     print(oauth_write.LOGIN_WARNING)
-    if input(f"To continue type exactly: {oauth_write.LOGIN_PHRASE}\n> ").strip() != oauth_write.LOGIN_PHRASE:
+    try:
+        typed = _tty_input(f"To continue type exactly: {oauth_write.LOGIN_PHRASE}\n> ")  # terminal only: piped or scripted input never starts an authorization
+    except EOFError:
+        return _fail("cancelled: authorizing the write permission needs a real interactive terminal; no authorization was requested")
+    if typed.strip() != oauth_write.LOGIN_PHRASE:
         return _fail("declined; no authorization was requested")
     try:
         creds, granted = oauth_write.run_login_write(path, open_browser=not args.no_browser)
@@ -446,10 +450,12 @@ def cmd_auth_revoke_write(args):
             return 0
         oauth_write.check_blob(blob)
         oauth_write.verify_isolation(config.write_client_secret_path(), config.client_secret_path(), config.write_setup_path())  # revocation is project-wide
-        if not args.yes and input(f"This contacts Google and revokes the write grant (project-wide at Google). Type exactly: {oauth_write.REVOKE_PHRASE}\n> ").strip() != oauth_write.REVOKE_PHRASE:
-            return _fail("cancelled")
+        if not args.yes and _tty_input(f"This contacts Google and revokes the write grant (project-wide at Google). Type exactly: {oauth_write.REVOKE_PHRASE}\n> ").strip() != oauth_write.REVOKE_PHRASE:
+            return _fail("cancelled")  # without --yes the confirmation is terminal-only (a piped phrase is refused); --yes remains the one explicit non-interactive opt-in
         oauth_write.revoke_refresh_token(blob.get("refresh_token"))
         store.delete()  # only reached after Google answered HTTP 200; otherwise the local token stays
+    except EOFError:
+        return _fail("cancelled: revoking needs a real interactive terminal (or the explicit --yes); nothing was changed")
     except (KeystoreError, oauth.AuthError) as exc:
         return _fail(exc)
     print("Google confirmed the revocation (HTTP 200) and the local token was removed.")

@@ -230,6 +230,8 @@ def reconcile_undo(index, account, exec_id, seq, mailbox):
 
 
 def _reconcile_undo(index, account, exec_id, seq, mailbox, allow):
+    if allow not in ("FAKE", "OBSERVE"):  # reconciliation never runs through a mutation-capable live mailbox (the old LIVE mode was removed in M12D)
+        raise ce.ExecError("MAILBOX_NOT_ALLOWED", "this mailbox is not accepted by this entry point; nothing was read or changed")
     """Resolve an undo whose intent has no result (interrupted) or whose result is UNKNOWN, from a fresh execution-bound trusted observation. Makes NO mutation.
 
     Exactly the originally recorded labels -> RESTORED; exactly the archived labels -> NOT_RESTORED (observed unmodified; this does not prove that no write occurred);

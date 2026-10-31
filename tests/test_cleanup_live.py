@@ -45,7 +45,7 @@ class LiveBase(TR.RecoveryBase):
     def enable(self):
         """Switch live execution on for THIS test only and put one controlled clock under the live mailbox and the adapter."""
         self.clk = self.step_clock = LazyStepClock(self)
-        for target, name, value in ((live, "LIVE_EXECUTION_ENABLED", True), (live, "_utcnow", self.clk), (gw, "_utcnow", self.clk)):
+        for target, name, value in ((live, "LIVE_EXECUTION_ENABLED", True), (live, "LIVE_OBSERVE_ENABLED", True), (live, "_utcnow", self.clk), (gw, "_utcnow", self.clk)):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -55,6 +55,13 @@ class LiveBase(TR.RecoveryBase):
         factory = fm._Factory(svc)
         adapter = gw.ArchiveAdapter(gw._Transport(svc.creds, factory), account)
         return live._wrap(adapter, account, factory), svc
+
+    def observe_mailbox(self, state=None, account=ACCT):
+        """A READ-ONLY observe mailbox over the in-memory fake wire (M12C.4); recovery goes only through it since M12D."""
+        svc = fm._Service(account, state or self.fake_state(), ())
+        factory = fm._Factory(svc)
+        adapter = gw.ArchiveAdapter(gw._Transport(svc.creds, factory, capabilities=("OBSERVE",)), account)
+        return live._wrap_observe(adapter, account, factory), svc
 
     def single(self):
         return self.batch_execution(ids=(IDS[0],))
@@ -101,10 +108,13 @@ class DisabledByDefaultTests(LiveBase):
         with self.assertRaises(live.LiveExecutionDisabled):
             live._wrap(adapter, ACCT, factory)
         lm = live.LiveMailbox(_mint=live._MINT, _adapter=adapter, _account=ACCT, _test_factory=factory)  # built by hand with the private mint, bypassing the switch
-        for call in (lambda: cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm), lambda: cl.recover_live(self.index, ACCT, lm)):
+        for call in (lambda: cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm),):
             with self.assertRaises(ce.ExecError) as ctx:
                 call()
             self.assertEqual(ctx.exception.code, "LIVE_DISABLED")
+        with self.assertRaises(ce.ExecError) as ctx:  # (live recovery is observe-only since M12D: an archive mailbox is simply not accepted by it)
+            cl.recover_observed(self.index, ACCT, lm)
+        self.assertEqual(ctx.exception.code, "MAILBOX_NOT_ALLOWED")
         with self.assertRaises(live.LiveExecutionDisabled):
             lm.archive_message(HEX[0])  # even the mutation method checks the switch itself
         self.assertEqual((svc.log, self.snapshot(), live.LiveExecutionDisabled.code), ([], before, "LIVE_DISABLED"))
@@ -140,7 +150,7 @@ class DisabledByDefaultTests(LiveBase):
         self.assertEqual(list(inspect.signature(live.open_live_mailbox).parameters), ["expected_account", "store", "client_path"])
         self.assertEqual(list(inspect.signature(live.LiveMailbox.__init__).parameters), ["self", "_mint", "_adapter", "_account", "_test_factory"])
         self.assertEqual(list(inspect.signature(cl.execute_live_batch).parameters), ["index", "account", "exec_id", "token", "mailbox", "_permit"])
-        self.assertEqual(list(inspect.signature(cl.recover_live).parameters), ["index", "account", "mailbox"])
+        self.assertEqual(list(inspect.signature(cl.recover_observed).parameters), ["index", "account", "mailbox"])
         now = live._utcnow()
         self.assertEqual(now.utcoffset(), timedelta(0))
         self.assertLess(abs(datetime.now(timezone.utc) - now), timedelta(seconds=5))
@@ -212,7 +222,7 @@ class TypeIsolationTests(LiveBase):
         for call in (lambda: cx.execute_batch(self.index, ACCT, ex["exec_id"], self.token, lm), lambda: cx.execute_one(self.index, ACCT, ex["exec_id"], self.token, IDS[0], lm),
                      lambda: cr.recover(self.index, ACCT, lm), lambda: cu.undo_item(self.index, ACCT, ex["exec_id"], 1, lm),
                      lambda: cu.reconcile_undo(self.index, ACCT, ex["exec_id"], 1, lm), lambda: cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, fake),
-                     lambda: cl.recover_live(self.index, ACCT, fake)):
+                     lambda: cl.recover_observed(self.index, ACCT, fake)):
             with self.assertRaises(ce.ExecError) as ctx:
                 call()
             self.assertEqual(ctx.exception.code, "MAILBOX_NOT_ALLOWED")
@@ -345,15 +355,15 @@ class LiveBatchTests(LiveBase):
                     self.run_live(ex, lm, svc)
                 posts = svc.posts()
                 self.clk.at = self.clk.at + ce.LEASE_TTL + timedelta(seconds=10)
-                lm2, svc2 = self.live_mailbox(state={m: (t, list(l)) for m, (t, l) in svc.messages.items()})
-                report = cl.recover_live(self.index, ACCT, lm2)
+                lm2, svc2 = self.observe_mailbox(state={m: (t, list(l)) for m, (t, l) in svc.messages.items()})
+                report = cl.recover_observed(self.index, ACCT, lm2)
                 self.assertEqual(report.interrupted, (ex["exec_id"],))
                 self.assertEqual(self.item(IDS[0])["state"], "APPLIED" if apply else "NOT_APPLIED")
                 self.assertEqual((svc.posts(), svc2.posts(), svc2.undos(), posts), (posts, 0, 0, posts))
                 self.assertTrue(audit.verify_chain(self.index, ACCT)[0])
-                wrong, wsvc = self.live_mailbox(account=OTHER)
+                wrong, wsvc = self.observe_mailbox(account=OTHER)
                 with self.assertRaises(ce.ExecError) as ctx:
-                    cl.recover_live(self.index, ACCT, wrong)
+                    cl.recover_observed(self.index, ACCT, wrong)
                 self.assertEqual(ctx.exception.code, "ACCOUNT_MISMATCH")
 
 
@@ -418,8 +428,8 @@ class RestrictionTests(LiveBase):
         with self.assertRaises(Crash):
             self.run_live(ex, lm, svc)
         self.clk.at = self.clk.at + ce.LEASE_TTL + timedelta(seconds=10)
-        lm2, svc2 = self.live_mailbox(state={m: (t, list(l)) for m, (t, l) in svc.messages.items()})
-        cl.recover_live(self.index, ACCT, lm2)
+        lm2, svc2 = self.observe_mailbox(state={m: (t, list(l)) for m, (t, l) in svc.messages.items()})
+        cl.recover_observed(self.index, ACCT, lm2)
         self.assertEqual((svc2.posts(), svc2.undos()), (0, 0))
         self.assertEqual({k for k, _ in svc2.log} - {"PROFILE", "GET_MESSAGE"}, set())  # only the profile read and observations
 
@@ -431,7 +441,7 @@ class UndoSeparationTests(LiveBase):
         self.assertFalse(hasattr(lm, "restore_inbox"))
         self.assertTrue(hasattr(gw.ArchiveAdapter, "restore_inbox"))  # the adapter class has it; an ARCHIVE-capability transport cannot send it (see test_undo_infrastructure)
         for call in (lambda: cu.undo_item(self.index, ACCT, "exec-00000000", 1, lm), lambda: cu._undo_item(self.index, ACCT, "exec-00000000", 1, lm, "LIVE"),
-                     lambda: cl.undo_live(self.index, ACCT, "exec-00000000", 1, lm), lambda: cl.reconcile_undo_live(self.index, ACCT, "exec-00000000", 1, lm)):
+                     lambda: cl.undo_live(self.index, ACCT, "exec-00000000", 1, lm), lambda: cl.reconcile_undo_observed(self.index, ACCT, "exec-00000000", 1, lm)):
             with self.assertRaises(ce.ExecError) as ctx:
                 call()
             self.assertEqual(ctx.exception.code, "MAILBOX_NOT_ALLOWED")
