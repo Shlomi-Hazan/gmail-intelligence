@@ -440,5 +440,14 @@
  "type.UNCLASSIFIED": "לא מסווג",
  "type.UNKNOWN": "לא ידוע",
  "type.UNRECOGNISED": "סוג לא מוכר",
- "yes": "כן"
+ "yes": "כן",
+ "event.BULK_SLICE_CONFIRMED": "הרצת פרוסה מרוכזת אושרה",
+ "event.BULK_REJECTED": "אישור הרצה מרוכזת נדחה",
+ "event.REVERSAL_PLANNED": "תוכנית היפוך נוצרה",
+ "event.REVERSAL_APPROVED": "תוכנית היפוך אושרה",
+ "event.REVERSAL_REJECTED": "אישור היפוך נדחה",
+ "event.REVERSAL_SLICE_STARTED": "פרוסת היפוך התחילה",
+ "event.REVERSAL_ITEM_SKIPPED": "פריט בהיפוך דולג",
+ "event.REVERSAL_SLICE_DONE": "פרוסת היפוך הסתיימה",
+ "event.REVERSAL_ABORTED": "תוכנית היפוך בוטלה"
 }

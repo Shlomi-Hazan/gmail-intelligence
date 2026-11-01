@@ -149,7 +149,7 @@ def _thread_problem(index, account, message_id, thread_id, thread, archived=None
     return None
 
 
-def _process_item(index, account, exec_id, token, message_id, mailbox, single, verify=True, allow="FAKE"):
+def _process_item(index, account, exec_id, token, message_id, mailbox, single, verify=True, allow="FAKE", cache=None):
     """The one per-item flow. Returns (ItemResult, proceed): proceed is True only when the item is final and harmless (APPLIED or a skip) and the execution is
     still EXECUTING, so a batch may go on; False means the execution was stopped (or the item is UNKNOWN) and nothing further may be attempted."""
     _gate(mailbox, allow)
@@ -166,7 +166,7 @@ def _process_item(index, account, exec_id, token, message_id, mailbox, single, v
             return _stop(index, account, exec_id, token, message_id, mailbox, _stop_reason(exc)), False
 
     # ---- local revalidation (plan freshness, protections, mixed threads): drift is skipped, never attempted
-    problems = cp.revalidate(index, account, plan, _now(mailbox), only_ids=[message_id])
+    problems = cp.revalidate(index, account, plan, _now(mailbox), only_ids=[message_id], _cache=cache)
     if problems:
         reason = "THREAD_CHANGED" if any(p in _THREAD_REASONS for p in problems) else "STATE_CHANGED"
         return _skip(index, account, exec_id, token, message_id, mailbox, "SKIPPED_DRIFT", reason), True
@@ -260,7 +260,7 @@ def execute_batch(index, account, exec_id, token, mailbox):
     return _execute_batch(index, account, exec_id, token, mailbox, "FAKE")
 
 
-def _execute_batch(index, account, exec_id, token, mailbox, allow, canary_ok=False):
+def _execute_batch(index, account, exec_id, token, mailbox, allow, canary_ok=False, bulk_ok=False):
     """Run the ACTIVE slice of a started multi-item execution item by item, in the plan's fixed (seq) order, and finish the slice through the state machine.
 
     Every item goes through `_process_item`, i.e. the same account check, local revalidation, live message and thread reads, durable intent, single POST and
@@ -272,28 +272,34 @@ def _execute_batch(index, account, exec_id, token, mailbox, allow, canary_ok=Fal
     ex = ce.get_execution(index, account, exec_id)
     if ex["state"] != "EXECUTING":
         raise ce.ExecError("BAD_STATE", f"execution is {ex['state']}; the executor needs an EXECUTING execution")
-    if allow == "LIVE":  # live execution is ONLY the approved single-message canary, entered through run_canary
-        if not canary_ok:
-            raise ce.ExecError("CANARY_ONLY", "live execution is only available through the single-message canary entry point; nothing was changed")
-        if ex["item_count"] != 1 or ex["slice_count"] != 1:
-            raise ce.ExecError("NOT_A_CANARY", "live execution handles exactly one target in one slice; nothing was changed")
-        if not any(json.loads(r["meta"]).get("exec") == exec_id for r in index._q(
-                "SELECT meta FROM cleanup_audit WHERE account=? AND event_type='CANARY_CONFIRMED'", account)):
-            raise ce.ExecError("CANARY_NOT_CONFIRMED", "the owner's canary confirmation is not recorded for this execution; nothing was changed")
     active = [s["slice_no"] for s in ce.slices(index, account, exec_id) if s["state"] == "ACTIVE"]
     if len(active) != 1:
         raise ce.ExecError("INVARIANT_BROKEN", "the execution has no single active slice; nothing was changed")
     slice_no = active[0]
+    if allow == "LIVE":  # live execution is the approved single-message canary (run_canary) OR one owner-confirmed slice of an approved bulk plan (cleanup_bulk.run_bulk_slice)
+        if canary_ok:
+            if ex["item_count"] != 1 or ex["slice_count"] != 1:
+                raise ce.ExecError("NOT_A_CANARY", "live execution handles exactly one target in one slice; nothing was changed")
+            if not any(json.loads(r["meta"]).get("exec") == exec_id for r in index._q(
+                    "SELECT meta FROM cleanup_audit WHERE account=? AND event_type='CANARY_CONFIRMED'", account)):
+                raise ce.ExecError("CANARY_NOT_CONFIRMED", "the owner's canary confirmation is not recorded for this execution; nothing was changed")
+        elif bulk_ok:
+            confirmed = [m for m in (json.loads(r["meta"]) for r in index._q("SELECT meta FROM cleanup_audit WHERE account=? AND event_type='BULK_SLICE_CONFIRMED'", account))
+                         if m.get("exec") == exec_id and m.get("slice") == slice_no]
+            if len(confirmed) != 1:  # exactly one owner run-confirmation per slice; a slice is never run twice and never without one
+                raise ce.ExecError("SLICE_RUN_NOT_CONFIRMED", "the owner's run confirmation for this slice is not recorded exactly once; nothing was changed")
+        else:
+            raise ce.ExecError("CANARY_ONLY", "live execution is only available through the owner-operated entry points; nothing was changed")
     open_items = index._q("SELECT COUNT(*) FROM cleanup_exec_item WHERE account=? AND exec_id=? AND state IN ('INTENT','UNKNOWN','CONFLICT')", account, exec_id)[0][0]
     if open_items:
         raise ce.ExecError("OPEN_UNCERTAIN_ITEM", "an item is INTENT, UNKNOWN or CONFLICT; it is never retried and the batch will not start (nothing was changed)")
-    results, posts = [], 0
+    results, posts, cache = [], 0, {}
     while True:
         nxt = index._q("SELECT message_id, seq FROM cleanup_exec_item WHERE account=? AND exec_id=? AND slice_no=? AND state='PENDING' ORDER BY seq LIMIT 1",
                        account, exec_id, slice_no)
         if not nxt:
             break
-        res, proceed = _process_item(index, account, exec_id, token, nxt[0]["message_id"], mailbox, single=False, verify=not results, allow=allow)
+        res, proceed = _process_item(index, account, exec_id, token, nxt[0]["message_id"], mailbox, single=False, verify=not results, allow=allow, cache=cache)
         results.append((nxt[0]["seq"], res))
         posts += res.posts
         if not proceed:

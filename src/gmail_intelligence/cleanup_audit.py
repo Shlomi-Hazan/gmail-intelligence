@@ -21,6 +21,9 @@ EVENTS = ("PLAN_CREATED", "PLAN_REVIEWED", "REVIEW_REJECTED", "PLAN_APPROVED", "
           "UNDO_AUTHORIZED", "UNDO_REJECTED", "UNDO_INTENT", "UNDO_RESULT",
           # M4 canary: the owner's separate confirmation to archive ONE message live (the entry point is disabled in this build)
           "CANARY_CONFIRMED", "CANARY_REJECTED",
+          # M12D: the owner's run confirmation of one BULK archive slice, and a bulk REVERSAL plan's life (item numbers and counts only; items are sequence numbers, never message ids)
+          "BULK_SLICE_CONFIRMED", "BULK_REJECTED", "REVERSAL_PLANNED", "REVERSAL_APPROVED", "REVERSAL_REJECTED", "REVERSAL_SLICE_STARTED", "REVERSAL_ITEM_SKIPPED",
+          "REVERSAL_SLICE_DONE", "REVERSAL_ABORTED",
           # M5D: local label-change plans (counts/hashes/state names only; never label names or ids). They share this hash chain, so M4 verification covers them.
           "LABEL_PLAN_CREATED", "LABEL_PLAN_REVIEWED", "LABEL_REVIEW_REJECTED", "LABEL_PLAN_APPROVED", "LABEL_APPROVAL_REJECTED", "LABEL_PLAN_CANCELLED",
           "LABEL_PLAN_EXPIRED", "LABEL_APPROVAL_REVOKED", "LABEL_APPROVAL_EXPIRED", "LABEL_ATTEMPTS_LOCKED_OUT")

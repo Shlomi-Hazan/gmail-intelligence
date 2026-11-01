@@ -307,8 +307,8 @@ class ExecutionTests(CanaryBase):
                     self.canary(ex)
                 self.assertEqual(self.svc.posts(), 1)
                 self.svc.script.clear()
-                lm = cl.recover_live  # recovery only observes
-                report = lm(self.index, ACCT, live.open_live_mailbox(ACCT, self.store, self.client_path))
+                with mock.patch.object(live, "LIVE_OBSERVE_ENABLED", True):  # recovery only observes (since M12D: through the read-only observe mailbox)
+                    report = cl.recover_observed(self.index, ACCT, live.open_live_observe_mailbox(ACCT, self.store, self.client_path))
                 self.assertEqual((self.svc.posts(), self.svc.undos()), (1, 0))
                 self.assertEqual(self.item(M0)["state"], "APPLIED" if self.svc.messages[M0][1] == set(AFTER) else "NOT_APPLIED")
                 self.assertFalse(report.needs_owner)
@@ -336,7 +336,8 @@ class ExecutionTests(CanaryBase):
                 self.assertEqual((self.svc.posts(), self.item(M0)["state"]), (1, "INTENT"))
                 self.clk.at = self.clk.at + ce.LEASE_TTL + timedelta(seconds=10)
                 self.svc.script.clear()
-                report = cl.recover_live(self.index, ACCT, live.open_live_mailbox(ACCT, self.store, self.client_path))
+                with mock.patch.object(live, "LIVE_OBSERVE_ENABLED", True):
+                    report = cl.recover_observed(self.index, ACCT, live.open_live_observe_mailbox(ACCT, self.store, self.client_path))
                 self.assertEqual(report.interrupted, (ex["exec_id"],))
                 self.assertEqual(self.item(M0)["state"], "APPLIED" if apply else "NOT_APPLIED")
                 self.assertEqual(self.svc.posts(), 1)

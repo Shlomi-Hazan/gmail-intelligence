@@ -29,6 +29,7 @@ from gmail_intelligence import exec_fake_mailbox as fm, gmail_write as gw
 LIVE_EXECUTION_ENABLED = False
 LIVE_OBSERVE_ENABLED = False  # M12C.4: the switch of LIVE read-only observation (recovery / reconciliation); independent of both mutation switches; same rules: a source constant, False, nothing flips it
 LIVE_UNDO_ENABLED = False  # M12C.3: the independent switch of the live archive-undo path; same rules as above (a source constant, False in this build, nothing flips it)
+_BULK_PERMIT = object()  # module-private capability: only `cleanup_bulk.run_bulk_slice` passes it to the live slice entry point (a static test enforces it)
 _CANARY_PERMIT = object()  # module-private capability: only `cleanup_canary.run_canary` passes it to the live batch entry point (a static test enforces it)
 _MINT = object()  # module-private: only `_wrap` holds it, so an ordinary caller cannot construct a LiveMailbox directly (and so cannot choose its wiring)
 

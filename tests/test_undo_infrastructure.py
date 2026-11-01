@@ -129,7 +129,7 @@ class CapabilityTests(unittest.TestCase):
 class LiveUndoBase(UndoBase):
     def enable_undo(self):
         """Switch the live-UNDO gate on for THIS test only (the archive gate stays off) and put the controlled clock under the live mailbox and the adapter."""
-        for target, name, value in ((live, "LIVE_UNDO_ENABLED", True), (live, "_utcnow", self.uc), (gw, "_utcnow", self.uc)):
+        for target, name, value in ((live, "LIVE_UNDO_ENABLED", True), (live, "LIVE_OBSERVE_ENABLED", True), (live, "_utcnow", self.uc), (gw, "_utcnow", self.uc)):
             patcher = mock.patch.object(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -199,9 +199,9 @@ class GateTests(LiveUndoBase):
             with self.assertRaises(ce.ExecError) as ctx:
                 cl.undo_live(self.index, ACCT, ex["exec_id"], 1, lm)
             self.assertEqual(ctx.exception.code, "LIVE_UNDO_DISABLED")
-            with self.assertRaises(ce.ExecError) as ctx:
-                cl.reconcile_undo_live(self.index, ACCT, ex["exec_id"], 1, lm)
-            self.assertEqual(ctx.exception.code, "LIVE_UNDO_DISABLED")
+            with self.assertRaises(ce.ExecError) as ctx:      # (reconciliation is read-only and has its own switch; an undo mailbox is not accepted by it at all)
+                cl.reconcile_undo_observed(self.index, ACCT, ex["exec_id"], 1, lm)
+            self.assertEqual(ctx.exception.code, "MAILBOX_NOT_ALLOWED")
         with self.assertRaises(ce.ExecError) as ctx:            # enabled, but item 2 was never authorized: the archive approval authorizes nothing here
             cl.undo_live(self.index, ACCT, ex["exec_id"], 2, lm)
         self.assertEqual(ctx.exception.code, "UNDO_NOT_AUTHORIZED")
@@ -223,8 +223,8 @@ class GateTests(LiveUndoBase):
         self.assertFalse(hasattr(lm, "archive_message"))
         self.assertTrue(live.live_undo_wiring_ok(lm))
         for call in (lambda: cu.undo_item(self.index, ACCT, ex["exec_id"], 1, lm), lambda: cu.reconcile_undo(self.index, ACCT, ex["exec_id"], 1, lm),
-                     lambda: cl.undo_live(self.index, ACCT, ex["exec_id"], 1, self.umb(mb)), lambda: cl.reconcile_undo_live(self.index, ACCT, ex["exec_id"], 1, self.umb(mb)),
-                     lambda: cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm), lambda: cl.recover_live(self.index, ACCT, lm)):
+                     lambda: cl.undo_live(self.index, ACCT, ex["exec_id"], 1, self.umb(mb)), lambda: cl.reconcile_undo_observed(self.index, ACCT, ex["exec_id"], 1, self.umb(mb)),
+                     lambda: cl.execute_live_batch(self.index, ACCT, ex["exec_id"], self.token, lm), lambda: cl.recover_observed(self.index, ACCT, lm)):
             with self.assertRaises(ce.ExecError) as ctx:
                 call()
             self.assertEqual(ctx.exception.code, "MAILBOX_NOT_ALLOWED")
@@ -291,8 +291,8 @@ class EngineTests(LiveUndoBase):
                     with self.assertRaises(ce.ExecError):
                         again()                                                         # no automatic retry, no new authorization while UNKNOWN
                 self.assertEqual(svc.undos(), 1)
-                lm2, svc2 = self.live_undo(mb, state=self.current(svc))
-                res2 = cl.reconcile_undo_live(self.index, ACCT, ex["exec_id"], 1, lm2)
+                lm2, svc2 = self.live_observe_mailbox(mb, state=self.current(svc))
+                res2 = cl.reconcile_undo_observed(self.index, ACCT, ex["exec_id"], 1, lm2)
                 self.assertEqual((res2.status, res2.mutations, svc2.undos(), svc2.posts()), (final, 0, 0, 0))   # reads only
                 self.assertTrue({k for k, _ in svc2.log} <= {"PROFILE", "GET_MESSAGE"})
 
@@ -313,14 +313,14 @@ class EngineTests(LiveUndoBase):
     def test_no_usable_observation_keeps_unknown_and_a_conflicting_one_is_final(self):
         ex, mb, lm, svc = self.prepared([Step("GET_MESSAGE", nth=2, raises=TimeoutError())])
         self.assertEqual(cl.undo_live(self.index, ACCT, ex["exec_id"], 1, lm).status, "UNKNOWN")
-        lm2, svc2 = self.live_undo(mb, [Step("GET_MESSAGE", raises=TimeoutError())], state=self.current(svc))
+        lm2, svc2 = self.live_observe_mailbox(mb, [Step("GET_MESSAGE", raises=TimeoutError())], state=self.current(svc))
         with self.assertRaises(ce.ExecError) as ctx:
-            cl.reconcile_undo_live(self.index, ACCT, ex["exec_id"], 1, lm2)
+            cl.reconcile_undo_observed(self.index, ACCT, ex["exec_id"], 1, lm2)
         self.assertEqual((ctx.exception.code, cu.undo_status(self.index, ACCT, ex["exec_id"], 1)), ("NO_EVIDENCE", "UNKNOWN"))
         st = self.current(svc)
         st[self.mid(1)] = (st[self.mid(1)][0], list(LABELS) + ["STARRED"])             # someone else changed the message meanwhile
-        lm3, svc3 = self.live_undo(mb, state=st)
-        res = cl.reconcile_undo_live(self.index, ACCT, ex["exec_id"], 1, lm3)
+        lm3, svc3 = self.live_observe_mailbox(mb, state=st)
+        res = cl.reconcile_undo_observed(self.index, ACCT, ex["exec_id"], 1, lm3)
         self.assertEqual((res.status, res.mutations, svc3.undos()), ("CONFLICT", 0, 0))
         self.assertEqual(cu.undo_status(self.index, ACCT, ex["exec_id"], 1), "CONFLICT")   # manual owner attention: final, never presented as a restoration
 
@@ -334,7 +334,8 @@ class EngineTests(LiveUndoBase):
         with self.assertRaises(ce.ExecError):                   # an open intent blocks any second attempt
             cl.undo_live(self.index, ACCT, ex["exec_id"], 1, lm2)
         self.assertEqual(svc2.undos(), 0)
-        res = cl.reconcile_undo_live(self.index, ACCT, ex["exec_id"], 1, lm2)
+        lm2o, svc2o = self.live_observe_mailbox(mb, state=self.current(svc2))
+        res = cl.reconcile_undo_observed(self.index, ACCT, ex["exec_id"], 1, lm2o)
         self.assertEqual((res.status, res.mutations, svc2.undos()), ("RESTORED", 0, 0))
 
     def test_observations_are_bound_to_their_phase_and_item(self):
@@ -394,8 +395,8 @@ class VisibilityTests(LiveUndoBase):
         # a conflict and a settled restoration are visible and no longer "unresolved"
         st = self.current(svc)
         st[self.mid(2)] = (st[self.mid(2)][0], list(LABELS) + ["STARRED"])
-        lm2, _ = self.live_undo(mb, state=st)
-        self.assertEqual(cl.reconcile_undo_live(self.index, ACCT, ex["exec_id"], 2, lm2).status, "CONFLICT")
+        lm2, _ = self.live_observe_mailbox(mb, state=st)
+        self.assertEqual(cl.reconcile_undo_observed(self.index, ACCT, ex["exec_id"], 2, lm2).status, "CONFLICT")
         cats = {u["item"]: u["category"] for u in rep.recovery_data(self.index, ACCT, self.uc())["undos"]}
         self.assertEqual((cats[1], cats[2], cats[3]), ("restored", "conflict", "pending"))
         self.assertIn("CONFLICT", rep.recovery_text(rep.recovery_data(self.index, ACCT, self.uc())))
@@ -405,7 +406,7 @@ class VisibilityTests(LiveUndoBase):
         cl.undo_live(self.index, ACCT, ex["exec_id"], 1, lm)
         data = rep.recovery_data(self.index, ACCT, self.uc())
         self.assertFalse(data["needs_owner"])
-        self.assertIn("finished undos remain", rep.recovery_text(data))
+        self.assertIn("reversal plans remain", rep.recovery_text(data))
         # the library report of the M4D recovery engine and the CLI-safe ledger module agree
         self.assertEqual(cr.status_report(self.index, ACCT).undos, ())
 

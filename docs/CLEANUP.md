@@ -40,6 +40,8 @@ gmail-intelligence cleanup discover [--account EMAIL] [--limit N] [--min-group-s
 gmail-intelligence cleanup preview --group DOMAIN [--exclude-id ID] [--show-ids] [--page N] [--json] [--account EMAIL]   # M12B: exact messages of the selected groups (read-only; see CLEANUP-REVIEW.md)
 gmail-intelligence cleanup plan create --group DOMAIN [--exclude-id ID] --selection-digest DIGEST [--account EMAIL]      # M12B: freeze that exact selection as a DRAFT plan
 gmail-intelligence cleanup undo status|preview EXEC_ID SEQ|authorize|run|reconcile [--account EMAIL]   # M12C.3/4: archive undo of ONE message at a time; status/preview local; authorize/run DISABLED (undo switch); reconcile is READ-ONLY and DISABLED (observe switch)
+gmail-intelligence cleanup execute PLAN_ID --dry-run | --reserve ; cleanup exec run|confirm|abort EXEC_ID [--account EMAIL]   # M12D: bulk archive (reserve/run/confirm DISABLED; see M12D-BULK-EXECUTION.md)
+gmail-intelligence cleanup undo reversal create|show|approve|run|abort ...   # M12D: bulk reversal (run DISABLED)
 gmail-intelligence cleanup exec recovery --reconcile [--account EMAIL]   # M12C.4: live READ-ONLY reconciliation from fresh Gmail reads; DISABLED in this build (see CLEANUP-RECOVERY.md)
 gmail-intelligence auth refresh-write   # M12C.3: explicit, typed renewal of the write access token (Google's OAuth endpoint only)
 gmail-intelligence cleanup exec recovery [--account EMAIL] [--json]   # M12C.1: local read-only status of open or uncertain executions (see CLEANUP-RECOVERY.md)
@@ -287,7 +289,7 @@ finishes the slice through `end_slice`: the next slice needs the owner's typed c
 
 **Real-execution boundary (disabled; tested offline, and exercised live once for the owner-approved canary, see M4-CLOSEOUT.md).** `exec_live_mailbox.LiveMailbox` is a final, immutable port over a genuine `ArchiveAdapter` (archive-only request policy) that
 exposes exactly what the executor already uses (`clock`, `account`, `verify_account`, `message_state`, `thread_state`, `archive_message`, `observe`) and nothing else: no undo, no delete, no
-Trash, no send, no label creation. `cleanup_live.execute_live_batch` and `recover_live` are the only functions that accept it; they run the very same per-item flow and recovery as the
+Trash, no send, no label creation. `cleanup_live.execute_live_batch` (the single-message canary) and `execute_live_slice` (an owner-confirmed slice of a bulk execution, M12D) are the only functions that accept it; they run the very same per-item flow and recovery as the
 fake-only API (approval and plan integrity, lease, account verification, local revalidation, live message and whole-thread checks, durable intent before each POST, at most one POST per
 item, independent execution-bound trusted post-read, UNKNOWN and stop on any ambiguity, no retry, one slice per call), with no second mutation path. Each entry point accepts only its own
 mailbox type: the fake-only APIs refuse a live mailbox and the live APIs refuse a fake mailbox, a raw adapter or any look-alike. **Disabled by default:** `LIVE_EXECUTION_ENABLED` is a

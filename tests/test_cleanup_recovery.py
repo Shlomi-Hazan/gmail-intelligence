@@ -603,7 +603,7 @@ class UndoBoundaryTests(UndoBase):
                 mods = [a.name for a in node.names] if isinstance(node, ast.Import) else ([node.module or ""] + [a.name for a in node.names] if isinstance(node, ast.ImportFrom) else [])
                 if any(m.split(".")[-1] in ("cleanup_undo", "cleanup_recovery") for m in mods):
                     importers.add((path.name))
-        self.assertEqual(importers, {"cleanup_recovery.py", "cleanup_live.py", "undo_cli.py", "reconcile_cli.py"})  # undo only by recovery; recovery only by the disabled live entry points; never the CLI
+        self.assertEqual(importers, {"cleanup_recovery.py", "cleanup_live.py", "undo_cli.py", "reconcile_cli.py", "cleanup_reversal.py"})  # undo only by recovery; recovery only by the disabled live entry points; never the CLI
 
     def test_the_fake_undo_is_only_in_memory(self):
         mb = self.mailbox()

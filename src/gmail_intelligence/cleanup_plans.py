@@ -219,7 +219,7 @@ def snapshot_of(plan):
 
 
 # ---------------------------------------------------------------- freshness
-def revalidate(index, account, plan, now=None, _out=None, only_ids=None):
+def revalidate(index, account, plan, now=None, _out=None, only_ids=None, _cache=None):
     """Fail-closed freshness check against the LOCAL index. Returns {problem_code: count}; empty means fresh.
 
     Never trims the target set: any single stale or ineligible target makes the whole plan stale.
@@ -258,9 +258,18 @@ def revalidate(index, account, plan, now=None, _out=None, only_ids=None):
     wanted = None if only_ids is None else set(only_ids)  # continuation checks only the not-yet-executed targets
     ids = [i["id"] for i in snap["items"] if wanted is None or i["id"] in wanted]
     facts = _facts(index, account, ids)
-    res = cc.evaluate_all(index, account, now_ms=_ms(now), min_age_days=min_age,
-                          canary_ids=frozenset(i["id"] for i in snap["items"]) if canary and len(snap["items"]) == 1 else frozenset())
-    decisions = {d.message_id: d for d in res.decisions}
+    canary_ids = frozenset(i["id"] for i in snap["items"]) if canary and len(snap["items"]) == 1 else frozenset()
+    # M12D: a batch revalidates every item of a slice. The eligibility decisions depend only on tables this connection never writes while executing (messages, labels, classes,
+    # protection rules), so they are reused across the slice for as long as SQLite's data_version (which changes when ANOTHER connection commits) and the inputs stay the same;
+    # any concurrent change recomputes them (fail closed, never a stale reuse). Without a cache nothing changes: one full evaluation per call.
+    stamp = (index.conn.execute("PRAGMA data_version").fetchone()[0], min_age, canary_ids, plan["plan_id"]) if _cache is not None else None
+    if _cache is not None and _cache.get("stamp") == stamp:
+        decisions = _cache["decisions"]
+    else:
+        res = cc.evaluate_all(index, account, now_ms=_ms(now), min_age_days=min_age, canary_ids=canary_ids)
+        decisions = {d.message_id: d for d in res.decisions}
+        if _cache is not None:
+            _cache["stamp"], _cache["decisions"] = stamp, decisions
     if _out is not None:
         _out["decisions"] = decisions
     for item in snap["items"]:

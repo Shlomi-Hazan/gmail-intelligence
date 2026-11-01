@@ -45,7 +45,7 @@ class ImportBoundaryTests(unittest.TestCase):
             hits = {n.split(".")[-1] for n, _ in imported_names(tree) if n.split(".")[-1] in WRITE_MODULES}
             if path.name in WRITE_FILES:
                 continue
-            if path.name in ("cleanup_canary_cli.py", "undo_cli.py", "reconcile_cli.py"):  # (undo_cli: M12C.3, same lazy pattern) the DISABLED owner entry point reaches the Keychain store class only, lazily, after its first-statement gate
+            if path.name in ("cleanup_canary_cli.py", "undo_cli.py", "reconcile_cli.py", "bulk_cli.py"):  # (undo_cli: M12C.3, same lazy pattern) the DISABLED owner entry point reaches the Keychain store class only, lazily, after its first-statement gate
                 self.assertEqual(hits, {"keystore_write"})
                 top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
                 self.assertFalse({n.split(".")[-1] for t in top for n, _ in imported_names(ast.Module(body=[t], type_ignores=[])) if n.split(".")[-1] in WRITE_MODULES})

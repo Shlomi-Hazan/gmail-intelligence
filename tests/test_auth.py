@@ -134,7 +134,7 @@ class Base(unittest.TestCase):
     def run_cli(self, *argv, stdin=""):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
-                mock.patch("builtins.input", return_value=stdin):
+                mock.patch("builtins.input", return_value=stdin), mock.patch.object(cli, "_tty_input", return_value=stdin):  # (terminal-only confirmations answered by the same text)
             try:
                 code = cli.main(list(argv))
             except SystemExit as exc:
