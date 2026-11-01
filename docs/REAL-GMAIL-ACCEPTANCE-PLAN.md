@@ -26,22 +26,34 @@ Goal: prove the exact commit that will be used is sound before any credential is
 
 ## 2. The dedicated test-message set
 Purpose: a set that can never be mistaken for ordinary mail and never expands.
-- **Origin.** Each test message is sent to the personal account from an address that is **not** the personal Gmail account itself. A message sent from the same account carries `SENT`, a hard protection that the canary exception deliberately never waives (`CANARY_SELF_SENT`); that rule is not to be weakened. The owner has declined a separate Gmail account, so the sender must be an address the owner already controls on another provider (or any non-Gmail sender), chosen by the owner. If none is acceptable, the first live mutation cannot happen (see section 9, item 1).
+- **Origin.** Each test message is sent to the personal account from an address that is **different from the personal Gmail account under test** (this is the requirement in [CANARY.md](CANARY.md) §5). No separate test account is created or required. Acceptable senders: an existing, different Gmail address the owner already has; an existing non-Gmail address; or a trusted person who sends a dedicated test message at the owner's request. A message sent from the personal account itself carries the `SENT` label, a hard protection that the canary exception deliberately never waives (`CANARY_SELF_SENT`): **never use a self-sent message, and never weaken `SENT` or any other canary eligibility rule.** If the received message turns out to carry `SENT` (or any other protection), it is unusable; stop and send another from a different address.
 - **Identity.** A unique random marker generated for this run (for example a long random token) placed in the subject and body, plus a plain statement that it is a software test. The marker is kept only locally; it is never put in GitHub. The token must not resemble any real sender, brand or personal content.
 - **Eligibility the owner prepares by hand** (all must hold, or `describe` refuses): the message is in the Inbox; read exactly once; not starred, not marked important, no user labels, no other label than the standard inbox/category ones; not in a thread with any other message; not matched by an existing Gmail filter that would label, archive or mark it (check the owner's filters beforehand). Gmail may mark a message important or sort it into a category on its own; if `describe` reports ineligible, stop and discuss rather than editing the tool's policy.
 - **Quantity.** Stage 1 uses ONE message. Up to 25 only after a separate approval (Checkpoint 8), each individually created, individually verified as eligible, each in its own thread.
 - **Target binding.** The tool operates only on message ids the owner types or confirms locally from the marker match; nothing is chosen by query, label, age or classification.
 
-## 3. Phase B — read-only Gmail access (existing read-only credential)
-- Uses the existing read-only path (`gmail.readonly`) and nothing from the write or undo capabilities. Authorization: **Checkpoint 2** (read-only Gmail access only).
-- Steps (all existing commands): `auth status` (local), then an explicit single read to verify account identity. Identity is checked locally first: the stored account must equal the account the owner typed; if they differ, STOP before any read. Then a read-only `mailbox sync` (or a full scan; a limited `--limit` scan is refused when a sync checkpoint exists) so the test message(s) are indexed, and `classify run`.
-- The output the owner pastes into GitHub is limited to pass/fail and counts of operations, not mailbox contents or counts.
-- **Exit:** account identity matched, the test message is indexed and `cleanup_canary_cli describe` reports it eligible (still local, still no mutation). If not eligible, STOP and fix the message, not the policy.
+## 3. Phase B — first real Gmail read (narrowest supported path; scope is fixed here)
+Uses only the existing read-only path (`gmail.readonly`), no write or undo capability and **no new CLI feature**. This phase does **not** authorize a full mailbox scan or full synchronization; those are separate (Phase B2).
+
+**What the existing commands do (from `MAILBOX.md`, `SYNC.md`, `cli.py`, `scanner.py`, `sync_health.py`):**
+- `mailbox scan --limit N` indexes the **newest N messages** by listing and fetching metadata; the index is then PARTIAL by design; it never prunes or deletes rows. A freshly received test message is among the newest, so a small N (the owner picks it, no larger than needed) reliably includes it **provided** fewer than N other messages arrive after it. Verify afterwards that the test message is indexed.
+- **When a limited scan is supported:** only while the local index has **no** sync-checkpoint row for the account (`SYNC_LIMITED_REFUSED` otherwise, decided locally before any Gmail request). In practice: a fresh or never-fully-scanned index, or after `mailbox purge`.
+- **When the checkpoint makes it unavailable:** once a completed full scan has established a sync checkpoint, `--limit` is refused. The only supported alternatives are then `mailbox sync` (applies changes since the checkpoint; reads metadata of every message changed since then, not just the test message, and ends in `NEEDS_RECONCILE`, requiring a full scan, if the history is too old) or `mailbox scan --all` (the whole mailbox). The software cannot narrow either to one message.
+- **Whether the owner's real index already has a checkpoint is unknown to this plan and is not inspected here.** The owner states it (or runs the local-only `mailbox sync --status`, which does not contact Gmail) before Checkpoint 2.
+
+**Personal metadata read and persisted locally by `scan`/`sync` (never put in GitHub):** from `labels.list`: label ids, names (user label names included) and types; from `messages.list`: message ids; from `messages.get` (metadata format, `From` header only): message id, thread id, internal date, label ids, size estimate, sender address (lower-cased) and the unread flag. Never requested or stored: bodies, snippets, subjects, attachments, recipients, raw content, tokens. The data is written to the local index (`index.sqlite3`, outside Git; Time Machine and other backups will contain it). Subjects are not read, so the test message is identified by its message id, which the owner records locally (section 2), not by its subject marker.
+
+**Phase B1 (limited read; only if no checkpoint exists).** Authorization: **Checkpoint 2.** Verify account identity locally first (the stored account equals the account the owner typed; on mismatch, STOP before any read). Then `mailbox scan --limit N`, `classify run` (local) and `cleanup_canary_cli describe` (local). Exit: the test message is indexed and `describe` reports it eligible.
+- **Limit of B1:** `describe` is local and works on a partial index, but **creating, reviewing, approving and running a cleanup plan are refused unless the sync state is fresh** (`cleanup_plans.revalidate` → `sync_health.problems`: no checkpoint gives `SYNC_CHECKPOINT_MISSING`; a checkpoint older than 24 hours gives `SYNC_STALE`). A limited scan cannot create a checkpoint (only a completed full scan can). So B1 alone can never lead to the archive canary.
+
+**Phase B2 (baseline for Phase C; broader read; separate approval).** The archive canary (Phase C) needs a fresh checkpoint: either a completed `mailbox scan --all` followed by the canary within 24 hours, or, if the owner's index already holds a checkpoint, a `mailbox sync` completed within 24 hours of the plan, review, approval and run. Both read the metadata listed above **for the whole mailbox, or for every message changed since the checkpoint**, and persist it locally. That is materially larger than reading the one test message and needs its own owner approval: **Checkpoint 2b**, independent of Checkpoint 2. If the owner does not approve it, Phase C and later cannot proceed; the freshness rule is not weakened and no narrower command is invented.
+- **Owner decision before Checkpoint 2b:** (a) the index already has a checkpoint, so run only `mailbox sync`; (b) approve `mailbox scan --all` (long-running, on the order of an hour per `MAILBOX.md`, read-only; rows no longer in Gmail are pruned only after a complete listing); or (c) stop at B1.
+- What is pasted to GitHub from any read: pass/fail and counts of operations only; no mailbox counts, ids, addresses or label names.
 
 ## 4. Phase C — single-message archive canary
-Authorization: **Checkpoint 3** (write OAuth setup/login), **Checkpoint 4** (flip the execution gate in the acceptance branch), **Checkpoint 5** (run).
+Requires Phase B2. Authorization: **Checkpoint 3** (write OAuth setup/login), **Checkpoint 4** (flip the execution gate in the acceptance branch), **Checkpoint 5** (run).
 1. Verify the separate write project and consent exist per `SETUP-GMAIL.md` §5c; if the earlier write authorization was revoked or expired, redo it with the owner present (`auth setup-write ... --confirm-separate-project`, then `auth login-write --expect-account EMAIL`). Access tokens live about an hour, nothing refreshes them, and an unpublished (Testing) OAuth app's refresh token expires weekly (Q8): log in shortly before the run.
-2. `cleanup_canary_cli plan` (typed canary-plan phrase), `cleanup plan review`, `cleanup approve` (typed). The plan contains exactly one message.
+2. Confirm the sync state is fresh (Phase B2, within 24 hours). `cleanup_canary_cli plan` (typed canary-plan phrase), `cleanup plan review`, `cleanup approve` (typed). The plan contains exactly one message.
 3. In the acceptance branch only, set `LIVE_EXECUTION_ENABLED = True` (reviewed, section 6). `auth status-write` must show at least ten minutes of token life.
 4. `cleanup_canary_cli run` with the typed execution phrase and the separate canary phrase. At most one archive request is sent (remove `INBOX` only). The executor performs the live account check, whole-thread preflight, durable intent, one request and an independent execution-bound post-read.
 5. **Independent verification** (section 7): the owner confirms in the Gmail interface that the one message left the Inbox and still exists in All Mail with no other label change, and `cleanup exec show` / `cleanup audit verify` agree.
@@ -66,20 +78,21 @@ For each test message record locally (not in GitHub) its labels before any step.
 | # | Approves exactly | Does not approve |
 |---|---|---|
 | 1 | Offline preflight results; moving to Phase B | any Gmail access |
-| 2 | Read-only Gmail access for the stated purpose and duration | any write, any gate |
+| 2 | Limited read-only Gmail read (`scan --limit N`), only if no checkpoint exists | a full scan, a sync, any write, any gate |
+| 2b | Baseline for Phase C: `mailbox sync` or `mailbox scan --all` (broader metadata read), as the owner chooses | any write, any gate |
 | 3 | Write-credential setup/login (real OAuth consent) | flipping any gate, any mutation |
 | 4 | The reviewed acceptance branch with `LIVE_EXECUTION_ENABLED = True` | undo, observation |
 | 5 | The single archive canary on the named, verified test message | more than one message |
 | 6 | Undo gate and one single-message undo | bulk undo |
 | 7 | Observation gate and read-only reconciliation | any mutation |
-| 8 | A bounded test of up to 25 dedicated messages (requires section 9, item 2 first) | anything beyond that set |
+| 8 | A bounded test of up to 25 dedicated messages (requires section 9, item 3 first) | anything beyond that set |
 | 9 | Declaring the acceptance result and what, if anything, may be enabled afterwards | production use |
 
-## 9. Preparatory code that is genuinely needed (not implemented in this task)
-1. **A non-self sender (no code).** The SENT rule forces the test message to come from an address other than the personal account; a separate Gmail account is excluded by the owner's decision. The owner must supply an existing non-Gmail address. No code change; do not relax SENT.
-2. **A fixed, bounded test set beyond one message (code, before Checkpoint 8 only).** The ordinary cleanup policy needs mail at least 90 days old with a MEDIUM+ rules classification, so fresh test messages cannot be planned, and the canary exception covers exactly one named message. A 25-message acceptance needs a separately designed, reviewed mechanism (for example a multi-message variant of the canary exception, explicitly listing owner-confirmed ids, same hard protections, hard cap 25) or an agreed alternative. **Not needed for the single-message phases.**
-3. **A real-Gmail read-only guard for the first read (no code).** The read-only scan path already exists and uses `gmail.readonly`. Phase B needs no code change.
-4. **Nothing else is required before the first read-only test.** The write path's other prerequisites are procedural: re-verified Google Cloud checklist, fresh login, and the acceptance branch.
+## 9. Prerequisites, owner decisions and preparatory code (nothing implemented in this task)
+1. **A different sender (no code).** The test message must come from an address different from the personal account (section 2): another existing Gmail address, a non-Gmail address, or a trusted person. No separate account is created. `SENT` is not relaxed.
+2. **A fresh checkpoint for the canary (owner decision, no code).** The existing software cannot limit the read that establishes the freshness the canary plan requires: only a completed full scan creates a checkpoint, and `sync` reads all changes since it. The owner decides between (a) `mailbox sync` on an existing checkpoint, (b) `mailbox scan --all`, or (c) not proceeding past Phase B1. This is Checkpoint 2b and is never implied by Checkpoint 2.
+3. **A fixed, bounded test set beyond one message (code, before Checkpoint 8 only).** The ordinary cleanup policy needs mail at least 90 days old with a MEDIUM+ rules classification, so fresh test messages cannot be planned, and the canary exception covers exactly one named message. A 25-message acceptance needs a separately designed, reviewed mechanism (for example a multi-message variant of the canary exception, explicitly listing owner-confirmed ids, same hard protections, hard cap 25) or an agreed alternative. Not needed for the single-message phases.
+4. **Nothing else is required in code before Phase B1** (the read-only scan, classify and describe paths exist).
 
 ## 10. STOP conditions and decision tree
 Immediately stop (no further request, no retry, no gate left on) and report only the phase and a safe state code when:
@@ -110,12 +123,13 @@ Decision tree after a stop:
 | Long-running slices vs token lifetime | single message only until Checkpoint 8; fresh login; 10-minute floor |
 | Unpublished-app refresh token expires weekly (Q8) | log in the same day; no reliance on a stored refresh token |
 | A test message becomes ineligible or is auto-modified by a Gmail filter/classifier | check filters first; STOP rather than weakening policy |
+| A baseline scan/sync reads and stores metadata of far more than the test message | separate Checkpoint 2b; owner chooses sync vs full scan; metadata only (no bodies or subjects); local index only |
 | Personal data leaking into GitHub | public record limited to phase, pass/fail, counts and safe codes |
 | Reversal of a stopped plan cannot continue (G6); stopped/interrupted work is never resumed | by design; new plan and approval |
 
 ## 12. Readiness verdict (current `main`)
-- **First explicitly authorized read-only Gmail test (Phase B): ready, with no code change needed**, once the owner supplies written approval (Checkpoint 2) and the offline preflight (Phase A) is done. It uses the existing read-only path only.
-- **Single-message archive canary (Phase C): ready in code**, procedurally blocked until the owner supplies a non-self sender (section 9, item 1), redoes the write-OAuth steps and approves the acceptance branch.
+- **First explicitly authorized read-only Gmail test (Phase B1: a limited scan of the newest N messages, then local `describe`): ready with no code change**, but only if the owner's index has no sync checkpoint (otherwise `--limit` is refused), and after the written Checkpoint 2 and the offline preflight. If a checkpoint exists, the narrowest supported read is `mailbox sync` (Checkpoint 2b), which is broader.
+- **Single-message archive canary (Phase C): ready in code**, procedurally blocked until the owner (a) supplies a different sender, (b) approves the baseline read (Checkpoint 2b) so a fresh checkpoint exists, (c) redoes the write-OAuth steps and (d) approves the acceptance branch.
 - **Undo and observation (Phase D): implemented but never run against real Gmail**; ready only after Phase C passes and separate approvals.
-- **25-message test: not ready**; needs the design and code in section 9, item 2.
+- **25-message test: not ready**; needs the design and code in section 9, item 3.
 - Nothing here is a claim of production readiness.
