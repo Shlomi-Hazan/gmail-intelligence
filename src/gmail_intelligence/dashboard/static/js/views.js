@@ -6,6 +6,7 @@ import { panel, kpis, rank, notice, empty, how, freshnessNotice, ageText, skelet
 import { stackedBars, shareBar, legend, miniBars, tableAlt, swatch, TYPE_ORDER } from "./charts.js";
 import { icon } from "./icons.js";
 import { attentionScreen } from "./attention.js";
+import { cleanupScreen as cleanup } from "./cleanup.js";
 
 const put = (el, ...children) => el.replaceChildren(...children.flat(Infinity).filter(Boolean));
 const view = (...children) => h("div", { class: "view" }, children);
@@ -146,34 +147,6 @@ function sendersView() {
   return view(holder, patterns);
 }
 
-// ---------------------------------------------------------------- Cleanup
-export function cleanup() {
-  const summary = panel({ title: "cl.title", desc: "cl.desc", wide: true, load: () => get("cleanup/summary"), render: (env) => {
-    const d = env.data;
-    if (!d.total) return empty("empty.title", "empty.body");
-    const o = d.outcomes;
-    const reasons = (list) => (list.length ? h("ul", { class: "list-plain" }, list.map((r) => h("li", null, `${code("reason", r.code)}: ${int(r.messages)}`))) : h("p", { class: "muted" }, t("cl.reasons.none")));
-    return [notice("ok", t("cl.only.title"), t("cl.only.body")),
-      h("div", { class: "outcomes" }, ["ELIGIBLE_FOR_ARCHIVE_RECOMMENDATION", "REVIEW_REQUIRED", "EXCLUDED"].map((k) => h("div", { class: "outcome" }, h("strong", null, int(o[k] || 0)), h("span", { class: "muted" }, code("outcome", k))))),
-      h("div", { class: "grid" }, h("div", { class: "stack" }, h("h3", null, t("cl.excluded")), reasons(d.excluded_reasons)), h("div", { class: "stack" }, h("h3", null, t("cl.review")), reasons(d.review_reasons))),
-      h("p", { class: "muted" }, t("cl.policy", { days: int(d.min_age_days), rules: int(d.protection_rules_active) })), how(env)];
-  } });
-  const history = panel({ title: "ch.title", desc: "ch.desc", wide: true, load: () => get("cleanup/history"), render: (env) => {
-    const d = env.data, a = d.audit;
-    if (!d.plans.length && !a.events) return [empty("ch.none.title", "ch.none.body"), how(env)];
-    const chain = a.chain_ok ? badge("ok", t("ch.chain.ok")) : badge("err", t("ch.chain.bad"));
-    const out = [h("div", { class: "row" }, h("span", null, tn("ch.events", a.events)), chain),
-      !a.chain_ok ? notice("err", t("ch.chain.bad"), t("ch.chain.bad_body")) : null];
-    if (d.plans.length) out.push(tableAlt("ch.plans", [t("ch.plan"), t("ch.state"), t("ch.items"), t("ch.created")], d.plans.map((p) => [p.plan_id, code("plan", p.state), int(p.item_count), dateTime(p.created_at)])));
-    if (d.executions.length) out.push(tableAlt("ch.execs", [t("ch.exec"), t("ch.state"), t("ch.items"), t("ch.outcomes")], d.executions.map((e) => [e.exec_id, code("exec", e.state), int(e.item_count), Object.entries(e.items).map(([k, v]) => `${code("item", k)} ${int(v)}`).join(" · ")])));
-    out.push(h("p", { class: "muted" }, tn("ch.applied", d.items_applied)));
-    if (a.recent.length) out.push(h("div", { class: "stack" }, h("h3", null, t("ch.recent")), h("ul", { class: "list-plain" }, [...a.recent].reverse().map((e) => h("li", null, `${dateTime(e.at)}: ${code("event", e.event)}`)))));
-    out.push(how(env));
-    return out;
-  } });
-  return view(summary, history);
-}
-
 // ---------------------------------------------------------------- Organization
 export function organization() {
   return view(panel({ title: "og.title", desc: "og.desc", wide: true, load: () => get("organization"), render: (env) => {
@@ -221,8 +194,8 @@ export const overview = () => whenData(overviewView);
 export const trends = () => whenData(trendsView);
 export const senders = () => whenData(sendersView);
 
-export const cleanupScreen = () => whenData(cleanup, { gate: false });
 export const organizationScreen = () => whenData(organization, { gate: false });
+export const cleanupScreen = () => whenData(cleanup, { gate: false });
 
 export const SCREENS = [
   { id: "overview", icon: "overview", render: overview }, { id: "attention", icon: "attention", render: attentionScreen }, { id: "trends", icon: "trends", render: trends }, { id: "senders", icon: "senders", render: senders },

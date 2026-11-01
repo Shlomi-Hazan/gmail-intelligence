@@ -166,7 +166,8 @@ class ServerSyncTests(TDS.ServerBase):
         body = self.api("freshness")[2]
         self.assertEqual((body["data"]["sync"]["state"], body["data"]["sync"]["checkpoint"]), ("MISSING", "missing"))
         self.assertEqual(set(ds.ROUTES), {"meta", "freshness", "overview", "volume", "categories", "senders", "subscriptions", "cleanup/summary", "cleanup/history", "organization",
-                                          "attention"})  # M7C added no route; the only later addition is the M8A-3 attention route
+                                          "attention",
+                                          "cleanup/overview", "cleanup/discovery", "cleanup/plans", "cleanup/executions", "cleanup/reversals", "cleanup/recovery"})  # M7C added no route; later additions: the M8A-3 attention route and the six read-only M12E cleanup routes
         self.assertFalse(any("maint" in r or "sync" in r for r in ds.ROUTES))
 
     def test_security_rules_are_unchanged_for_the_freshness_route(self):
