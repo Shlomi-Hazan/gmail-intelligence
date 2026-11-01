@@ -257,3 +257,16 @@ svg.mini { display: block; inline-size: 100%; block-size: 56px; }
 .badge.tier-HIGH { background: var(--accent); color: var(--on-accent); } .badge.tier-MEDIUM { background: var(--accent-soft); color: var(--accent); }
 .pager { display: flex; gap: var(--s3); justify-content: space-between; }
 .pager .btn[disabled] { opacity: .45; cursor: default; }
+
+/* ---- Cleanup area (read-only lifecycle view) ---- */
+.seg.tabs { grid-auto-flow: row; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
+.life { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s3); }
+.life .step { display: flex; flex-direction: column; gap: var(--s1); padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r-control); background: var(--raised); }
+.life .step-no { font-size: var(--fs-xs); color: var(--ink-2); }
+.life .step-n { font-size: var(--fs-lg); font-weight: 600; }
+.card { display: flex; flex-direction: column; gap: var(--s3); padding: var(--s4); border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--surface); }
+.prog { display: flex; flex-direction: column; gap: var(--s1); inline-size: 100%; }
+.prog .track { grid-column: auto; display: block; }
+table.data th, table.data td { padding-block: var(--s2); padding-inline: var(--s3); text-align: start; border-block-end: 1px solid var(--line); vertical-align: top; }
+table.data caption { text-align: start; font-weight: 600; padding-block-end: var(--s2); }
+.table-wrap { overflow-x: auto; max-inline-size: 100%; }

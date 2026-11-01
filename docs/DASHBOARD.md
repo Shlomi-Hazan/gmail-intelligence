@@ -22,7 +22,7 @@ hidden unless you start the server with `--reveal-senders` / `--reveal-names`. T
 | Overview | one plain-language summary, key figures, the **mailbox ribbon** (monthly volume stacked by type), type breakdown, leading sender domains |
 | Trends | monthly volume (with unread), type mix over time (count or share), newsletter / notification / promotion trends |
 | Senders | leading domains or masked addresses, and the domains behind subscription-like mail |
-| Cleanup | what the cleanup policy would **recommend** (nothing is applied) and the history recorded by the local M4 audit ledger, with the audit chain status |
+| Cleanup | (M12E) a read-only lifecycle view with tabs: overview, discovery, plans, executions, undo, recovery and the M4 audit history; nothing is applied, approved, run or undone from the dashboard ([CLEANUP-DASHBOARD.md](CLEANUP-DASHBOARD.md)) |
 | Organization | the read-only M5 label analysis: hygiene findings, recommendation / rule / filter-suggestion counts, label plans by state |
 | Action Center | M8A-3: messages that **may** deserve attention, ranked by the M8A-1 engine ([ATTENTION.md](ATTENTION.md)): score and tier, the signals behind each item with their basis, evidence and uncertainty flags, filters (signal, minimum tier, sender limit, one item per thread, low scores), sort, cursor paging, freshness and unhealthy-sync warnings, and explicit states for a list that changed, was too large or whose index kept changing. Senders are masked by default; there are no Gmail links, no message identifiers and no action buttons |
 | Data | index completeness, last full scan and its age, classification freshness, limits of an offline snapshot, privacy facts |
@@ -67,6 +67,7 @@ Envelope: `{"section", "data", "basis", "explain": [CODES], "as_of", "index": {"
 | `senders` | `kind=domain|address`, `limit=1..100` | ranked senders: display (masked addresses), counts, unread, first/last seen, dominant type |
 | `subscriptions` | `limit=1..25` | newsletter / notification / promotion shares, monthly series, top domains |
 | `cleanup/summary` | | candidate outcomes, decisive reasons, policy, protection rules |
+| `cleanup/overview`, `cleanup/discovery`, `cleanup/plans`, `cleanup/executions`, `cleanup/reversals`, `cleanup/recovery` | `discovery`: `limit=1..50`, `min_group=1..1000` | M12E read-only lifecycle projections (counts, safe state codes, local ids only); see [CLEANUP-DASHBOARD.md](CLEANUP-DASHBOARD.md) |
 | `cleanup/history` | `recent=1..100` | plans, approvals, executions with item outcomes, audit chain status and recent events |
 | `organization` | | label counts, hygiene / recommendation / rule / filter summaries, label plans by state |
 | `attention` | `limit=1..100`, `sort=priority|date|oldest`, `signal=all|starred|important|unread|rule`, `tier=any|low|medium|high`, `sender_limit=0..10`, `collapse=1|0`, `low=0|1`, `cursor` (opaque, strict grammar) | M8A-3, additive: the payload of `mailbox attention --json` for the same snapshot and parameters (not the envelope above). Closed failures with their own codes and no items: `409 SNAPSHOT_CHANGED`, `400 CURSOR_INVALID`, `422 RESULT_INCOMPLETE`, `503 INDEX_CHANGED_DURING_READ`; any other failure is the generic `500 INTERNAL` |

@@ -316,7 +316,8 @@ class DesignTests(unittest.TestCase):
             self.assertIn(needle, main + views)
         self.assertIn('class="skip"', read("index.html"))
         self.assertIn("View as table".split()[0], json.loads(read("i18n/en.json"))["chart.table"])  # every chart has a table alternative
-        self.assertGreaterEqual(views.count("tableAlt("), 4)
+        self.assertGreaterEqual(views.count("tableAlt("), 3)  # the Cleanup area renders its own captioned tables
+        self.assertIn("caption", read("js/cleanup.js"))
 
     def test_every_data_screen_carries_the_honest_data_note(self):
         views = read("js/views.js")

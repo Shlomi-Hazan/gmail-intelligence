@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from gmail_intelligence import analytics, attention, config, index as idx
+from gmail_intelligence import analytics, attention, cleanup_view, config, index as idx
 
 STATIC_DIR = Path(__file__).resolve().parent / "dashboard" / "static"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8",
@@ -40,6 +40,10 @@ API_PREFIX = "/api/v1/"
 ROUTES = {"meta": None, "overview": ("overview", {}), "freshness": ("freshness", {}), "volume": ("volume", {}), "categories": ("categories", {"by": ("total", "month")}),
           "senders": ("senders", {"kind": ("domain", "address"), "limit": (1, 100)}), "subscriptions": ("subscriptions", {"limit": (1, 25)}),
           "cleanup/summary": ("cleanup-summary", {}), "cleanup/history": ("cleanup-history", {"recent": (1, 100)}), "organization": ("organization", {}),
+          # M12E: read-only projections of the LOCAL cleanup records (cleanup_view): the lifecycle overview, M12A discovery, plans and approval status, execution progress, reversal plans and
+          # unresolved recovery work. GET only; nothing is created, approved, run, confirmed, aborted, undone or reconciled from here.
+          "cleanup/overview": ("cleanup-overview", {}), "cleanup/discovery": ("cleanup-discovery", {"limit": (1, 50), "min_group": (1, 1000)}), "cleanup/plans": ("cleanup-plans", {}),
+          "cleanup/executions": ("cleanup-executions", {}), "cleanup/reversals": ("cleanup-reversals", {}), "cleanup/recovery": ("cleanup-recovery", {}),
           # M8A-3: the attention list; the SAME library function as `mailbox attention` (no second ranking engine). Every parameter is validated against a closed set.
           "attention": ("attention", {"limit": (1, 100), "sort": attention.SORTS, "signal": ("all",) + attention.SIGNALS, "tier": ("any",) + attention.TIERS,
                                       "sender_limit": (0, attention.MAX_SENDER_LIMIT), "collapse": ("1", "0"), "low": ("0", "1"),
@@ -147,7 +151,10 @@ class DashboardServer(http.server.ThreadingHTTPServer):
                 return self._cache[key]
         ro = idx.ReadOnlyIndex(self.db_path)
         try:
-            result = analytics.Analytics(ro, self.account, now=now, reveal_senders=self.reveal_senders, reveal_names=self.reveal_names).section(section, **params)
+            if section.startswith("cleanup-") and section.split("-", 1)[1] in cleanup_view.SECTIONS:
+                result = cleanup_view.build(section.split("-", 1)[1], ro, self.account, now, params)    # M12E: the local cleanup records, read-only
+            else:
+                result = analytics.Analytics(ro, self.account, now=now, reveal_senders=self.reveal_senders, reveal_names=self.reveal_names).section(section, **params)
         finally:
             ro.close()
         with self._lock:
