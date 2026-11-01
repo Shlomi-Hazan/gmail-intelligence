@@ -32,9 +32,27 @@ def _q(index, sql, *args):
 
 
 # ---------------------------------------------------------------- plans
+def _approval_stage(plan, approvals, valid, at):
+    """What the LOCAL approval record says about a plan whose state is APPROVED (same conditions as the CLI's approval check: exactly one VALID, unexpired approval that matches the plan).
+    "Approved, not executed" is shown only for a genuinely valid approval; it is a local status, never permission to run (live execution is disabled in this build)."""
+    if not approvals:
+        return "APPROVAL_MISSING"
+    if not valid:
+        statuses = {a["status"] for a in approvals}
+        return "APPROVAL_EXPIRED" if "EXPIRED" in statuses else "APPROVAL_REVOKED" if "REVOKED" in statuses else "APPROVAL_INVALID"   # only CONSUMED left: no execution recorded for it
+    if len(valid) != 1:
+        return "APPROVAL_INVALID"
+    a = valid[0]
+    if a["expires_at"] <= at or plan["expires_at"] <= at:
+        return "APPROVAL_EXPIRED"
+    if (a["plan_hash"], a["action"], a["item_count"]) != (plan["plan_hash"], plan["action"], plan["item_count"]):
+        return "APPROVAL_INVALID"
+    return "APPROVED_NOT_EXECUTED"
+
+
 def plans(index, account, now):
     approvals = {}
-    for r in _q(index, "SELECT plan_id, status, expires_at FROM cleanup_approval WHERE account=?", account):
+    for r in _q(index, "SELECT plan_id, status, expires_at, plan_hash, action, item_count FROM cleanup_approval WHERE account=?", account):
         approvals.setdefault(r["plan_id"], []).append(r)
     execs = {r["plan_id"]: r for r in _q(index, "SELECT plan_id, exec_id, state FROM cleanup_execution WHERE account=?", account)}
     rows = []
@@ -45,7 +63,7 @@ def plans(index, account, now):
         if ex:
             stage = "EXECUTION_RESERVED"
         elif p["state"] == "APPROVED":
-            stage = "APPROVAL_EXPIRED" if valid and valid[0]["expires_at"] <= _iso(now) else "APPROVED_NOT_EXECUTED"
+            stage = _approval_stage(p, ap, valid, _iso(now))
         elif p["state"] in ("CANCELLED", "EXPIRED", "SUPERSEDED"):
             stage = p["state"]
         elif p["state"] == "REVIEWED":
@@ -187,5 +205,5 @@ def build(section, index, account, now, params=None):
             "executions": {"total": len(ex), "by_category": dict(sorted(Counter(x["category"] for x in ex).items())), "items": {k: items.get(k, 0) for k in ("archived", "skipped", "unknown", "conflict", "intent")},
                            "owner_action": sum(1 for x in ex if x["owner_action"])},
             "reversals": {"total": len(revs), "by_state": dict(sorted(Counter(x["state"] for x in revs).items())), "restored": sum(x.get("restored", 0) for x in revs), "single_undos": single},
-            "recovery": {"attention": len(attention)}}
+            "recovery": {"attention": len(attention), "audit_chain_ok": cleanup_audit.verify_chain(index, account)[0]}}
     return an._envelope("cleanup-overview", data, "OBSERVED", explain + ["DISCOVERY_IS_THE_SAME_POLICY_AS_CLEANUP_CANDIDATES"])

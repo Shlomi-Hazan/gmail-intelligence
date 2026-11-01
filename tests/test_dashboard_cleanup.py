@@ -158,6 +158,50 @@ class PlanTests(Dash):
         self.assertIsNone(row["execution"])
 
 
+class ApprovalStatusTests(Dash):
+    """The plan stage follows the authoritative local approval record, not just the plan state (a status, never permission to run)."""
+    def stage(self, plan):
+        return [p for p in self.cx("plans")["plans"] if p["plan_id"] == plan["plan_id"]][0]["stage"]
+
+    def test_a_genuinely_valid_approval_is_approved_not_executed(self):
+        plan = self.approved_plan(self.bids(5))
+        self.serve()
+        self.assertEqual(self.stage(plan), "APPROVED_NOT_EXECUTED")
+
+    def test_an_expired_valid_approval_is_expired(self):
+        plan = self.approved_plan(self.bids(5))
+        self.tamper(("UPDATE cleanup_approval SET expires_at='2000-01-01T00:00:00Z' WHERE plan_id=?", (plan["plan_id"],)))
+        self.serve()
+        self.assertEqual(self.stage(plan), "APPROVAL_EXPIRED")
+
+    def check(self, status, want):
+        plan = self.approved_plan(self.bids(5))
+        self.tamper(("UPDATE cleanup_approval SET status=? WHERE plan_id=?", (status, plan["plan_id"])))
+        self.serve()
+        self.assertEqual(self.stage(plan), want)
+
+    def test_an_expired_approval_status_is_expired(self):
+        self.check("EXPIRED", "APPROVAL_EXPIRED")
+
+    def test_a_revoked_approval_is_revoked(self):
+        self.check("REVOKED", "APPROVAL_REVOKED")
+
+    def test_a_consumed_approval_without_an_execution_is_invalid_not_approved(self):
+        self.check("CONSUMED", "APPROVAL_INVALID")
+
+    def test_a_missing_approval_record_is_missing(self):
+        plan = self.approved_plan(self.bids(5))
+        self.tamper(("DELETE FROM cleanup_approval WHERE plan_id=?", (plan["plan_id"],)))
+        self.serve()
+        self.assertEqual(self.stage(plan), "APPROVAL_MISSING")
+
+    def test_an_approval_that_does_not_match_the_plan_is_invalid(self):
+        plan = self.approved_plan(self.bids(5))
+        self.tamper(("UPDATE cleanup_approval SET item_count=item_count+1 WHERE plan_id=?", (plan["plan_id"],)))
+        self.serve()
+        self.assertEqual(self.stage(plan), "APPROVAL_INVALID")
+
+
 class ReversalTests(Dash):
     def rev_of(self, d, rev):
         return [r for r in d["reversals"] if r["rev"] == rev][0]
@@ -200,6 +244,29 @@ class ReversalTests(Dash):
         d = self.cx("reversals")
         self.assertEqual([r["state"] for r in d["reversals"] if r["rev"] == rev], ["INCONSISTENT"])
         self.assertTrue([a for a in self.cx("recovery")["attention"] if a["id"] == rev])
+
+
+class AuditChainTests(Dash):
+    def test_a_broken_chain_with_nothing_outstanding_is_reported_and_the_ui_cannot_show_an_all_clear(self):
+        self.archived_execution(10)
+        self.tamper(("UPDATE cleanup_audit SET at='2001-01-01T00:00:00Z' WHERE seq=(SELECT MIN(seq) FROM cleanup_audit)", ()))
+        self.serve()
+        d = self.cx("recovery")
+        self.assertFalse(d["audit_chain_ok"])
+        self.assertEqual(d["attention"], [])
+        self.assertFalse(self.cx("overview")["recovery"]["audit_chain_ok"])
+        js = (STATIC / "js" / "cleanup.js").read_text(encoding="utf-8")
+        body = js[js.index("function recoveryTab"):js.index("// ---", js.index("function recoveryTab"))]
+        self.assertIn("audit_chain_ok", body)
+        self.assertRegex(body, r"chain \|\| notice\(\"ok\"")                        # the all-clear is only the fallback when there is no chain warning
+        en = json.loads((STATIC / "i18n" / "en.json").read_text(encoding="utf-8"))
+        he = json.loads((STATIC / "i18n" / "he.json").read_text(encoding="utf-8"))
+        for k in ("cx.rec.chain.title", "cx.rec.chain.body"):
+            self.assertTrue(en[k] and he[k])
+
+    def test_an_intact_chain_still_allows_the_all_clear(self):
+        self.serve()
+        self.assertTrue(self.cx("recovery")["audit_chain_ok"])
 
 
 class SecurityTests(Dash):

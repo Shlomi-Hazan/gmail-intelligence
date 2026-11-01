@@ -16,10 +16,10 @@ Discovery → Review → Plan → Approval → Execution → Recovery / Undo. It
 |---|---|
 | Overview | the lifecycle strip with local counts, summary cards, plans/executions/reversal plans by state, and a notice when something waits for the owner |
 | Discovery | possible candidates (M12A data): groups by sender domain, size, age, the rule that classified them, why each is suggested, the "needs your review" and "protected" reasons; honest empty/partial states. Suggestions only. |
-| Plans | each plan's status (draft, reviewed, approved-not-executed, approval expired, execution recorded…), item count, short hash, approval records and linked execution. An approved plan has **not** been executed unless an execution is listed. |
+| Plans | each plan's status (draft, reviewed, approved-not-executed, approval expired, execution recorded…), item count, short hash, approval records and linked execution. "Approved, not executed" appears only when exactly one unexpired approval record matches the plan; an expired, revoked, missing, consumed-without-execution or mismatching approval is shown as such. It is a local status, never permission to run. An approved plan has **not** been executed unless an execution is listed. |
 | Executions | per execution: plan and hash, status, slices with item ranges and states, archived / skipped / unknown / conflicting / open-intent / pending counts, owner-action flag and local audit times. Shown as completed **only** when nothing is unresolved. |
 | Undo | bulk reversal plans and single-item undo records: source execution, approval state, slices, restored / not restored / never attempted / authorized-not-run / uncertain / conflicting / inconsistent counts and skip reasons. No restore control. |
-| Recovery | interrupted executions, open intents, UNKNOWN/CONFLICT items, inconsistent ledgers and reversal plans needing the owner, with the last known status and the plain-language next safe command-line step. Calm wording, no alarms, no auto-reconcile. |
+| Recovery | interrupted executions, open intents, UNKNOWN/CONFLICT items, inconsistent ledgers and reversal plans needing the owner, with the last known status and the plain-language next safe command-line step. Calm wording, no alarms, no auto-reconcile. If the local audit chain fails its integrity check, a prominent warning replaces any all-clear (manual investigation; nothing is repaired automatically). |
 | History | the M4 audit history (unchanged), with the audit-chain status |
 
 ## Read-only API (GET only, token-protected, same checks as every other route)

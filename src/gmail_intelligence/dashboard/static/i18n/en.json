@@ -681,5 +681,10 @@
  "cx.next.REVIEW_CONFLICT": "Review by hand; a conflict is never presented as a success.",
  "cx.next.APPROVE": "Approve it with a typed phrase (command line) or leave it.",
  "cx.next.ABORT_OR_NEW_PLAN": "Abandon the plan or create a new one (command line).",
- "cx.next.RUN_OR_EXPIRE": "Run it before it expires, or let the authorization lapse (command line)."
+ "cx.next.RUN_OR_EXPIRE": "Run it before it expires, or let the authorization lapse (command line).",
+ "cx.stage.APPROVAL_MISSING": "Marked approved, but no approval record",
+ "cx.stage.APPROVAL_REVOKED": "Approval revoked",
+ "cx.stage.APPROVAL_INVALID": "Approval record not valid (needs the owner's review)",
+ "cx.rec.chain.title": "The audit log needs manual investigation.",
+ "cx.rec.chain.body": "The local audit chain failed its integrity check, so the records on this page cannot be fully trusted and no all-clear is shown. Nothing is repaired or rewritten automatically and the dashboard cannot do it. Investigate from the command line (cleanup audit verify) and keep a copy of the index file before any manual step."
 }

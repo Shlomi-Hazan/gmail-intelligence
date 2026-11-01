@@ -25,7 +25,7 @@ function cliHint(text) { return h("p", { class: "muted" }, t(text)); }
 // ---------------------------------------------------------------- overview
 function lifecycle(d) {
   const noData = !d.discovery.indexed && !d.plans.total && !d.executions.total && !d.reversals.total;
-  const bad = d.executions.owner_action + d.recovery.attention;
+  const bad = d.executions.owner_action + d.recovery.attention + (d.recovery.audit_chain_ok ? 0 : 1);
   const steps = [
     { id: "discovery", n: d.discovery.candidates, status: !d.discovery.indexed ? "NO_DATA" : d.discovery.index_state !== "complete" ? "PARTIAL" : "AVAILABLE" },
     { id: "review", n: null, status: "NOT_STORED" },
@@ -151,8 +151,9 @@ function recoveryTab() {
   return [panel({ title: "cx.rec.title", desc: "cx.rec.desc", wide: true, load: () => get("cleanup/recovery"), render: (env) => {
     const d = env.data;
     const status = d.audit_chain_ok ? badge("ok", t("ch.chain.ok")) : badge("err", t("ch.chain.bad"));
-    if (!d.attention.length) return [notice("ok", t("cx.rec.clear.title"), t("cx.rec.clear.body")), h("div", { class: "row" }, h("span", { class: "muted" }, t("cx.rec.note")), status), how(env)];
-    return [notice("warn", t("cx.rec.some.title"), tn("cx.rec.some", d.attention.length)),
+    const chain = d.audit_chain_ok ? null : notice("err", t("cx.rec.chain.title"), t("cx.rec.chain.body"));         // an invalid audit chain is never an all-clear
+    if (!d.attention.length) return [chain || notice("ok", t("cx.rec.clear.title"), t("cx.rec.clear.body")), h("div", { class: "row" }, h("span", { class: "muted" }, t("cx.rec.note")), status), how(env)];
+    return [chain, notice("warn", t("cx.rec.some.title"), tn("cx.rec.some", d.attention.length)),
       table("cx.rec.caption", [t("cx.rec.what"), t("cx.rec.state"), t("cx.rec.open"), t("cx.rec.since"), t("cx.rec.next")],
         d.attention.map((a) => [a.id ? [t(`cx.rec.kind.${a.kind}`), " ", mono(a.id)] : t(`cx.rec.kind.${a.kind}`), a.kind === "execution" ? code("cx.cat", a.code) : a.kind === "reversal" ? code("cx.rs", a.code) : code("cx.uc", a.code.toLowerCase()),
           ltr(int(a.unresolved)), dateTime(a.since), t(`cx.next.${a.next}`)])),
