@@ -1,5 +1,7 @@
 # M12C — Archive undo: design and implementation status
 
+> **Update 2026-11-05 (status of record: [MASTER-PLAN.md](MASTER-PLAN.md)):** the statements below describe the state when this document was written. Since then the single-message undo and read-only observation of settled records passed real-Gmail acceptance (P1, P2); `UNKNOWN` reconciliation, bounded bulk archive and bulk reversal have not.
+
 Issues #61 and #41. **Status (M12C.3): the complete undo infrastructure is IMPLEMENTED and DISABLED.** It was verified only against synthetic data, a fake Gmail wire and mocked credentials. No real Gmail access, OAuth login/refresh, Keychain access or mailbox write ever happened; `LIVE_EXECUTION_ENABLED = False` and `LIVE_UNDO_ENABLED = False`. Real Gmail behavior of the undo request is **unverified**. Live use needs a separate written owner authorization after security acceptance. Bulk undo orchestration is **not implemented** (M12D).
 
 ## 0. Implementation status of the decisions (M12C.3)

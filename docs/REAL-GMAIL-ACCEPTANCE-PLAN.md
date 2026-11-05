@@ -1,6 +1,6 @@
 # Real Gmail acceptance plan (personal account, dedicated test messages)
 
-**Status: the plan below was executed in part under separate written approvals (see the execution record at the end): Phases A, B1, B2 and C passed, and Phase D1 (single-message undo) passed on 2026-11-05; observation and the 25-message test have NOT been run. Nothing in this document authorizes any further step by itself.** Writing or merging this document does not authorize any Gmail, OAuth, Keychain or index access, any live gate change, or any message to be created. `LIVE_EXECUTION_ENABLED`, `LIVE_UNDO_ENABLED` and `LIVE_OBSERVE_ENABLED` stay `False` in `main`. M12 is complete as *development and synthetic verification*; it is **not** production-ready and no real-mailbox validation of undo, observation or bulk execution exists (see [M12C-SECURITY-AUDIT.md](M12C-SECURITY-AUDIT.md), [M12D-BULK-EXECUTION.md](M12D-BULK-EXECUTION.md), [CANARY.md](CANARY.md); tracker: issue #41).
+**Status: the plan below was executed in part under separate written approvals (see the execution record at the end): Phases A, B1, B2 and C passed, and Phases D1 (single-message undo) and D2 (read-only observation of settled records) passed on 2026-11-05; `UNKNOWN` reconciliation on real data and the 25-message test have NOT been run. Nothing in this document authorizes any further step by itself.** Writing or merging this document does not authorize any Gmail, OAuth, Keychain or index access, any live gate change, or any message to be created. `LIVE_EXECUTION_ENABLED`, `LIVE_UNDO_ENABLED` and `LIVE_OBSERVE_ENABLED` stay `False` in `main`. M12 is complete as *development and synthetic verification*; it is **not** production-ready; real-mailbox validation exists only for the single-message archive, the single-message undo and read-only observation of settled records (execution record, section 13), while bulk archive, bulk reversal and `UNKNOWN` reconciliation have **no** real-mailbox validation (see [M12C-SECURITY-AUDIT.md](M12C-SECURITY-AUDIT.md), [M12D-BULK-EXECUTION.md](M12D-BULK-EXECUTION.md), [CANARY.md](CANARY.md); tracker: issue #41).
 
 **Owner decision (recorded):** no separate Gmail account is created or used. Acceptance uses the owner's existing personal account, with dedicated, clearly identifiable test messages inside it. Consequences are handled in section 2 (the SENT rule) and section 9 (what must change first).
 
@@ -127,11 +127,13 @@ Decision tree after a stop:
 | Personal data leaking into GitHub | public record limited to phase, pass/fail, counts and safe codes |
 | Reversal of a stopped plan cannot continue (G6); stopped/interrupted work is never resumed | by design; new plan and approval |
 
-## 12. Readiness verdict (current `main`)
-- **First explicitly authorized read-only Gmail test (Phase B1: a limited scan of the newest N messages, then local `describe`): ready with no code change**, but only if the owner's index has no sync checkpoint (otherwise `--limit` is refused), and after the written Checkpoint 2 and the offline preflight. If a checkpoint exists, the narrowest supported read is `mailbox sync` (Checkpoint 2b), which is broader.
-- **Single-message archive canary (Phase C): ready in code**, procedurally blocked until the owner (a) supplies a different sender, (b) approves the baseline read (Checkpoint 2b) so a fresh checkpoint exists, (c) redoes the write-OAuth steps and (d) approves the acceptance branch.
-- **Undo and observation (Phase D): implemented but never run against real Gmail**; ready only after Phase C passes and separate approvals.
-- **25-message test: not ready**; needs the design and code in section 9, item 3.
+## 12. Readiness verdict
+*(Updated 2026-11-05. The original verdict was written before any live phase; the current status of record is [MASTER-PLAN.md](MASTER-PLAN.md).)*
+- **Phase B1 (limited read) and B2 (baseline read):** done and passed (section 13).
+- **Single-message archive canary (Phase C):** done, **PASS** (2026-11-04).
+- **Single-message undo (Phase D1):** done, **PASS** (2026-11-05). **Read-only observation of settled records (Phase D2):** done, **PASS** (2026-11-05).
+- **`UNKNOWN` reconciliation on real data:** not run; no `UNKNOWN` item exists, and the decision logic remains verified with synthetic data only.
+- **Bounded multi-message test (up to 25 dedicated messages), bounded bulk archive and bulk reversal:** **not ready and not accepted against real Gmail**; the design (P3) needs the reviewed mechanism in section 9, item 3.
 - Nothing here is a claim of production readiness.
 
 ## 13. Execution record (no personal data; counts and codes only)
@@ -143,5 +145,6 @@ Decision tree after a stop:
 | Incremental `mailbox sync` to refresh the expired checkpoint | passed | 2026-11-04 |
 | C single-message archive canary (temporary unmerged acceptance branch, bulk execution blocked) | **PASS**: one request, trusted post-read, owner-verified in Gmail | 2026-11-04 |
 | D1 single-message undo of the canary message (temporary unmerged acceptance branch, undo switch only, bulk reversal blocked; one request adding `INBOX`; trusted post-read `RESTORED`; owner-verified in Gmail) | **PASS** | 2026-11-05 |
-| D2 observation/reconciliation; bounded multi-message test | not run | n.a. |
-Observed deviations from the plan: a limited scan was possible only because no checkpoint existed; the checkpoint expires after 24 hours and was refreshed by `mailbox sync`; the write access token expires within an hour and needed `auth refresh-write` immediately before the run. The acceptance branch was deleted without merge. Current status of record: [MASTER-PLAN.md](MASTER-PLAN.md).
+| D2 read-only observation of the settled canary records (temporary unmerged acceptance branch, observation switch only; one profile read and one labels read per record; owner-run private script; every record matched the journal; no modification request, no local write) | **PASS** | 2026-11-05 |
+| D2b `UNKNOWN` reconciliation on real data; bounded multi-message test | not run | n.a. |
+Observed deviations from the plan (Phase D2): the reconcile commands act only on `UNKNOWN`/open items and none existed, so `cleanup exec recovery --reconcile` would not contact Gmail and `cleanup undo reconcile` answers NOTHING_TO_RECONCILE; the observation was therefore done with a private, read-only owner script over the existing observation mailbox (no repository code change). Other deviations: a limited scan was possible only because no checkpoint existed; the checkpoint expires after 24 hours and was refreshed by `mailbox sync`; the write access token expires within an hour and needed `auth refresh-write` immediately before the run. The acceptance branch was deleted without merge. Current status of record: [MASTER-PLAN.md](MASTER-PLAN.md).
