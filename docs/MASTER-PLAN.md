@@ -131,14 +131,26 @@ Dependencies are strict: an item cannot start before its predecessors pass their
 | P1 | Real single-message **Undo** acceptance (reuse #41) | 4 | M12 archive PASS, fresh checkpoint, write login | acceptance branch with only `LIVE_UNDO_ENABLED` change (plus bulk and archive kept blocked), reversal of the already-archived test message, independent Gmail verification, closeout | 2 sessions |
 | P2 | Real **Observation/reconcile** acceptance | 4 | P1 (a settled item to observe) | `LIVE_OBSERVE_ENABLED` branch, read-only observation of the restored message, zero mutation requests | 1-2 sessions |
 | P3 | Design and review of a bounded **multi-message test mechanism** (<= 25 dedicated messages, same hard protections) | 4 | P1 | design note, reviewed code change, synthetic tests; no live use | 3-4 sessions |
-| P4 | Real **bounded bulk archive** (up to 25 dedicated messages) | 4 | P3 and P2 | acceptance branch, 25 prepared test messages, per-slice phrases, post-checks | 2 sessions |
-| P5 | Real **bulk reversal** of that set (F5 thread rule) | 4 | P4 | reversal plan run, verification | 1-2 sessions |
+| P4 | Real **bounded bulk archive** (up to 25 dedicated messages); **in the v1.0 scope** | 4 | P3 and P2 | acceptance branch, 25 prepared test messages, per-slice phrases, post-checks | 2 sessions |
+| P5 | Real **bulk reversal** of that set (F5 thread rule); **in the v1.0 scope** | 4 | P4 | reversal plan run, verification | 1-2 sessions |
 | P6 | Operational hardening: token UX and Q8 publishing decision, F4 checkpoint routine, retention, backup/restore test, runbooks | 5 | P1 (informs) | doc and small code items, tested restore | 3-4 sessions |
-| P7 | Real-data dashboard and engine review (usability, performance, accessibility, recommendation quality) | 3, 2 | P0 | findings list, fixes | 3-5 sessions |
+| P7 | Real-data dashboard and engine review, with the measurable criteria and required evidence of section 6a | 3, 2 | P0 | evidence artifacts per item P7.1-P7.5, findings list, fixes | 3-5 sessions |
 | P8 | Packaging, install path and user guide | 5 | P6, P7 | documented install, refreshed guides | 2 sessions |
 | P9 | Final security audit of the release candidate and **v1.0 acceptance** | 5, 6 | P1-P8 | audit report, signed acceptance record, tagged release | 2-3 sessions |
 
 Indicative total: about 20-28 sessions, roughly 8-14 weeks at the current cadence. P7 and P6 can run in parallel with P3-P5. Real-Gmail items (P1, P2, P4, P5) each repeat the Phase A-C pattern of the acceptance plan (offline preflight, backup, fresh checkpoint, typed phrases, independent verification, branch deletion) and always need fresh written approvals.
+
+### 6a. P7 acceptance criteria (real-data review)
+**This section defines criteria and the evidence required. It records no measurements and no results; nothing here has been measured or passed.** Numerical thresholds are **proposals** that the owner confirms or changes in writing *before* P7 starts, so that results cannot be fitted to the criteria afterwards. Only counts, timings, pass/fail and index size class are recorded publicly; no addresses, subjects, message ids, label names or mailbox totals. The real index and the owner's labeled samples stay on the owner's machine.
+
+| Item | Criterion (measurable) | Method | Evidence required before marking accepted | Proposed threshold (owner confirms) |
+|---|---|---|---|---|
+| **P7.1 Dashboard usability on real data** | The owner completes a fixed task list unaided from the dashboard (find the largest sender domains, open each Cleanup tab, locate the open recovery item or confirm none, read the plan and execution status, switch language and theme, understand every empty/partial state) | scripted walkthrough of the task list on the real index, timed, notes on each friction point | signed checklist (task, done/not done, time, friction note), list of defects with severity, all Critical/High defects fixed and re-tested | all tasks completed without using the CLI; zero open Critical/High usability defects |
+| **P7.2 Recommendation quality and false positives** | For each recommendation family (cleanup discovery candidates, attention queue, subscription review, label recommendations) the owner reviews a random sample and classifies each item correct / acceptable / wrong; wrong items that are protected or important are false positives | sample of fixed size per family drawn by a documented seed from the real index; owner labels locally | per-family counts (sample size, correct, acceptable, wrong, false positives), seed and rule version recorded; every false positive triaged (rule fix, protection fix, or accepted limitation with explanation) | cleanup candidates: **zero** items the owner marks "must keep" in the sample (any such item is a Critical defect); other families: owner sets the minimum precision per family before sampling |
+| **P7.3 Performance on the real-size index** | Each dashboard screen and the heavy commands finish within bounds on the owner's real index (record only its size class, for example 10k-50k messages) | repeat each measurement at least 3 times cold and warm on the owner's Mac, record median and worst case; includes memory and database size | timing table (screen/command, cold, warm, worst), machine description, comparison to the thresholds, remediation notes for any miss | first load of any screen under 3 s cold and under 1 s warm; `cleanup discover` and `classify run` incremental under 60 s; no screen blocks the UI longer than 1 s |
+| **P7.4 Basic accessibility** | Full keyboard operation of every screen (tabs, tables, focus order, visible focus, no keyboard trap), sufficient contrast in light and dark, meaningful labels and captions, state not conveyed by color alone, usable at 320 px width | keyboard-only walkthrough of all screens; the existing automated contrast and structure tests; VoiceOver smoke test of three key screens; mobile-width check | checklist per screen with result, list of defects, automated test results, defects fixed or explicitly accepted by the owner | zero keyboard traps; zero open Critical/High accessibility defects; automated checks green |
+| **P7.5 Hebrew RTL correctness** | With Hebrew selected, layout, tables, tabs and charts mirror correctly; ids, hashes, dates and numbers keep readable direction; plural and placeholder text is correct; no untranslated key is visible | side-by-side English/Hebrew walkthrough of every screen on real-data states (including empty, partial, error); the existing i18n parity tests | checklist per screen, screenshots with all personal data masked or synthetic, i18n test results, defects fixed | zero visible raw keys; zero mirrored or garbled ids and numbers |
+**Marking rule:** an item is "accepted" only when its evidence artifact exists, the thresholds confirmed before the run were used, every Critical/High defect is closed, and the owner has signed it. A miss is recorded as a miss with a remediation plan, never edited away. P7 blocks P9.
 
 ## 7. Explicit security gates
 Each gate must be passed in writing by the owner before the next stage item may run. None is passed implicitly by merging code.
@@ -172,7 +184,9 @@ Order follows the critical path. "Existing issue" means reuse; new issues are pr
 | v2.0 | content-gated work | #24-#26, #30, #32 |
 
 ## 9. Version 1.0 Definition of Done
-v1.0 is a **personal, single-account, local-first** product. It is done when all of the following hold and the owner has signed the acceptance record:
+v1.0 is a **personal, single-account, local-first** product. It is done when all of the following hold and the owner has signed the acceptance record.
+
+**Scope control:** bounded bulk archive and bulk reversal (P3-P5) are part of the v1.0 critical path and of this Definition of Done (item 2). Nothing here records bulk as accepted: it has not passed real-Gmail acceptance. Deferring bulk out of v1.0 would require an explicit, recorded future owner decision **and** a matching edit of this Definition of Done (and of D-3); until both exist, bulk stays in scope.
 1. **Safety:** no code path can mutate Gmail without a typed owner confirmation; all mutation classes are limited to archive (remove `INBOX`) and undo (add `INBOX`); no Trash, deletion, send, draft, label creation or `batchModify` exists.
 2. **Real-Gmail acceptance passed** for: single-message archive (done), single-message undo, read-only observation/reconcile, bounded bulk archive (<= 25 dedicated messages) and its reversal; each with independent owner verification in Gmail.
 3. **Recovery:** UNKNOWN and CONFLICT outcomes are shown, never auto-retried, and a documented recovery runbook has been exercised at least in synthetic form and read-only observation in real form.
@@ -180,7 +194,7 @@ v1.0 is a **personal, single-account, local-first** product. It is done when all
 5. **Cost:** Zero Additional Cost verified (no billing account, no paid service or dependency).
 6. **Security:** final audit of the release candidate with no open Critical or High finding; dashboard boundary tests pass; secret scan clean; the gates in `main` are either `False` or deliberately enabled by a separate reviewed, approved change.
 7. **Quality:** full test suite green in CI for the tagged commit; documentation (user guide, runbook, security, decisions) consistent with behavior; known limitations listed (F4 audit-tail truncation, `gmail.modify` breadth F6, Testing-mode token expiry unless resolved).
-8. **Usability:** the owner has used the read-only dashboard and recommendations on the real mailbox for an agreed dogfooding period and accepted the results.
+8. **Usability and quality:** the P7 criteria of section 6a (usability, recommendation quality and false-positive review, performance on the real-size index, basic accessibility, Hebrew RTL) are accepted with their evidence, and the owner has used the read-only dashboard and recommendations on the real mailbox for an agreed dogfooding period and accepted the results.
 Explicitly **not** required for v1.0: content-based features, local semantic search, scheduled unattended analysis, label execution, multi-account.
 
 ## 10. Version 2.0 backlog (not started, each needs its own decision)
@@ -197,7 +211,7 @@ Explicitly **not** required for v1.0: content-based features, local semantic sea
 |---|---|---|---|
 | D-1 | OAuth app publishing status vs weekly token expiry (Q8) | P1+, P6 | owner |
 | D-2 | Approach for a bounded multi-message test set (P3) | P4 | owner + review |
-| D-3 | Whether v1.0 includes bulk archive or stops at single-message plus bounded batch | scope | owner |
+| D-3 | Deferring bulk archive/reversal out of v1.0 (default: **not deferred**, in scope; a deferral needs an explicit owner decision plus a Definition-of-Done edit) | scope | owner |
 | D-4 | Content-indexing scope (Q15) | v2.0 | owner |
 | D-5 | CI on pull requests (billing certainty, DEVELOPMENT.md) | P6, P9 | owner |
 | D-6 | Retention/purge policy (Q5) and audit-head checkpoint routine (F4) | P6 | owner |
@@ -227,10 +241,14 @@ These steps are recommendations; each GitHub change needs the owner's go-ahead.
 5. `REAL-GMAIL-ACCEPTANCE-PLAN.md` said "plan only"; added an execution record (Phases A, B1, B2, C done; D not run).
 6. `PRODUCT-ROADMAP.md` carries a banner that this file supersedes it for status.
 
+**Also corrected in the final review (second commit of this PR):**
+7. `README.md` now opens with a *Current status at a glance* table that separates the real archive acceptance (PASS) from undo, observation, bulk archive and bulk reversal (implemented, disabled, not accepted); the stale "never changes your mailbox", "write grant revoked", "no real Gmail access has occurred" and "Real Gmail acceptance has NOT occurred" statements were replaced.
+8. `ROADMAP.md` (M4 line), `ARCHITECTURE.md` (status header) and `SECURITY.md` (live-use bullet) carry the current status; `M4-CLOSEOUT.md` is marked a historical snapshot.
+9. `PRODUCT-ROADMAP.md` stays a historical design document: a prominent notice lists the outdated statement types, and the three paragraphs that read as current status are tagged "HISTORICAL snapshot, outdated". Its original scope and design text was not rewritten.
+
 **Remaining (proposed, not applied here):**
-- `PRODUCT-ROADMAP.md` section 1 baseline and section 6 "Proposed GitHub tracking (NOT created)" are outdated (the issues exist). Proposed fix: shrink section 1 to a pointer and rewrite section 6 as "created; see MASTER-PLAN section 3".
-- `M4-CLOSEOUT.md` and `ARCHITECTURE.md` state "the write grant was revoked": true at M4 closeout; the M12 acceptance created and then left a new write authorization stored locally. Proposed: add "as of 2026-11-04 a write authorization is stored locally; its Testing-mode refresh token expires in 7 days; revoke after use".
-- `SECURITY.md` section 8 (open items) should list F4, F6 and the Testing-mode expiry; check wording against `M12C-SECURITY-AUDIT.md`.
-- `DECISIONS.md`: add a D156 recording that the real archive acceptance used a temporary unmerged acceptance branch and that the personal account was used.
-- `docs/DEVELOPMENT.md` should link this file and describe the acceptance-branch pattern.
-- Milestone M7 remains open on GitHub (section 12).
+- `PRODUCT-ROADMAP.md` section 1 (baseline table) and the long section 6 text are still the original wording under their notices; a future edit could shrink them to pointers.
+- `SECURITY.md` section 8 (open items) should list F4, F6 and the Testing-mode token expiry; check wording against `M12C-SECURITY-AUDIT.md`.
+- `DECISIONS.md`: add D156 recording that the real archive acceptance used a temporary unmerged acceptance branch and the personal account.
+- `DEVELOPMENT.md` should link this file and describe the acceptance-branch pattern.
+- Milestone M7 remains open on GitHub (section 12); no GitHub change was made in this PR.
