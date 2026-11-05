@@ -1,5 +1,7 @@
 # M4 closeout: Safe Cleanup (reduced scope)
 
+> **Historical snapshot of the M4 closeout.** Later work (M12) implemented undo, observation and bounded bulk execution (all disabled) and a second real archive acceptance passed on 2026-11-04. Current status: [MASTER-PLAN.md](MASTER-PLAN.md).
+
 **Status: the owner-approved reduced M4 scope is complete.** One real, single-message, archive-only Gmail canary was executed once under the owner's explicit approval and
 succeeded. Live execution is disabled again (`LIVE_EXECUTION_ENABLED = False`, a source constant nothing changes), the write grant was revoked and the local write token removed.
 **Real Gmail undo is NOT implemented; it is explicitly deferred.** Any further live use needs a new, separate owner approval.
