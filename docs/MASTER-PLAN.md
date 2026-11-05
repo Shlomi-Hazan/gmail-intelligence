@@ -52,8 +52,8 @@ A capability is never described by one word. Each is tracked on four independent
 - **Gate:** G3.
 
 ### Stage 4 — Safe Live Operations
-- **Done:** M4 archive-only write boundary, immutable plans, typed approvals, durable intent, independent post-read, executor, recovery; M12C archive undo, read-only observation and reconciliation (both IMPL+SYNTH, gates off); M12D bounded bulk archive and bulk reversal (IMPL+SYNTH, gate off); **REAL: two single-message archive canaries on the personal account (M4, 2026-10; M12 acceptance, 2026-11-04, PASS, section 5).**
-- **Remaining (critical path):** real single-message **Undo** (issue #41), real **Observation/reconcile**, a fixed bounded multi-message test mechanism (the canary exception covers exactly one message), real **bounded bulk archive** (up to 25 dedicated messages) and **bulk reversal**, write-token usability decisions, audit-tail checkpoint routine (F4). Trash/untrash, deletion, `batchModify` and any other mutation class are **out of scope for v1.0**.
+- **Done:** M4 archive-only write boundary, immutable plans, typed approvals, durable intent, independent post-read, executor, recovery; M12C archive undo, read-only observation and reconciliation (both IMPL+SYNTH, gates off); M12D bounded bulk archive and bulk reversal (IMPL+SYNTH, gate off); **REAL: two single-message archive canaries on the personal account (M4, 2026-10; M12 acceptance, 2026-11-04, PASS) and one single-message undo (P1, 2026-11-05, PASS); section 5.**
+- **Remaining (critical path):** ~~real single-message Undo~~ (done, P1 PASS 2026-11-05), real **Observation/reconcile**, a fixed bounded multi-message test mechanism (the canary exception covers exactly one message), real **bounded bulk archive** (up to 25 dedicated messages) and **bulk reversal**, write-token usability decisions, audit-tail checkpoint routine (F4). Trash/untrash, deletion, `batchModify` and any other mutation class are **out of scope for v1.0**.
 - **Gate:** G4 (the most important), per-capability sub-gates G4a-G4d.
 
 ### Stage 5 — Product Hardening
@@ -92,7 +92,7 @@ History is preserved: milestone and issue numbers do not change.
 | M11B semantic search | 7 | content-gated | #32 |
 | M12A discovery | 2 | Y / Y / not run on real data | #59, PR #64 |
 | M12B review and approval | 2, 4 | Y / Y / canary plan lifecycle only (group preview not run) | #60, PR #65 |
-| M12C recovery, undo, observation, audit | 4 | Y / Y / **not yet** (undo, observation) | #61, PRs #66-#69 |
+| M12C recovery, undo, observation, audit | 4 | Y / Y / single-message undo **PASS (2026-11-05)**; observation **not yet** | #61, PRs #66-#69 |
 | M12D bounded bulk and bulk reversal | 4 | Y / Y / **not yet** | #62, PR #70 |
 | M12E cleanup experience | 3 | Y / Y / synthetic browser only | #63, PR #71 |
 | Real Gmail acceptance plan | 4 | plan merged; Phases A, B1, B2, C executed | PR #72, [REAL-GMAIL-ACCEPTANCE-PLAN.md](REAL-GMAIL-ACCEPTANCE-PLAN.md) |
@@ -110,7 +110,7 @@ History is preserved: milestone and issue numbers do not change.
 | Cleanup discovery, review, plans, approvals, audit | Y | Y | Y (one real plan, review, approval) | no |
 | Archive execution, one message (canary) | Y | Y | **Y (M4, M12 acceptance)** | **single-message scope: PASS (section 5)** |
 | Bounded bulk archive | Y | Y | no | no |
-| Archive undo (single item) | Y | Y | no | no |
+| Archive undo (single item) | Y | Y | **Y (P1, 2026-11-05)** | **single-message scope: PASS (section 5)** |
 | Bulk reversal | Y | Y | no | no |
 | Live observation / reconciliation | Y | Y | no | no |
 | Recovery status (local, read-only) | Y | Y | Y (read-only status on real journal) | no |
@@ -120,7 +120,9 @@ History is preserved: milestone and issue numbers do not change.
 ## 5. Acceptance results to date
 **M12 single-message archive acceptance: PASS (2026-11-04).** Scope: exactly one dedicated test message in the owner's personal account, sent from a different address; planned with the narrow canary exception; plan, review and approval typed by the owner; one archive request removing `INBOX` only; independent post-read recorded as trusted evidence; execution `EXECUTED`, one item `APPLIED`, zero `UNKNOWN`/`CONFLICT`; audit chain intact; the owner independently confirmed in Gmail that the message left the Inbox, remained in All Mail and that no other label changed, and that the command reported one archive request. Evidence is the owner's confirmation plus local journal and audit log (never published). Run from a temporary local acceptance branch that was deleted and never merged; `main` kept all gates `False`.
 
-What this does **not** show: Undo, Observation, bulk archive, bulk reversal and any multi-message behavior have **not** passed real-Gmail acceptance. The acceptance test message remains archived until the Undo acceptance restores it. This result does not make the product production-ready.
+**P1 single-message undo acceptance: PASS (2026-11-05).** Scope: the same dedicated test message, restored by exactly one owner-authorized request that adds `INBOX` back (per-item undo, `LIVE_UNDO_ENABLED` enabled only in a temporary local acceptance branch, bulk reversal and archive blocked, never pushed or merged, deleted afterwards). Local journal: `UNDO_AUTHORIZED`, one `UNDO_INTENT`, `UNDO_RESULT = RESTORED` with trusted-adapter post-read evidence; no `UNKNOWN`/`CONFLICT`; audit chain and database integrity intact; the original archive record was not changed. The owner independently confirmed in Gmail that the message is back in the Inbox. No sync checkpoint was needed (the undo path does not use one). Evidence is the owner's confirmation plus the local journal (never published).
+
+What these two results do **not** show: read-only observation/reconciliation, bounded bulk archive, bulk reversal and any multi-message behavior have **not** passed real-Gmail acceptance. This does not make the product production-ready.
 
 ## 6. Critical path to v1.0
 Dependencies are strict: an item cannot start before its predecessors pass their gate. Estimates are **indicative owner-approved working sessions** (one session is one approved block of work with review), not commitments; elapsed time depends on review turnaround.
@@ -128,7 +130,7 @@ Dependencies are strict: an item cannot start before its predecessors pass their
 | # | Item | Stage | Depends on | Deliverables | Estimate |
 |---|---|---|---|---|---|
 | P0 | Merge this master plan and focused doc corrections; recommended issue structure (section 12) | 0 | none | MASTER-PLAN.md, corrected docs | 1 session |
-| P1 | Real single-message **Undo** acceptance (reuse #41) | 4 | M12 archive PASS, fresh checkpoint, write login | acceptance branch with only `LIVE_UNDO_ENABLED` change (plus bulk and archive kept blocked), reversal of the already-archived test message, independent Gmail verification, closeout | 2 sessions |
+| P1 | **DONE, PASS 2026-11-05.** Real single-message **Undo** acceptance (reuse #41) | 4 | M12 archive PASS, fresh checkpoint, write login | acceptance branch with only `LIVE_UNDO_ENABLED` change (plus bulk and archive kept blocked), reversal of the already-archived test message, independent Gmail verification, closeout | 2 sessions |
 | P2 | Real **Observation/reconcile** acceptance | 4 | P1 (a settled item to observe) | `LIVE_OBSERVE_ENABLED` branch, read-only observation of the restored message, zero mutation requests | 1-2 sessions |
 | P3 | Design and review of a bounded **multi-message test mechanism** (<= 25 dedicated messages, same hard protections) | 4 | P1 | design note, reviewed code change, synthetic tests; no live use | 3-4 sessions |
 | P4 | Real **bounded bulk archive** (up to 25 dedicated messages); **in the v1.0 scope** | 4 | P3 and P2 | acceptance branch, 25 prepared test messages, per-slice phrases, post-checks | 2 sessions |
@@ -188,7 +190,7 @@ v1.0 is a **personal, single-account, local-first** product. It is done when all
 
 **Scope control:** bounded bulk archive and bulk reversal (P3-P5) are part of the v1.0 critical path and of this Definition of Done (item 2). Nothing here records bulk as accepted: it has not passed real-Gmail acceptance. Deferring bulk out of v1.0 would require an explicit, recorded future owner decision **and** a matching edit of this Definition of Done (and of D-3); until both exist, bulk stays in scope.
 1. **Safety:** no code path can mutate Gmail without a typed owner confirmation; all mutation classes are limited to archive (remove `INBOX`) and undo (add `INBOX`); no Trash, deletion, send, draft, label creation or `batchModify` exists.
-2. **Real-Gmail acceptance passed** for: single-message archive (done), single-message undo, read-only observation/reconcile, bounded bulk archive (<= 25 dedicated messages) and its reversal; each with independent owner verification in Gmail.
+2. **Real-Gmail acceptance passed** for: single-message archive (done 2026-11-04), single-message undo (done 2026-11-05), read-only observation/reconcile, bounded bulk archive (<= 25 dedicated messages) and its reversal; each with independent owner verification in Gmail.
 3. **Recovery:** UNKNOWN and CONFLICT outcomes are shown, never auto-retried, and a documented recovery runbook has been exercised at least in synthetic form and read-only observation in real form.
 4. **Privacy:** metadata-only index (no subjects, snippets, bodies, recipients, attachment content); nothing personal in the repository, CI logs or issues; backups private.
 5. **Cost:** Zero Additional Cost verified (no billing account, no paid service or dependency).
@@ -219,7 +221,7 @@ Explicitly **not** required for v1.0: content-based features, local semantic sea
 | D-8 | Packaging form (venv vs installer) | P8 | owner |
 | B-1 | Real Undo/Observation untested: no ordinary use of those paths | v1.0 | resolved by P1-P2 |
 | B-2 | M7 milestone still open although all its issues are closed; M7 scheduling is the only deferred part | tracking | see section 12 |
-| B-3 | The acceptance test message remains archived | P1 | resolved by P1 |
+| B-3 | The acceptance test message remained archived | P1 | **resolved: restored to the Inbox (P1, 2026-11-05)** |
 | B-4 | The write authorization created for the acceptance is still stored locally (its access token expires within the hour, the Testing-mode refresh token after 7 days); the owner decides to revoke now (`auth revoke-write`) or keep it for P1 | security hygiene | owner, before P1 |
 
 ## 12. Recommended minimal GitHub structure (not created in this change)
