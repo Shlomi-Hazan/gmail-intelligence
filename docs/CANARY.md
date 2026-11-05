@@ -68,7 +68,7 @@ slice, and any execution without the owner's recorded `CANARY_CONFIRMED`. Recove
 separated: `describe` and `plan` are LOCAL (the index only: no Gmail, no OAuth, no Keychain, no network, no mailbox change) and work while `LIVE_EXECUTION_ENABLED` is `False`, because
 nothing can be executed without the switch; `plan` still needs the typed phrase and the plan still needs the ordinary review and approval. `run` is execution: while the switch is `False` it
 refuses right after the arguments are parsed, before the index, a reservation or any credential store. The account is always explicit, only counts and codes are printed, and there is no
-environment or configuration path. (Opening the real index with this build upgrades a v4 index to v5 after an automatic verified backup, like every other command; back it up first.)
+environment or configuration path. (Since D146 an older index is never upgraded implicitly: run `index upgrade` explicitly, which makes a verified private backup first; back the index up before any live step. Plan creation, review, approval, reservation and execution also require a fresh sync checkpoint, at most 24 hours old: a completed full scan or `mailbox sync`.)
 
 **Eventual sequence (each step needs the owner's separate approval; none is done):**
 Steps 1-5 are local and need NO live switch; only step 7 does.

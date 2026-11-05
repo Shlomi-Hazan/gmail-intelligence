@@ -1,5 +1,7 @@
 # Roadmap
 
+> **Status authority:** [MASTER-PLAN.md](MASTER-PLAN.md) consolidates this roadmap into eight stages and is the source for current status. This file keeps the historical milestone list.
+
 No dates are assigned. Everything below M0A is **future** and requires approval to start.
 
 - **M0 — Foundation & Security** (M0A bootstrap: done; M0B architecture/security/workflow: merged in private archive PR #11; M0C Python foundation, tests, Skills: merged in private archive PR #13). **M0-M2 are complete.**
@@ -21,7 +23,7 @@ and security boundaries, acceptance criteria and the proposed GitHub tracking ar
 - **M10 — Attachment Intelligence** (new): attachment metadata, receipts and invoices, duplicates, search; content analysis only with explicit per-item permission and never sent to external AI; no bulk download.
 - **M11 — Ask Your Inbox** (new; **M11A merged**: deterministic metadata question answering, `mailbox ask`; M11A dashboard integration, M11B and content-gated work deferred): natural-language, source-linked, evidence-based questions over the local index with uncertainty handling, prompt-injection defenses and no Gmail side effects; free local inference only.
 
-- **M12 — Smart Bulk Cleanup** (new; **immediate product priority**, expands M4): read-only cleanup discovery (M12A, merged), review and approval (M12B, merged: local review and plan creation only, nothing executes), recovery and safety (M12C, with the M4 follow-ups of issue #41; M12C.1, a local read-only execution recovery status, is merged; M12C.3, the archive-undo infrastructure, is merged but DISABLED; M12C.4, read-only live observation for recovery/reconciliation plus the consolidated security audit, is merged and also DISABLED), controlled bulk execution (M12D, in development: implemented but DISABLED, with bulk reversal plans), controlled bulk execution (M12D, archive-only first) and the dashboard experience (M12E, in development: the read-only Cleanup area, [CLEANUP-DASHBOARD.md](CLEANUP-DASHBOARD.md)). No live execution, Trash or permanent deletion without separate owner authorization. See [PRODUCT-ROADMAP.md](PRODUCT-ROADMAP.md).
+- **M12 — Smart Bulk Cleanup** (new; expands M4): M12A discovery, M12B review and approval, M12C recovery/undo/observation/security audit, M12D bounded bulk archive and bulk reversal and M12E the read-only Cleanup dashboard are **all merged** (issues #59-#63 closed), verified with synthetic data; undo, observation and bulk execution remain **implemented but DISABLED** and have **not** passed real-Gmail acceptance. A second real single-message archive acceptance (2026-11-04) PASSED; see [MASTER-PLAN.md](MASTER-PLAN.md) section 5 and [REAL-GMAIL-ACCEPTANCE-PLAN.md](REAL-GMAIL-ACCEPTANCE-PLAN.md). No Trash or permanent deletion exists.
 
 Suggested build order (not binding; M12 is now the immediate priority): finish M4, then M7, then M6A/M5A-M5C, then M9A/M8A, then the content-indexing decision, then the content-gated parts, with M11 last. The original numbering is kept for continuity.
 
