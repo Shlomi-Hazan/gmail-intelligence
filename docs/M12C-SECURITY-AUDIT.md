@@ -1,5 +1,7 @@
 # M12C consolidated security audit (M4 + M12C.1-M12C.4)
 
+> **Update 2026-11-05 (status of record: [MASTER-PLAN.md](MASTER-PLAN.md)):** the statements below describe the state when this document was written. Since then the single-message undo and read-only observation of settled records passed real-Gmail acceptance (P1, P2); `UNKNOWN` reconciliation, bounded bulk archive and bulk reversal have not.
+
 Issues #61 and #41. Scope: the finished M4 execution/recovery stack plus the M12C additions (archive undo, read-only observation, token renewal). Method: code reading of the policy, transport, adapter, executor, recovery, undo, audit, credential and CLI layers; the existing and new guard/regression tests; synthetic end-to-end scenarios over a fake Gmail wire. **Nothing was exercised against real Gmail, OAuth or the Keychain.** This audit is advisory evidence for the owner's decision, not a certification; in-process guards are barriers against mistakes and ordinary callers, not against code running in the same process.
 
 Severity: Critical / High (exploitable or wrong mutation) / Medium / Low / Info. **Result: no Critical or High finding.** Two Low findings were fixed in this change; the rest are accepted limitations or recommendations.
